@@ -1,0 +1,25 @@
+[Unit]
+Description=MyNAS private API
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rbp
+Group=rbp
+Environment=MYNAS_ENV=production
+Environment=MYNAS_ROOT=/mnt/nas
+Environment=MYNAS_DATA_DIR=/home/rbp/.local/share/mynas
+Environment=MYNAS_LISTEN=127.0.0.1:8080
+Environment=MYNAS_WEB_DIR=/opt/mynas/current/web
+EnvironmentFile=/etc/mynas/mynas.env
+ExecStart=/opt/mynas/current/mynas
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ReadWritePaths=/mnt/nas/.mynas /home/rbp/.local/share/mynas
+
+[Install]
+WantedBy=multi-user.target

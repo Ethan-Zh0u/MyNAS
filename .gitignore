@@ -1,0 +1,15 @@
+frontend/node_modules/
+frontend/dist/
+.tools/
+.cache/
+.dev-state/
+backend/mynas
+backend/mynas-linux-arm64
+dev-data/
+.env
+*.db
+*.log
+*.pcap
+*-netlog.json
+.edge-test-*/
+.chrome-test-*/

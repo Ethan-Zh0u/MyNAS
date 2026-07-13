@@ -1,0 +1,27 @@
+{
+  "name": "mynas-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --configLoader runner",
+    "build": "tsc --noEmit && vite build --configLoader runner",
+    "test": "vitest run --configLoader runner",
+    "lint": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@fontsource/barlow-condensed": "^5.2.8",
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "jsdom": "latest",
+    "vitest": "latest"
+  }
+}
