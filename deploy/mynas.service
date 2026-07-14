@@ -12,6 +12,7 @@ Environment=MYNAS_ROOT=/mnt/nas
 Environment=MYNAS_DATA_DIR=/home/rbp/.local/share/mynas
 Environment=MYNAS_LISTEN=127.0.0.1:8080
 Environment=MYNAS_WEB_DIR=/opt/mynas/current/web
+Environment=MYNAS_VOLUMES_FILE=/etc/mynas/volumes.json
 EnvironmentFile=/etc/mynas/mynas.env
 ExecStart=/opt/mynas/current/mynas
 Restart=on-failure
@@ -19,7 +20,7 @@ RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
-ReadWritePaths=/mnt/nas/.mynas /home/rbp/.local/share/mynas
+ReadWritePaths=/mnt/nas /mnt/mynas /home/rbp/.local/share/mynas
 
 [Install]
 WantedBy=multi-user.target

@@ -11,7 +11,15 @@ tailscale serve status
 
 当前私有入口：`https://rsp.tail681937.ts.net/`。后端仅监听 `127.0.0.1:8080`，浏览器身份由 Tailscale Serve 注入。
 
-部署前会确认 `/dev/sda1 ntfs3 /mnt/nas`；不会修改 `/etc/fstab` 或 Samba。服务以 `rbp` 身份运行，应用数据为 `/home/rbp/.local/share/mynas`。
+部署前会确认现有主盘 `/mnt/nas` 已挂载。服务以 `rbp` 身份运行，应用数据为 `/home/rbp/.local/share/mynas`。新增硬盘使用 `sudo mynas-setup` 接入；向导会备份 `/etc/fstab`、按 UUID 挂载到 `/mnt/mynas/<volume-id>`，并更新 `/etc/mynas/volumes.json`，但不会修改 Samba 配置。
+
+## 接入新硬盘
+
+```bash
+sudo mynas-setup
+```
+
+向导支持 `ext4`、`NTFS3` 和 `exFAT`。已有文件系统默认无损接入；空白盘格式化前必须输入完整的 `ERASE /dev/...` 确认文字。完成后向导会验证 `rbp` 用户写入权限并重启 MyNAS。
 
 ## 回滚
 

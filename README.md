@@ -4,13 +4,16 @@ MyNAS 是一个基于树莓派和机械硬盘开发的个人 NAS 管理系统，
 
 项目长期目标是发展成面向通用树莓派和外接硬盘的版本，让用户拿到一台新的树莓派和一块硬盘后，可以通过标准化安装脚本快速部署整套 MyNAS 管理系统，而不必手工拼装每个服务。
 
-> 当前项目仍处于早期开发阶段，版本为 **v0.1.0**，尚不建议把它作为唯一的数据管理工具。
+> 当前项目仍处于早期开发阶段，版本为 **v0.2.0**，尚不建议把它作为唯一的数据管理工具。
 
-## 当前状态与已知问题
+第一次接触树莓派和硬盘？请从 [MyNAS 新手安装与接线指南](docs/BEGINNER_GUIDE.md) 开始。指南包含路由器网线、树莓派 SSH、Tailscale、硬盘盒供电、硬盘接入和网页首次连接的完整流程。
 
-- 已具备文件浏览、上传、下载、文件操作、磁盘状态和审计记录等基础能力。
-- 首页文件夹的快速操作按钮存在尺寸不一致的问题，尚待修复。
-- 当前部署流程仍与本项目使用的树莓派、硬盘挂载点和 Tailscale 网络配置有关，还不是开箱即用的通用安装程序。
+## 当前状态
+
+- 已具备多硬盘容量展示、文件浏览、上传、下载、跨盘文件操作、回收站和审计记录。
+- 支持硬盘接入向导、硬盘重命名、多 MyNAS 设备管理以及设备自定义名称。
+- 提供中文/英文界面、深色主题、目录返回按钮和 Windows/macOS/Linux 首次连接说明。
+- 当前树莓派端首次部署仍与维护者的设备配置有关，还不是开箱即用的通用安装程序；不要把维护者部署命令直接用于未知设备。
 
 ## 计划中的方向
 
@@ -62,10 +65,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\scripts\stop-lo
 
 ## 安全边界
 
-- 所有用户路径被限制在 `/mnt/nas`；拒绝穿越、符号链接逃逸、`.mynas`、`$RECYCLE.BIN`、`System Volume Information`。
+- 所有用户路径被限制在已注册卷的挂载点（现有主盘 `/mnt/nas`，新增盘 `/mnt/mynas/<volume-id>`）；每次请求都显式绑定卷 ID，并拒绝穿越、符号链接逃逸、`.mynas`、`$RECYCLE.BIN`、`System Volume Information`。
 - 生产 API 仅信任 Tailscale Serve 注入的身份头，且只监听 `127.0.0.1`。
 - 修改请求要求 `X-MyNAS-Request: 1`，CORS 仅允许 Pages 地址和 localhost。
-- SQLite 审计数据库存放于 `/home/rbp/.local/share/mynas`；NAS 隐藏服务文件仅在 `/mnt/nas/.mynas`。
+- SQLite 审计数据库存放于 `/home/rbp/.local/share/mynas`；每块硬盘拥有独立的 `.mynas/staging` 和 `.mynas/trash`。
 
 ## 树莓派部署
 
@@ -73,7 +76,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\scripts\stop-lo
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\deploy\deploy.ps1 -PagesOrigin https://mynas-rsp.pages.dev
 ```
 
-部署使用 `/opt/mynas/releases/<UTC时间>/` 版本目录和 `/opt/mynas/current` 原子链接；不会修改 `/etc/fstab` 或 Samba 配置。
+部署使用 `/opt/mynas/releases/<UTC时间>/` 版本目录和 `/opt/mynas/current` 原子链接。部署后可在树莓派终端运行半图形化接盘向导：
+
+```bash
+sudo mynas-setup
+```
+
+向导自动排除系统盘，支持保留已有 `ext4`、`NTFS3`、`exFAT` 数据接入，也支持对空白硬盘进行明确确认后的初始化。只有该向导会临时以 root 权限备份并更新 `/etc/fstab`；日常 MyNAS 服务仍以 `rbp` 用户运行。新增硬盘按文件系统 UUID 挂载到 `/mnt/mynas/<volume-id>`，注册信息写入 `/etc/mynas/volumes.json`。
 
 ## 版本记录
 

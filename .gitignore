@@ -5,6 +5,7 @@ frontend/dist/
 .dev-state/
 backend/mynas
 backend/mynas-linux-arm64
+backend/mynas-setup-linux-arm64
 dev-data/
 .env
 *.db

@@ -31,9 +31,11 @@ try {
     $env:GOOS = 'linux'; $env:GOARCH = 'arm64'; $env:CGO_ENABLED = '0'
     & $go build -buildvcs=false -trimpath -ldflags='-s -w' -o mynas-linux-arm64 .
     if ($LASTEXITCODE -ne 0) { throw 'Linux ARM64 backend build failed' }
+    & $go build -buildvcs=false -trimpath -ldflags='-s -w' -o mynas-setup-linux-arm64 .\cmd\mynas-setup
+    if ($LASTEXITCODE -ne 0) { throw 'Linux ARM64 setup wizard build failed' }
 } finally {
     foreach ($name in 'GOOS', 'GOARCH', 'CGO_ENABLED') { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
     Pop-Location
 }
 
-Write-Host 'MyNAS tests and Windows/Linux ARM64 production builds completed.'
+Write-Host 'MyNAS tests, server builds, and Linux ARM64 setup wizard completed.'

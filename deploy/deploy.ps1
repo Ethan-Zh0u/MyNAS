@@ -21,6 +21,7 @@ if ($PagesOrigin -and -not [Uri]::IsWellFormedUriString($PagesOrigin, [UriKind]:
 
 Invoke-NativeRetry 'remote preflight' { ssh @sshOptions $remote "set -eu; findmnt -no SOURCE,FSTYPE,TARGET /mnt/nas; df -h /mnt/nas; systemctl is-active --quiet smbd; mkdir -p '$release/web'" }
 Invoke-NativeRetry 'backend upload' { scp @sshOptions (Join-Path $root 'backend\mynas-linux-arm64') "$remote`:$release/mynas" }
+Invoke-NativeRetry 'setup wizard upload' { scp @sshOptions (Join-Path $root 'backend\mynas-setup-linux-arm64') "$remote`:$release/mynas-setup" }
 Invoke-NativeRetry 'deployment files upload' { scp @sshOptions (Join-Path $root 'deploy\mynas.service') (Join-Path $root 'deploy\install-pi.sh') "$remote`:$release/" }
 $webArchive = Join-Path $root '.dev-state\frontend-dist.tar'
 if (Test-Path $webArchive) { Remove-Item -LiteralPath $webArchive -Force }
@@ -34,5 +35,5 @@ $content = "MYNAS_ALLOWED_ORIGIN=$PagesOrigin`nMYNAS_PRIVATE_ORIGIN=https://rsp.
 [IO.File]::WriteAllText($envFile, $content, [Text.UTF8Encoding]::new($false))
 try { Invoke-NativeRetry 'environment upload' { scp @sshOptions $envFile "$remote`:$release/mynas.env" } } finally { Remove-Item -LiteralPath $envFile -Force -ErrorAction SilentlyContinue }
 
-Invoke-NativeRetry 'remote installation' { ssh @sshOptions $remote "set -eu; chmod +x '$release/mynas' '$release/install-pi.sh'; bash '$release/install-pi.sh' '$release'; sudo tailscale serve --bg --yes 127.0.0.1:8080; tailscale serve status; systemctl --no-pager --full status mynas" }
+Invoke-NativeRetry 'remote installation' { ssh @sshOptions $remote "set -eu; chmod +x '$release/mynas' '$release/mynas-setup' '$release/install-pi.sh'; bash '$release/install-pi.sh' '$release'; sudo tailscale serve --bg --yes 127.0.0.1:8080; tailscale serve status; systemctl --no-pager --full status mynas" }
 Write-Host "Deployment completed. Temporary release directory: $release"

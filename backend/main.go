@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +48,7 @@ type User struct {
 type Entry struct {
 	Name      string    `json:"name"`
 	Path      string    `json:"path"`
+	VolumeID  string    `json:"volumeId"`
 	Type      string    `json:"type"`
 	Size      int64     `json:"size"`
 	Modified  time.Time `json:"modified"`
@@ -56,6 +56,7 @@ type Entry struct {
 }
 type upload struct {
 	ID       string `json:"id"`
+	VolumeID string `json:"volumeId"`
 	Target   string `json:"target"`
 	Stage    string `json:"stage"`
 	Name     string `json:"name"`
@@ -87,6 +88,15 @@ func main() {
 	if err = a.migrate(); err != nil {
 		log.Fatal(err)
 	}
+	if err = a.seedPrimaryVolume(); err != nil {
+		log.Fatal(err)
+	}
+	if err = a.loadConfiguredVolumes(); err != nil {
+		log.Fatal(err)
+	}
+	if err = a.ensureRegisteredVolumeDirs(); err != nil {
+		log.Fatal(err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", a.health)
 	mux.HandleFunc("/api/v1/events", a.events)
@@ -98,6 +108,8 @@ func main() {
 	mux.HandleFunc("/api/v1/uploads/", a.uploadByID)
 	mux.HandleFunc("/api/v1/trash", a.trash)
 	mux.HandleFunc("/api/v1/disk", a.disk)
+	mux.HandleFunc("/api/v1/volumes", a.volumes)
+	mux.HandleFunc("/api/v1/volumes/candidates", a.volumeCandidates)
 	if web := os.Getenv("MYNAS_WEB_DIR"); web != "" {
 		mux.Handle("/", spa(web))
 	}
@@ -117,8 +129,14 @@ func env(k, d string) string {
 	return d
 }
 func (a *App) migrate() error {
-	_, e := a.db.Exec(`CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,target TEXT,stage TEXT,name TEXT,status TEXT,size INTEGER,received INTEGER,updated TEXT);CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,at TEXT,user_login TEXT,action TEXT,path TEXT,detail TEXT);`)
-	return e
+	_, e := a.db.Exec(`CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,target TEXT,stage TEXT,name TEXT,status TEXT,size INTEGER,received INTEGER,updated TEXT);CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,at TEXT,user_login TEXT,action TEXT,path TEXT,detail TEXT);CREATE TABLE IF NOT EXISTS volumes(id TEXT PRIMARY KEY,name TEXT NOT NULL,uuid TEXT UNIQUE,device TEXT NOT NULL,filesystem TEXT NOT NULL,mount TEXT NOT NULL UNIQUE,enabled INTEGER NOT NULL DEFAULT 1,created TEXT NOT NULL);`)
+	if e != nil {
+		return e
+	}
+	if _, e = a.db.Exec("ALTER TABLE uploads ADD COLUMN volume_id TEXT NOT NULL DEFAULT 'primary'"); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
+		return e
+	}
+	return nil
 }
 func (a *App) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,43 +230,10 @@ func cleanName(n string) (string, error) {
 	return n, nil
 }
 func (a *App) path(rel string, write bool) (string, error) {
-	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
-	if rel == "" {
-		return a.c.Root, nil
+	if a.db == nil {
+		return resolveWithin(a.c.Root, rel, write)
 	}
-	if strings.Contains(rel, "..") {
-		for _, p := range strings.Split(rel, "/") {
-			if p == ".." {
-				return "", errors.New("path traversal")
-			}
-		}
-	}
-	for _, p := range strings.Split(rel, "/") {
-		if p == ".mynas" || p == "$RECYCLE.BIN" || p == "System Volume Information" {
-			return "", errors.New("protected path")
-		}
-	}
-	p := filepath.Join(a.c.Root, filepath.FromSlash(rel))
-	root, err := filepath.EvalSymlinks(a.c.Root)
-	if err != nil {
-		return "", err
-	}
-	base := p
-	if !write {
-		base, err = filepath.EvalSymlinks(p)
-		if err != nil {
-			return "", err
-		}
-	} else {
-		base, err = filepath.EvalSymlinks(filepath.Dir(p))
-		if err != nil {
-			return "", err
-		}
-	}
-	if base != root && !strings.HasPrefix(base, root+string(os.PathSeparator)) {
-		return "", errors.New("symlink escape")
-	}
-	return p, nil
+	return a.pathFor("primary", rel, write)
 }
 func relative(root, p string) string { x, _ := filepath.Rel(root, p); return filepath.ToSlash(x) }
 func (a *App) audit(r *http.Request, act, p, detail string) {
@@ -267,7 +252,7 @@ func (a *App) emit(v any) {
 }
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	u, _ := a.user(r)
-	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.1.0"})
+	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.2.0"})
 }
 func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -299,7 +284,11 @@ func (a *App) files(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel := r.URL.Query().Get("path")
-	p, e := a.path(rel, false)
+	volumeID := r.URL.Query().Get("volumeId")
+	if volumeID == "" {
+		volumeID = "primary"
+	}
+	p, e := a.pathFor(volumeID, rel, false)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
@@ -319,7 +308,7 @@ func (a *App) files(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		typ := kind(d.Name(), d.IsDir())
-		out = append(out, Entry{d.Name(), filepath.ToSlash(filepath.Join(rel, d.Name())), typ, i.Size(), i.ModTime(), a.thumbnailExists(rel, d.Name(), typ)})
+		out = append(out, Entry{Name: d.Name(), Path: filepath.ToSlash(filepath.Join(rel, d.Name())), VolumeID: volumeID, Type: typ, Size: i.Size(), Modified: i.ModTime(), Thumbnail: a.thumbnailExists(volumeID, rel, d.Name(), typ)})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Type == "folder" && out[j].Type != "folder" {
@@ -330,7 +319,7 @@ func (a *App) files(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	writeJSON(w, map[string]any{"path": rel, "items": out})
+	writeJSON(w, map[string]any{"volumeId": volumeID, "path": rel, "items": out})
 }
 func kind(n string, dir bool) string {
 	if dir {
@@ -351,7 +340,7 @@ func (a *App) folder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", 405)
 		return
 	}
-	var v struct{ Path, Name string }
+	var v struct{ Path, Name, VolumeID string }
 	if e := readJSON(r, &v); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
@@ -361,7 +350,7 @@ func (a *App) folder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	parent, e := a.path(v.Path, false)
+	parent, e := a.pathFor(v.VolumeID, v.Path, false)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
@@ -370,13 +359,13 @@ func (a *App) folder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 409)
 		return
 	}
-	a.audit(r, "mkdir", filepath.Join(v.Path, n), "")
+	a.audit(r, "mkdir", filepath.Join(v.Path, n), "volume="+defaultVolumeID(v.VolumeID))
 	a.emit(map[string]string{"type": "files"})
 	w.WriteHeader(201)
 }
 func (a *App) fileByPath(w http.ResponseWriter, r *http.Request) {
 	rel := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
-	p, e := a.path(rel, false)
+	p, e := a.pathFor(r.URL.Query().Get("volumeId"), rel, false)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
@@ -410,19 +399,21 @@ func (a *App) operations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", 405)
 		return
 	}
-	var v struct{ Action, From, To, Conflict string }
+	var v struct{ Action, From, To, Conflict, FromVolumeID, ToVolumeID string }
 	if e := readJSON(r, &v); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	src, e := a.path(v.From, false)
+	fromVolumeID := defaultVolumeID(v.FromVolumeID)
+	toVolumeID := defaultVolumeID(v.ToVolumeID)
+	src, e := a.pathFor(fromVolumeID, v.From, false)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
 	var dst string
 	if v.Action != "delete" {
-		dst, e = a.path(v.To, true)
+		dst, e = a.pathFor(toVolumeID, v.To, true)
 		if e != nil {
 			http.Error(w, e.Error(), 400)
 			return
@@ -446,12 +437,14 @@ func (a *App) operations(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch v.Action {
-	case "rename", "move":
+	case "rename":
 		e = os.Rename(src, dst)
+	case "move":
+		e = movePath(src, dst)
 	case "copy":
 		e = copyTree(src, dst)
 	case "delete":
-		e = a.toTrash(src, v.From)
+		e = a.toTrash(fromVolumeID, src, v.From)
 	default:
 		e = errors.New("unknown operation")
 	}
@@ -459,7 +452,7 @@ func (a *App) operations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	a.audit(r, v.Action, v.From, v.To)
+	a.audit(r, v.Action, fromVolumeID+":"+v.From, toVolumeID+":"+v.To)
 	a.emit(map[string]string{"type": "files"})
 	writeJSON(w, map[string]string{"status": "ok"})
 }
@@ -518,32 +511,54 @@ func movePath(src, dst string) error {
 	}
 	return os.RemoveAll(src)
 }
-func (a *App) toTrash(src, rel string) error {
+func defaultVolumeID(value string) string {
+	if value == "" {
+		return "primary"
+	}
+	return value
+}
+
+func (a *App) toTrash(volumeID, src, rel string) error {
+	volume, err := a.volumeByID(volumeID)
+	if err != nil {
+		return err
+	}
 	id := time.Now().UTC().Format("20060102T150405.000000000")
-	d := filepath.Join(a.c.Root, ".mynas", "trash", id)
+	d := filepath.Join(volume.Mount, ".mynas", "trash", id)
 	if e := os.MkdirAll(d, 0700); e != nil {
-		return e
+		return fmt.Errorf("create trash directory: %w", e)
 	}
 	if e := movePath(src, filepath.Join(d, filepath.Base(src))); e != nil {
 		os.RemoveAll(d)
-		return e
+		return fmt.Errorf("move item to trash: %w", e)
 	}
-	m := map[string]string{"original": rel}
+	m := map[string]string{"original": rel, "volumeId": volume.ID}
 	b, _ := json.Marshal(m)
-	return os.WriteFile(filepath.Join(d, "meta.json"), b, 0600)
+	if e := os.WriteFile(filepath.Join(d, "meta.json"), b, 0600); e != nil {
+		return fmt.Errorf("write trash metadata: %w", e)
+	}
+	return nil
 }
 func (a *App) trash(w http.ResponseWriter, r *http.Request) {
-	base := filepath.Join(a.c.Root, ".mynas", "trash")
 	if r.Method == "GET" {
-		ds, _ := os.ReadDir(base)
 		o := make([]map[string]string, 0)
-		for _, d := range ds {
-			b, e := os.ReadFile(filepath.Join(base, d.Name(), "meta.json"))
-			if e == nil {
-				var m map[string]string
-				json.Unmarshal(b, &m)
-				m["id"] = d.Name()
-				o = append(o, m)
+		volumes, _ := a.listVolumes()
+		for _, volume := range volumes {
+			if volume.Status != "online" {
+				continue
+			}
+			base := filepath.Join(volume.Mount, ".mynas", "trash")
+			ds, _ := os.ReadDir(base)
+			for _, d := range ds {
+				b, e := os.ReadFile(filepath.Join(base, d.Name(), "meta.json"))
+				if e == nil {
+					var m map[string]string
+					json.Unmarshal(b, &m)
+					m["id"] = d.Name()
+					m["volumeId"] = volume.ID
+					m["volumeName"] = volume.Name
+					o = append(o, m)
+				}
 			}
 		}
 		writeJSON(w, o)
@@ -553,11 +568,17 @@ func (a *App) trash(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", 405)
 		return
 	}
-	var v struct{ ID, Action, To string }
+	var v struct{ ID, Action, To, VolumeID string }
 	if e := readJSON(r, &v); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
+	volume, e := a.volumeByID(v.VolumeID)
+	if e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
+	base := filepath.Join(volume.Mount, ".mynas", "trash")
 	d := filepath.Join(base, v.ID)
 	if filepath.Base(d) != v.ID {
 		http.Error(w, "invalid", 400)
@@ -577,7 +598,7 @@ func (a *App) trash(w http.ResponseWriter, r *http.Request) {
 		}
 		var m map[string]string
 		json.Unmarshal(b, &m)
-		dst, e := a.path(m["original"], true)
+		dst, e := a.pathFor(volume.ID, m["original"], true)
 		if e != nil {
 			http.Error(w, e.Error(), 400)
 			return
@@ -630,7 +651,7 @@ func (a *App) uploads(w http.ResponseWriter, r *http.Request) {
 				a.db.Exec("UPDATE uploads SET status='paused',updated=? WHERE id=? AND status IN ('waiting','uploading')", time.Now().UTC().Format(time.RFC3339), id)
 			}
 		}
-		rows, e = a.db.Query("SELECT id,target,stage,name,status,size,received,updated FROM uploads ORDER BY updated DESC LIMIT 200")
+		rows, e = a.db.Query("SELECT id,target,stage,name,status,size,received,updated,volume_id FROM uploads ORDER BY updated DESC LIMIT 200")
 		if e != nil {
 			http.Error(w, "uploads unavailable", 500)
 			return
@@ -639,7 +660,7 @@ func (a *App) uploads(w http.ResponseWriter, r *http.Request) {
 		out := make([]upload, 0)
 		for rows.Next() {
 			var u upload
-			if e = rows.Scan(&u.ID, &u.Target, &u.Stage, &u.Name, &u.Status, &u.Size, &u.Received, &u.Updated); e != nil {
+			if e = rows.Scan(&u.ID, &u.Target, &u.Stage, &u.Name, &u.Status, &u.Size, &u.Received, &u.Updated, &u.VolumeID); e != nil {
 				http.Error(w, "uploads unavailable", 500)
 				return
 			}
@@ -653,8 +674,8 @@ func (a *App) uploads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v struct {
-		Path, Name string
-		Size       int64
+		Path, Name, VolumeID string
+		Size                 int64
 	}
 	if e := readJSON(r, &v); e != nil {
 		http.Error(w, e.Error(), 400)
@@ -665,7 +686,8 @@ func (a *App) uploads(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid upload", 400)
 		return
 	}
-	parent, e := a.path(v.Path, false)
+	volumeID := defaultVolumeID(v.VolumeID)
+	parent, e := a.pathFor(volumeID, v.Path, false)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
@@ -675,7 +697,12 @@ func (a *App) uploads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := token()
-	stage := filepath.Join(a.c.Root, ".mynas", "staging", id+".part")
+	volume, e := a.volumeByID(volumeID)
+	if e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
+	stage := filepath.Join(volume.Mount, ".mynas", "staging", id+".part")
 	if e = os.WriteFile(stage, nil, 0600); e != nil {
 		http.Error(w, e.Error(), 500)
 		return
@@ -684,16 +711,16 @@ func (a *App) uploads(w http.ResponseWriter, r *http.Request) {
 	if v.Size == 0 {
 		status = "verifying"
 	}
-	_, e = a.db.Exec("INSERT INTO uploads VALUES(?,?,?,?,?,?,?,?)", id, v.Path, stage, n, status, v.Size, 0, time.Now().UTC().Format(time.RFC3339))
+	_, e = a.db.Exec("INSERT INTO uploads(id,target,stage,name,status,size,received,updated,volume_id) VALUES(?,?,?,?,?,?,?,?,?)", id, v.Path, stage, n, status, v.Size, 0, time.Now().UTC().Format(time.RFC3339), volumeID)
 	if e != nil {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	u := upload{ID: id, Target: v.Path, Stage: stage, Name: n, Status: status, Size: v.Size}
+	u := upload{ID: id, VolumeID: volumeID, Target: v.Path, Stage: stage, Name: n, Status: status, Size: v.Size}
 	if v.Size == 0 {
 		go a.finalize(u)
 	}
-	writeJSON(w, map[string]any{"id": id, "chunkSize": 8 * 1024 * 1024, "status": status})
+	writeJSON(w, map[string]any{"id": id, "volumeId": volumeID, "chunkSize": 8 * 1024 * 1024, "status": status})
 }
 func (a *App) uploadByID(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/uploads/")
@@ -702,7 +729,7 @@ func (a *App) uploadByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var u upload
-	e := a.db.QueryRow("SELECT id,target,stage,name,status,size,received,updated FROM uploads WHERE id=?", id).Scan(&u.ID, &u.Target, &u.Stage, &u.Name, &u.Status, &u.Size, &u.Received, &u.Updated)
+	e := a.db.QueryRow("SELECT id,target,stage,name,status,size,received,updated,volume_id FROM uploads WHERE id=?", id).Scan(&u.ID, &u.Target, &u.Stage, &u.Name, &u.Status, &u.Size, &u.Received, &u.Updated, &u.VolumeID)
 	if e != nil {
 		log.Printf("upload lookup failed for %s: %v", id, e)
 		http.Error(w, "not found", 404)
@@ -730,7 +757,9 @@ func (a *App) uploadByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == "PUT" {
-		var v struct{ Status string `json:"status"` }
+		var v struct {
+			Status string `json:"status"`
+		}
 		if e = readJSON(r, &v); e != nil || (v.Status != "paused" && v.Status != "uploading") {
 			http.Error(w, "status must be paused or uploading", 400)
 			return
@@ -817,13 +846,16 @@ func (a *App) finalize(u upload) {
 	if typ == "video" {
 		a.db.Exec("UPDATE uploads SET status='processing-cover' WHERE id=?", u.ID)
 		a.emit(map[string]string{"type": "upload", "id": u.ID, "status": "processing-cover"})
-		thumb := filepath.Join(a.c.Root, ".mynas", "thumbnails", u.ID+".jpg")
+		thumbDir := filepath.Join(a.c.DataDir, "thumbnails")
+		_ = os.MkdirAll(thumbDir, 0700)
+		hash := fmt.Sprintf("%x", u.VolumeID+":"+u.Target+"/"+u.Name)
+		thumb := filepath.Join(thumbDir, hash+".jpg")
 		cmd := exec.Command("ffmpeg", "-y", "-ss", "00:00:01", "-i", u.Stage, "-frames:v", "1", "-vf", "scale=480:-2", thumb)
 		if o, e := cmd.CombinedOutput(); e != nil {
 			log.Printf("video thumbnail failed: %v (%d bytes)", e, len(o))
 		}
 	}
-	dst, e := a.path(filepath.ToSlash(filepath.Join(u.Target, u.Name)), true)
+	dst, e := a.pathFor(u.VolumeID, filepath.ToSlash(filepath.Join(u.Target, u.Name)), true)
 	if e == nil {
 		if _, z := os.Stat(dst); z == nil {
 			dst = unique(dst)
@@ -878,40 +910,19 @@ func commitStage(stage, dst string) error {
 	}
 	return os.Remove(stage)
 }
-func (a *App) thumbnailExists(rel, name, typ string) bool {
+func (a *App) thumbnailExists(volumeID, rel, name, typ string) bool {
 	if typ != "image" && typ != "video" {
 		return false
 	}
-	h := fmt.Sprintf("%x", rel+"/"+name)
-	_, e := os.Stat(filepath.Join(a.c.Root, ".mynas", "thumbnails", h+".jpg"))
+	h := fmt.Sprintf("%x", volumeID+":"+rel+"/"+name)
+	_, e := os.Stat(filepath.Join(a.c.DataDir, "thumbnails", h+".jpg"))
 	return e == nil
 }
 func (a *App) disk(w http.ResponseWriter, r *http.Request) {
-	total, free, e := diskSpace(a.c.Root)
+	volume, e := a.volumeByID("primary")
 	if e != nil {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	read, write := diskIO()
-	device, filesystem, mount := "/dev/sda1", "ntfs3", a.c.Root
-	if runtime.GOOS == "windows" {
-		device = "本地开发数据"
-		filesystem = "Windows 文件系统"
-	}
-	writeJSON(w, map[string]any{"name": "NAS 数据盘", "device": device, "filesystem": filesystem, "mount": mount, "total": total, "free": free, "used": total - free, "readBytes": read, "writeBytes": write, "protocol": "HTTPS over Tailscale Serve", "tailscale": "online", "arch": runtime.GOARCH, "smart": "当前设备不支持或未授予最小权限"})
-}
-func diskIO() (uint64, uint64) {
-	b, e := os.ReadFile("/proc/diskstats")
-	if e != nil {
-		return 0, 0
-	}
-	for _, l := range strings.Split(string(b), "\n") {
-		f := strings.Fields(l)
-		if len(f) > 9 && f[2] == "sda" {
-			r, _ := strconv.ParseUint(f[5], 10, 64)
-			w, _ := strconv.ParseUint(f[9], 10, 64)
-			return r * 512, w * 512
-		}
-	}
-	return 0, 0
+	writeJSON(w, volume)
 }
