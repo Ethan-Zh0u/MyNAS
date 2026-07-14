@@ -150,9 +150,12 @@ func TestDownloadClosesFile(t *testing.T) {
 	a := &App{c: Config{Root: root}}
 	r := httptest.NewRequest("GET", "/api/v1/files/download.txt", nil)
 	w := httptest.NewRecorder()
-	a.download(w, r, source)
+	a.download(w, r, source, "primary")
 	if w.Code != http.StatusOK || w.Body.String() != "stream me" {
 		t.Fatalf("download: %d %q", w.Code, w.Body.String())
+	}
+	if readBytes, _ := a.volumeIO("primary"); readBytes != uint64(len("stream me")) {
+		t.Fatalf("tracked read bytes=%d", readBytes)
 	}
 	if err := os.Rename(source, filepath.Join(root, "renamed.txt")); err != nil {
 		t.Fatalf("file remained locked after download: %v", err)
@@ -168,7 +171,7 @@ func TestRangeDownload(t *testing.T) {
 	r := httptest.NewRequest("GET", "/api/v1/files/range.bin", nil)
 	r.Header.Set("Range", "bytes=4-7")
 	w := httptest.NewRecorder()
-	a.download(w, r, source)
+	a.download(w, r, source, "primary")
 	if w.Code != http.StatusPartialContent || w.Body.String() != "4567" {
 		t.Fatalf("range: %d %q", w.Code, w.Body.String())
 	}
@@ -222,6 +225,9 @@ func TestUploadSessionReceivesAndFinalizesChunk(t *testing.T) {
 	}
 	for i := 0; i < 50; i++ {
 		if b, e := os.ReadFile(filepath.Join(root, "sample.txt")); e == nil && string(b) == "hello" {
+			if _, writeBytes := a.volumeIO("primary"); writeBytes != uint64(len("hello")) {
+				t.Fatalf("tracked write bytes=%d", writeBytes)
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
