@@ -1,46 +1,123 @@
 # MyNAS
 
-MyNAS 是一个基于树莓派和机械硬盘开发的个人 NAS 管理系统，前端使用 React，后端使用 Go。当前版本服务于一台已经接入硬盘的树莓派：静态前端部署到 Cloudflare Pages，真实文件数据只经由树莓派 Tailscale Serve 的 HTTPS API 传输。
+**把树莓派和外接硬盘变成一个简单、私有、可以远程访问的个人 NAS。**
 
-项目长期目标是发展成面向通用树莓派和外接硬盘的版本，让用户拿到一台新的树莓派和一块硬盘后，可以通过标准化安装脚本快速部署整套 MyNAS 管理系统，而不必手工拼装每个服务。
+MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和设备切换。网页使用 React，树莓派端使用 Go；真实文件保存在你自己的硬盘中，并通过 Tailscale 安全访问。
 
-> 当前项目仍处于早期开发阶段，版本为 **v0.2.0**，尚不建议把它作为唯一的数据管理工具。
+> ## 第一次使用？从这里开始
+>
+> **[打开《MyNAS 新手安装与接线指南》→](docs/BEGINNER_GUIDE.md)**
+>
+> 从准备设备、连接网线和硬盘，到写入 Raspberry Pi OS、开启 SSH、安装 Tailscale、接入硬盘和打开网页，全部按顺序说明。第一次接触树莓派也可以照着操作。
 
-第一次接触树莓派和硬盘？请从 [MyNAS 新手安装与接线指南](docs/BEGINNER_GUIDE.md) 开始。指南包含路由器网线、树莓派 SSH、Tailscale、硬盘盒供电、硬盘接入和网页首次连接的完整流程。
+> [!IMPORTANT]
+> 当前版本为 **v0.3.0 测试版**。网页连接和硬盘接入已经提供新手向导，上传进度与实时读写速率也已完善，但“在全新树莓派上一键安装 MyNAS 服务”仍在开发中。首次部署目前需要项目维护者完成，不建议普通用户直接执行仓库中的生产部署脚本，也不要把 MyNAS 当作重要文件的唯一备份。
 
-## 当前状态
+## 最简单的使用路线
 
-- 已具备多硬盘容量展示、文件浏览、上传、下载、跨盘文件操作、回收站和审计记录。
-- 支持硬盘接入向导、硬盘重命名、多 MyNAS 设备管理以及设备自定义名称。
-- 提供中文/英文界面、深色主题、目录返回按钮和 Windows/macOS/Linux 首次连接说明。
-- 当前树莓派端首次部署仍与维护者的设备配置有关，还不是开箱即用的通用安装程序；不要把维护者部署命令直接用于未知设备。
+```text
+准备树莓派和硬盘
+        ↓
+按新手指南完成接线、系统和 Tailscale
+        ↓
+维护者完成 MyNAS 首次部署
+        ↓
+运行接盘向导，打开网页开始使用
+```
 
-## 计划中的方向
+1. **准备设备**：树莓派 4/5、microSD 卡、网线、可靠电源，以及带正确供电的硬盘盒。
+2. **完成基础设置**：写入 Raspberry Pi OS，开启 SSH，并在电脑和树莓派上登录同一个 Tailscale 账号。
+3. **安装 MyNAS 服务**：当前版本由项目维护者完成首次部署；通用安装程序正在开发。
+4. **接入硬盘并使用**：安装完成后，在树莓派终端运行：
 
-- 通用树莓派部署：自动检测外接硬盘、生成配置、安装服务，并提供可重复执行的安装和升级流程。
-- 视频在线预览：优先支持浏览器原生可播放格式，再评估缩略图、转码和断点播放。
-- 本地账号与密码登录：为局域网使用和多用户管理提供可选的认证方式。
-- 更完善的磁盘健康检查、权限管理、备份、升级和故障恢复能力。
+   ```bash
+   sudo mynas-setup
+   ```
 
-### 账号密码能否代替 Tailscale？
+   按向导选择硬盘，再通过浏览器打开 MyNAS。需要完整截图式思路和故障处理时，请直接查看[新手安装与接线指南](docs/BEGINNER_GUIDE.md)。
 
-可以开发账号密码登录，但它解决的是“谁可以登录”，Tailscale 同时解决了“设备如何安全连到树莓派”和“通信如何加密”。因此：
+## 接线一眼看懂
 
-- 在同一个局域网内，可以采用账号密码登录，不一定安装 Tailscale。
-- 从外网访问时，当前版本仍必须连接 Tailscale。
-- 未来可以提供不依赖 Tailscale 的公网模式，但必须同时提供可信 HTTPS、公网入口或安全隧道、密码安全存储、会话保护、限速、防暴力破解和及时安全更新。对于存放私人文件的 NAS，Tailscale 仍会是默认推荐方案。
+```text
+互联网
+  │
+路由器 ── LAN 口 ── 网线 ── 树莓派
+                              │
+                              └── USB 3.0 ── 带供电硬盘盒 ── 硬盘
+```
 
-## 目录
+- 3.5 英寸机械硬盘必须使用带独立电源的硬盘盒或底座。
+- 网线连接路由器 **LAN 口**，不要连接 WAN/Internet 口。
+- 不要在上传、复制或移动文件时拔掉硬盘。
+- 格式化会永久删除硬盘数据，操作前务必确认并备份。
+
+## 你可以用它做什么
+
+- 在网页中浏览、上传、下载、复制、移动和删除文件。
+- 同时管理多块硬盘，查看每块盘的容量、已用空间和在线状态。
+- 使用按硬盘隔离的回收站，以及操作审计记录。
+- 给硬盘和 MyNAS 设备自定义名称。
+- 管理并切换多台 MyNAS 设备。
+- 使用中文/英文界面和深色主题。
+- 通过 Tailscale 从外部网络安全访问，不直接暴露 NAS 端口。
+
+## 访问方式
+
+- [公共网页入口](https://mynas-rsp.pages.dev/)：提供界面和连接引导，不保存 NAS 文件。
+- 私有设备入口：安装完成后使用设备自己的 `https://设备名.tailxxxx.ts.net` 地址，需要连接 Tailscale。
+
+公共网页只是前端入口。文件列表、上传、下载等真实数据请求会直接连接你的树莓派，不经过 Cloudflare Pages 存储。
+
+## 当前状态与路线图
+
+### 已完成
+
+- 多硬盘容量展示与文件管理
+- 上传任务暂停、继续、取消和状态恢复；保留 8 MB 分块效率并显示块内连续进度
+- 按 MyNAS 实际传输字节计算每秒读写速率，避免 Linux 缓存导致长期显示为 0
+- 跨硬盘文件操作、回收站与审计记录
+- `mynas-setup` 接盘向导，支持 `ext4`、`NTFS3`、`exFAT`
+- 多 MyNAS 设备管理和首次连接引导
+- Tailscale Serve 私有 HTTPS 访问
+
+### 正在推进
+
+- 面向全新树莓派的通用一键安装与升级
+- 视频在线预览与缩略图
+- 可选的局域网账号密码登录
+- 账户退出与切换：提供明确的退出入口，清理当前 MyNAS 会话/设备状态，并支持切换 Tailscale 或后续本地账号
+- 磁盘健康检查、权限、备份和故障恢复
+
+详细版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+
+---
+
+## 以下内容面向开发者和维护者
+
+如果你只是想安装和使用 MyNAS，读到这里就够了；下面是项目结构、开发、部署与安全实现说明。
+
+## 技术结构
+
+```text
+浏览器（React）
+   │
+   │ Tailscale 私有 HTTPS
+   ▼
+树莓派（Go API，仅监听 127.0.0.1）
+   │
+   ├── 已注册硬盘卷
+   └── SQLite 审计数据
+```
 
 - `frontend/`：React + TypeScript + Vite 客户端
-- `backend/`：Go API（仅监听 localhost）
-- `scripts/`：Windows 本地开发、构建脚本
-- `deploy/`：树莓派 systemd、部署与 Pages 发布脚本
-- `docs/`：运行、回滚与故障排查说明
+- `backend/`：Go API 与 `mynas-setup` 接盘工具
+- `scripts/`：Windows 本地开发和构建脚本
+- `deploy/`：树莓派 systemd、部署与 Cloudflare Pages 发布脚本
+- `docs/`：新手指南、运行、回滚和故障排查说明
 
 ## 本地开发
 
-本地数据仅使用 `D:\MyNAS\dev-data`。先完成全量测试和两个平台的生产构建：
+本地开发数据只写入 `D:\MyNAS\dev-data`。先运行完整测试与生产构建：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\scripts\build.ps1
@@ -50,46 +127,40 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\scripts\build.p
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\scripts\dev.ps1
-# http://127.0.0.1:8080/
+# 打开 http://127.0.0.1:8080/
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\scripts\stop-local.ps1
 ```
 
-开发身份仅由 `MYNAS_ENV=development` 与 `MYNAS_DEV_IDENTITY=1` 同时启用；production 会强制禁用。Windows 本地后端、Linux ARM64 后端、前端生产包全部由本机生成，树莓派只接收已测试产物。
+开发身份仅在 `MYNAS_ENV=development` 与 `MYNAS_DEV_IDENTITY=1` 同时设置时启用，生产模式会强制禁用。Windows 后端、Linux ARM64 后端和前端生产包都在开发机生成，树莓派只接收已经测试的产物。
 
-## 访问地址
+## 维护者部署
 
-- 私有管理入口：`https://rsp.tail681937.ts.net/`（必须连接 Tailscale）
-- 公共静态入口：`https://mynas-rsp.pages.dev/`；未连接 Tailscale 时只显示诚实的连接引导，不传输 NAS 数据
-
-若 Windows/macOS 开启了系统代理或 Clash 类代理，必须将 `rsp.tail681937.ts.net`、`*.tail681937.ts.net` 与 Tailscale `100.64.0.0/10` 设为直连，否则代理会对私有地址返回连接关闭。
-
-## 安全边界
-
-- 所有用户路径被限制在已注册卷的挂载点（现有主盘 `/mnt/nas`，新增盘 `/mnt/mynas/<volume-id>`）；每次请求都显式绑定卷 ID，并拒绝穿越、符号链接逃逸、`.mynas`、`$RECYCLE.BIN`、`System Volume Information`。
-- 生产 API 仅信任 Tailscale Serve 注入的身份头，且只监听 `127.0.0.1`。
-- 修改请求要求 `X-MyNAS-Request: 1`，CORS 仅允许 Pages 地址和 localhost。
-- SQLite 审计数据库存放于 `/home/rbp/.local/share/mynas`；每块硬盘拥有独立的 `.mynas/staging` 和 `.mynas/trash`。
-
-## 树莓派部署
+> [!WARNING]
+> 下面的脚本绑定当前维护者的 SSH 密钥、设备名、挂载路径和 Tailscale 环境，不是给普通用户使用的通用安装命令。
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\deploy\deploy.ps1 -PagesOrigin https://mynas-rsp.pages.dev
 ```
 
-部署使用 `/opt/mynas/releases/<UTC时间>/` 版本目录和 `/opt/mynas/current` 原子链接。部署后可在树莓派终端运行半图形化接盘向导：
+部署使用 `/opt/mynas/releases/<UTC时间>/` 保存版本，并通过 `/opt/mynas/current` 原子切换。运维、回滚和故障排查见 [docs/operations.md](docs/operations.md)。
 
-```bash
-sudo mynas-setup
-```
+## 安全边界
 
-向导自动排除系统盘，支持保留已有 `ext4`、`NTFS3`、`exFAT` 数据接入，也支持对空白硬盘进行明确确认后的初始化。只有该向导会临时以 root 权限备份并更新 `/etc/fstab`；日常 MyNAS 服务仍以 `rbp` 用户运行。新增硬盘按文件系统 UUID 挂载到 `/mnt/mynas/<volume-id>`，注册信息写入 `/etc/mynas/volumes.json`。
+- Go API 只监听 `127.0.0.1`，生产环境只信任 Tailscale Serve 注入的身份信息。
+- 用户路径被限制在已注册硬盘卷内，并拒绝路径穿越、符号链接逃逸和系统目录访问。
+- 修改请求必须携带 `X-MyNAS-Request: 1`，CORS 只允许已配置的 Pages 地址和 localhost。
+- 每块硬盘有独立的 `.mynas/staging` 与 `.mynas/trash`；审计数据库与用户文件分开存放。
+- 当前版本不建议把 8080 端口直接映射到公网。
 
-## 版本记录
+账号密码只能解决“谁能登录”，不能单独解决公网连接、传输加密、可信 HTTPS、会话保护和防暴力破解。局域网账号模式可以作为后续选项，但当前远程访问仍推荐使用 Tailscale。
 
-项目采用语义化版本号 `主版本.次版本.修订版本`：
+## 版本规则
 
-- 修复 Bug：增加修订版本，例如 `0.1.0` → `0.1.1`。
-- 增加兼容功能：增加次版本，例如 `0.1.1` → `0.2.0`。
-- 出现不兼容的重大变化：增加主版本，例如 `1.4.0` → `2.0.0`。
+项目使用语义化版本号 `主版本.次版本.修订版本`：
 
-当前版本保存在根目录的 `VERSION` 文件中，每次发布都要同步更新 `CHANGELOG.md` 并创建对应的 Git 标签。开发过程中的每一个小提交仍由 Git 提交号记录；只有形成可识别的发布节点时才升级版本号，避免版本号失去意义。
+- Bug 修复：`0.2.0` → `0.2.1`
+- 向后兼容的新功能：`0.2.1` → `0.3.0`
+- 不兼容的重大变化：`1.4.0` → `2.0.0`
+
+当前版本见 [VERSION](VERSION)，每次正式发布同步更新 [CHANGELOG.md](CHANGELOG.md) 并创建对应 Git 标签。

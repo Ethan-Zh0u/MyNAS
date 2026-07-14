@@ -34,6 +34,9 @@ type App struct {
 	hub           *Hub
 	uploadMu      sync.Mutex
 	activeUploads map[string]bool
+	transferMu    sync.Mutex
+	volumeReads   map[string]uint64
+	volumeWrites  map[string]uint64
 }
 type Hub struct {
 	mu   sync.Mutex
@@ -84,7 +87,7 @@ func main() {
 		log.Fatal(err)
 	}
 	configureDB(db)
-	a := &App{c: c, db: db, hub: &Hub{subs: map[chan []byte]bool{}}, activeUploads: map[string]bool{}}
+	a := &App{c: c, db: db, hub: &Hub{subs: map[chan []byte]bool{}}, activeUploads: map[string]bool{}, volumeReads: map[string]uint64{}, volumeWrites: map[string]uint64{}}
 	if err = a.migrate(); err != nil {
 		log.Fatal(err)
 	}
@@ -252,7 +255,7 @@ func (a *App) emit(v any) {
 }
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	u, _ := a.user(r)
-	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.2.0"})
+	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.3.0"})
 }
 func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -365,18 +368,33 @@ func (a *App) folder(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) fileByPath(w http.ResponseWriter, r *http.Request) {
 	rel := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
-	p, e := a.pathFor(r.URL.Query().Get("volumeId"), rel, false)
+	volumeID := defaultVolumeID(r.URL.Query().Get("volumeId"))
+	p, e := a.pathFor(volumeID, rel, false)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
 	if r.Method == "GET" {
-		a.download(w, r, p)
+		a.download(w, r, p, volumeID)
 		return
 	}
 	http.Error(w, "method", 405)
 }
-func (a *App) download(w http.ResponseWriter, r *http.Request, p string) {
+
+type countingReadSeeker struct {
+	io.ReadSeeker
+	onRead func(int)
+}
+
+func (reader *countingReadSeeker) Read(buffer []byte) (int, error) {
+	n, err := reader.ReadSeeker.Read(buffer)
+	if n > 0 && reader.onRead != nil {
+		reader.onRead(n)
+	}
+	return n, err
+}
+
+func (a *App) download(w http.ResponseWriter, r *http.Request, p, volumeID string) {
 	i, e := os.Stat(p)
 	if e != nil || i.IsDir() {
 		http.Error(w, "not found", 404)
@@ -392,7 +410,8 @@ func (a *App) download(w http.ResponseWriter, r *http.Request, p string) {
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", mime.TypeByExtension(filepath.Ext(p)))
-	http.ServeContent(w, r, filepath.Base(p), i.ModTime(), f)
+	reader := &countingReadSeeker{ReadSeeker: f, onRead: func(n int) { a.addVolumeIO(volumeID, uint64(n), 0) }}
+	http.ServeContent(w, r, filepath.Base(p), i.ModTime(), reader)
 }
 func (a *App) operations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -793,10 +812,14 @@ func (a *App) uploadByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, e := f.Seek(off, 0)
+	var written int64
 	if e == nil {
-		_, e = io.CopyN(f, io.LimitReader(r.Body, 8*1024*1024+1), 8*1024*1024+1)
+		written, e = io.CopyN(f, io.LimitReader(r.Body, 8*1024*1024+1), 8*1024*1024+1)
 	}
 	f.Close()
+	if written > 0 {
+		a.addVolumeIO(u.VolumeID, 0, uint64(written))
+	}
 	if e != nil && e != io.EOF {
 		http.Error(w, e.Error(), 500)
 		return
@@ -834,6 +857,27 @@ func (a *App) setUploadActive(id string, active bool) {
 	} else {
 		delete(a.activeUploads, id)
 	}
+}
+
+func (a *App) addVolumeIO(volumeID string, readBytes, writeBytes uint64) {
+	volumeID = defaultVolumeID(volumeID)
+	a.transferMu.Lock()
+	defer a.transferMu.Unlock()
+	if a.volumeReads == nil {
+		a.volumeReads = map[string]uint64{}
+	}
+	if a.volumeWrites == nil {
+		a.volumeWrites = map[string]uint64{}
+	}
+	a.volumeReads[volumeID] += readBytes
+	a.volumeWrites[volumeID] += writeBytes
+}
+
+func (a *App) volumeIO(volumeID string) (uint64, uint64) {
+	volumeID = defaultVolumeID(volumeID)
+	a.transferMu.Lock()
+	defer a.transferMu.Unlock()
+	return a.volumeReads[volumeID], a.volumeWrites[volumeID]
 }
 func (a *App) finalize(u upload) {
 	info, e := os.Stat(u.Stage)

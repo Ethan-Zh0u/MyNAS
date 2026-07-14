@@ -4,7 +4,7 @@ import * as I from 'lucide-react';
 import '@fontsource/barlow-condensed/500.css';
 import '@fontsource/barlow-condensed/600.css';
 import '@fontsource/barlow-condensed/700.css';
-import { API, api, fmt, parent, Item, PairedNode, MyNASNode, parsePairedNode, loadNodes, rememberNode, removeNode, activateNode, normalizeNodeUrl } from './api';
+import { API, api, bytesPerSecond, displayedUploadBytes, fmt, parent, Item, PairedNode, MyNASNode, parsePairedNode, loadNodes, rememberNode, removeNode, activateNode, normalizeNodeUrl } from './api';
 import './style.css';
 
 type Page = 'home' | 'files' | 'transfers' | 'trash' | 'settings';
@@ -18,6 +18,13 @@ type Locale = 'zh' | 'en';
 type SetupPlatform = 'windows' | 'macos' | 'linux';
 
 const uploadControllers = new Map<string, AbortController>();
+const inFlightUploadBytes = new Map<string, number>();
+const uploadProgressListeners = new Set<() => void>();
+let uploadProgressFrame = 0;
+const updateUploadProgress = (id: string, bytes?: number) => {
+  if (bytes === undefined) inFlightUploadBytes.delete(id); else inFlightUploadBytes.set(id, bytes);
+  if (!uploadProgressFrame) uploadProgressFrame = requestAnimationFrame(() => { uploadProgressFrame = 0; uploadProgressListeners.forEach(listener => listener()); });
+};
 const activeUploadKey = 'activeUploadIds';
 const readActiveUploads = () => { try { return JSON.parse(localStorage.getItem(activeUploadKey) || '[]') as string[]; } catch { return []; } };
 const writeActiveUploads = (ids: string[]) => { try { localStorage.setItem(activeUploadKey, JSON.stringify(ids)); } catch { /* best effort */ } };
@@ -31,6 +38,7 @@ async function setUploadStatus(id: string, status: 'paused' | 'uploading') {
 async function pauseUpload(id: string) {
   uploadControllers.get(id)?.abort();
   uploadControllers.delete(id);
+  updateUploadProgress(id);
   forgetActiveUpload(id);
   await setUploadStatus(id, 'paused');
 }
@@ -38,12 +46,32 @@ async function pauseUpload(id: string) {
 async function cancelUpload(id: string) {
   uploadControllers.get(id)?.abort();
   uploadControllers.delete(id);
+  updateUploadProgress(id);
   forgetActiveUpload(id);
   try { await setUploadStatus(id, 'paused'); } catch { /* DELETE below is authoritative */ }
   for (let attempt = 0; attempt < 4; attempt++) {
     try { await api(`/uploads/${id}`, { method: 'DELETE' }); return; }
     catch (error) { if (attempt === 3) throw error; await new Promise(resolve => setTimeout(resolve, 150)); }
   }
+}
+
+function sendUploadChunk(id: string, offset: number, body: Blob, total: number, signal: AbortSignal) {
+  return new Promise<{ received: number }>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const cleanup = () => signal.removeEventListener('abort', abort);
+    const abort = () => xhr.abort();
+    xhr.open('PATCH', `${API}/api/v1/uploads/${id}`);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('X-MyNAS-Request', '1');
+    xhr.setRequestHeader('X-Upload-Offset', String(offset));
+    xhr.upload.onprogress = event => updateUploadProgress(id, Math.min(total, offset + event.loaded));
+    xhr.onload = () => { cleanup(); if (xhr.status < 200 || xhr.status >= 300) { reject(new Error(xhr.responseText.trim() || `HTTP ${xhr.status}`)); return; } try { resolve(JSON.parse(xhr.responseText) as { received: number }); } catch { reject(new Error('Invalid upload response')); } };
+    xhr.onerror = () => { cleanup(); reject(new Error('Upload connection failed')); };
+    xhr.onabort = () => { cleanup(); reject(new DOMException('Upload paused', 'AbortError')); };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) { abort(); return; }
+    xhr.send(body);
+  });
 }
 
 async function sendUpload(file: File, session: UploadSession) {
@@ -53,22 +81,26 @@ async function sendUpload(file: File, session: UploadSession) {
   uploadControllers.get(session.id)?.abort();
   uploadControllers.set(session.id, controller);
   rememberActiveUpload(session.id);
+  let completed = false;
   try {
     await setUploadStatus(session.id, 'uploading');
     const chunkSize = session.chunkSize || 8 * 1024 * 1024;
+    updateUploadProgress(session.id, session.received || 0);
     for (let offset = session.received || 0; offset < file.size;) {
       const body = file.slice(offset, offset + chunkSize);
-      const response = await fetch(`${API}/api/v1/uploads/${session.id}`, { method: 'PATCH', headers: { 'X-MyNAS-Request': '1', 'X-Upload-Offset': String(offset) }, body, credentials: 'include', signal: controller.signal });
-      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
-      const result = await response.json() as { received: number };
+      const result = await sendUploadChunk(session.id, offset, body, file.size, controller.signal);
       offset = result.received;
+      updateUploadProgress(session.id, offset);
     }
+    completed = true;
   } catch (error) {
+    updateUploadProgress(session.id);
     try { await setUploadStatus(session.id, 'paused'); } catch { /* upload may already be finalizing */ }
     throw error;
   } finally {
     if (uploadControllers.get(session.id) === controller) uploadControllers.delete(session.id);
     forgetActiveUpload(session.id);
+    if (completed) { const finalBytes = inFlightUploadBytes.get(session.id); setTimeout(() => { if (inFlightUploadBytes.get(session.id) === finalBytes) updateUploadProgress(session.id); }, 3000); }
   }
 }
 
@@ -181,22 +213,23 @@ const driveDemoVolumes=():Volume[]=>{
 function Home() {
   const {t}=useLocale();
   const demo=typeof location!=='undefined'&&['localhost','127.0.0.1'].includes(location.hostname)&&new URLSearchParams(location.search).get('demo')==='drives';
-  const [volumes, setVolumes] = useState<Volume[]>(()=>demo?driveDemoVolumes():[]);
-  const [previous, setPrevious] = useState<Record<string, Volume>>({});
-  const [selected, setSelected] = useState<Volume>();
+  const [sample, setSample] = useState<{volumes:Volume[];sampledAt:number;previous:Record<string,Volume>;elapsedMs:number}>(()=>({volumes:demo?driveDemoVolumes():[],sampledAt:0,previous:{},elapsedMs:0}));
+  const {volumes,previous,elapsedMs}=sample;
+  const [selectedId, setSelectedId] = useState<string>();
   const [renameVolume, setRenameVolume] = useState<Volume>();
   const [wizard, setWizard] = useState(false);
-  useEffect(() => { if(demo)return; const load = () => api<Volume[]>('/volumes').then(next => { setVolumes(current => { setPrevious(Object.fromEntries(current.map(volume => [volume.id, volume]))); return Array.isArray(next) ? next : []; }); }).catch(() => {}); void load(); const timer = setInterval(load, 2000); return () => clearInterval(timer); }, [demo]);
-  const speed = (now: number, old?: number) => old === undefined ? '—' : `${fmt(Math.max(0, now - old))}/2s`;
-  const rename=async(volume:Volume,name:string)=>{const updated=demo?{...volume,name}:await api<Volume>('/volumes',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:volume.id,name})});setVolumes(rows=>rows.map(row=>row.id===updated.id?updated:row));setSelected(current=>current?.id===updated.id?updated:current);setRenameVolume(undefined)};
+  const selected=volumes.find(volume=>volume.id===selectedId);
+  useEffect(() => { if(demo)return; const load = () => api<Volume[]>('/volumes').then(next => { const now=Date.now(); setSample(current=>({volumes:Array.isArray(next)?next:[],sampledAt:now,previous:Object.fromEntries(current.volumes.map(volume=>[volume.id,volume])),elapsedMs:current.sampledAt>0?now-current.sampledAt:0})); }).catch(() => {}); void load(); const timer = setInterval(load, 2000); return () => clearInterval(timer); }, [demo]);
+  const speed = (now: number, old?: number) => old === undefined || elapsedMs <= 0 ? '—' : `${fmt(bytesPerSecond(now,old,elapsedMs))}/s`;
+  const rename=async(volume:Volume,name:string)=>{const updated=demo?{...volume,name}:await api<Volume>('/volumes',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:volume.id,name})});setSample(current=>({...current,volumes:current.volumes.map(row=>row.id===updated.id?updated:row)}));setRenameVolume(undefined)};
   return <><header className="home-header"><div><span className="eyebrow">STORAGE OVERVIEW / {t(demo?'多硬盘演示':'实时状态',demo?'DRIVE DEMO':'LIVE STATUS')}</span><h1>{t('你的私有存储空间','Your private storage')}</h1><p>{t(`${volumes.length} 块独立硬盘，文件只经由加密的 Tailscale 通道传输。`,`${volumes.length} independent drives. Files travel only through the encrypted Tailscale link.`)}</p></div><div className="home-actions"><button onClick={() => setWizard(true)}><I.Plus />{t('接入新硬盘','Add a drive')}</button><div className="live-stamp"><i /> {demo?'DEMO':'LIVE'}<br/><small>{demo?t('模拟数据','SAMPLE DATA'):t('每 2 秒更新','UPDATED EVERY 2S')}</small></div></div></header>
-    {volumes.length ? <section className="volume-grid" aria-label={t('硬盘列表','Drive list')}>{volumes.map((volume, index) => { const percent = volume.total ? Math.round(volume.used / volume.total * 100) : 0; return <button className={`diskcard volume-card ${volume.status}`} onClick={() => setSelected(volume)} aria-label={t(`查看 ${volume.name} 详情`,`View details for ${volume.name}`)} key={volume.id}>
+    {volumes.length ? <section className="volume-grid" aria-label={t('硬盘列表','Drive list')}>{volumes.map((volume, index) => { const percent = volume.total ? Math.round(volume.used / volume.total * 100) : 0; return <button className={`diskcard volume-card ${volume.status}`} onClick={() => setSelectedId(volume.id)} aria-label={t(`查看 ${volume.name} 详情`,`View details for ${volume.name}`)} key={volume.id}>
       <div className="disk-id"><span>VOLUME {String(index + 1).padStart(2, '0')} · {volume.status === 'online' ? t('在线','ONLINE') : t('离线','OFFLINE')}</span><h2>{volume.name}</h2><p>{volume.device} · {volume.filesystem}</p></div>
       <div className="capacity-number"><strong>{percent}</strong><span>%<small>USED</small></span></div>
       <div className="capacity-track" style={{ '--p': percent } as React.CSSProperties}><i /><span>{fmt(volume.used)} {t('已用','used')}</span><span>{fmt(volume.free)} {t('可用','free')}</span></div>
       <div className="disk-total"><span>TOTAL CAPACITY</span><strong>{volume.status === 'online' ? fmt(volume.total) : 'OFFLINE'}</strong></div><I.ArrowUpRight />
     </button>; })}</section> : <div className="empty"><I.LoaderCircle className="spin" /><p>{t('正在读取硬盘信息…','Reading drive information…')}</p></div>}
-    {selected && <div className="drawer"><button className="close" onClick={() => setSelected(undefined)} aria-label={t('关闭','Close')}><I.X /></button><span className="eyebrow">DEVICE INSPECTION</span><div className="drawer-title"><h2>{selected.name}</h2><button onClick={()=>setRenameVolume(selected)} aria-label={t(`重命名 ${selected.name}`,`Rename ${selected.name}`)}><I.Pencil/>{t('重命名','Rename')}</button></div><dl><dt>{t('状态','Status')}</dt><dd>{selected.status === 'online' ? t('在线','Online') : t('离线','Offline')}</dd><dt>{t('设备','Device')}</dt><dd>{selected.device}</dd><dt>UUID</dt><dd>{selected.uuid || t('主数据盘','Primary data drive')}</dd><dt>{t('文件系统','File system')}</dt><dd>{selected.filesystem}</dd><dt>{t('挂载点','Mount point')}</dt><dd>{selected.mount}</dd><dt>{t('总容量','Total capacity')}</dt><dd>{fmt(selected.total)}</dd><dt>{t('已用 / 可用','Used / Free')}</dt><dd>{fmt(selected.used)} / {fmt(selected.free)}</dd><dt>{t('读取 / 写入','Read / Write')}</dt><dd>{speed(selected.readBytes, previous[selected.id]?.readBytes)} · {speed(selected.writeBytes, previous[selected.id]?.writeBytes)}</dd><dt>SMART</dt><dd>{selected.smart}</dd></dl></div>}
+    {selected && <div className="drawer"><button className="close" onClick={() => setSelectedId(undefined)} aria-label={t('关闭','Close')}><I.X /></button><span className="eyebrow">DEVICE INSPECTION</span><div className="drawer-title"><h2>{selected.name}</h2><button onClick={()=>setRenameVolume(selected)} aria-label={t(`重命名 ${selected.name}`,`Rename ${selected.name}`)}><I.Pencil/>{t('重命名','Rename')}</button></div><dl><dt>{t('状态','Status')}</dt><dd>{selected.status === 'online' ? t('在线','Online') : t('离线','Offline')}</dd><dt>{t('设备','Device')}</dt><dd>{selected.device}</dd><dt>UUID</dt><dd>{selected.uuid || t('主数据盘','Primary data drive')}</dd><dt>{t('文件系统','File system')}</dt><dd>{selected.filesystem}</dd><dt>{t('挂载点','Mount point')}</dt><dd>{selected.mount}</dd><dt>{t('总容量','Total capacity')}</dt><dd>{fmt(selected.total)}</dd><dt>{t('已用 / 可用','Used / Free')}</dt><dd>{fmt(selected.used)} / {fmt(selected.free)}</dd><dt>{t('读取 / 写入','Read / Write')}</dt><dd>{speed(selected.readBytes, previous[selected.id]?.readBytes)} · {speed(selected.writeBytes, previous[selected.id]?.writeBytes)}</dd><dt>SMART</dt><dd>{selected.smart}</dd></dl></div>}
     {renameVolume&&<VolumeRenameDialog volume={renameVolume} close={()=>setRenameVolume(undefined)} save={name=>rename(renameVolume,name)}/>}
     {wizard && <VolumeWizard close={() => setWizard(false)} />}</>;
 }
@@ -316,14 +349,16 @@ function Transfers() {
   const [rows, setRows] = useState<UploadRow[]>([]);
   const [error, setError] = useState('');
   const [resumeRow, setResumeRow] = useState<UploadRow>();
+  const [, setProgressVersion] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const load = useCallback(() => api<UploadRow[]>('/uploads').then(x => setRows(Array.isArray(x) ? x : [])).catch(e => setError(errorText(e))), []);
   useEffect(() => { void load(); const timer = setInterval(load, 1500); return () => clearInterval(timer); }, [load]);
+  useEffect(() => { const listener = () => setProgressVersion(version => version + 1); uploadProgressListeners.add(listener); return () => { uploadProgressListeners.delete(listener); }; }, []);
   const run = async (action: () => Promise<void>) => { try { setError(''); await action(); await load(); } catch (e) { setError(errorText(e)); } };
   const chooseResume = (row: UploadRow) => { setResumeRow(row); fileInput.current?.click(); };
   const resume = (file?: File) => { const row = resumeRow; setResumeRow(undefined); if (!row || !file) return; void run(() => sendUpload(file, row)); };
   const labels: Record<string, string> = { waiting: t('等待上传','Waiting'), uploading: t('上传中','Uploading'), paused: t('已暂停','Paused'), verifying: t('正在校验','Verifying'), 'processing-cover': t('正在生成封面','Creating thumbnail'), completed: t('已完成','Completed'), failed: t('失败','Failed') };
-  return <><header><div><h1>{t('传输','Transfers')}</h1><p>{t('上传可暂停、续传或取消；续传时浏览器会要求重新选择原文件。','Uploads can be paused, resumed, or canceled. To resume, select the original file again.')}</p></div><button onClick={() => void load()}><I.RefreshCw />{t('刷新','Refresh')}</button></header><input ref={fileInput} hidden type="file" onChange={e => { resume(e.target.files?.[0]); e.currentTarget.value = ''; }} />{error && <div className="notice">{error}</div>}{rows.length ? <div className="list transfer-list">{rows.map(row => { const percent = row.size ? Math.min(100, Math.round(row.received / row.size * 100)) : 0; const pausable = row.status === 'waiting' || row.status === 'uploading'; const resumable = row.status === 'paused' || row.status === 'failed'; const cancellable = !['completed', 'verifying', 'processing-cover'].includes(row.status); return <div key={row.id}><I.ArrowUpToLine /><span><b>{row.name}</b><small>{row.target || 'MyNAS'} · {labels[row.status] || row.status} · {fmt(row.received)} / {fmt(row.size)}</small><progress value={percent} max="100" /></span><em>{percent}%</em><div className="transfer-actions">{pausable && <button onClick={() => void run(() => pauseUpload(row.id))}><I.Pause />{t('暂停','Pause')}</button>}{resumable && <button onClick={() => chooseResume(row)}><I.Play />{t('继续','Resume')}</button>}{cancellable && <button onClick={() => void run(() => cancelUpload(row.id))}><I.X />{t('取消','Cancel')}</button>}</div></div>; })}</div> : <div className="empty"><I.ArrowLeftRight /><h2>{t('暂无传输任务','No transfer tasks')}</h2></div>}<div className="notice download-note"><I.Download />{t('下载由浏览器的下载面板管理，可在浏览器中暂停或取消；服务器已支持断点续传。','Downloads are managed by your browser, where they can be paused or canceled. The server supports resuming downloads.')}</div></>;
+  return <><header><div><h1>{t('传输','Transfers')}</h1><p>{t('上传可暂停、续传或取消；续传时浏览器会要求重新选择原文件。','Uploads can be paused, resumed, or canceled. To resume, select the original file again.')}</p></div><button onClick={() => void load()}><I.RefreshCw />{t('刷新','Refresh')}</button></header><input ref={fileInput} hidden type="file" onChange={e => { resume(e.target.files?.[0]); e.currentTarget.value = ''; }} />{error && <div className="notice">{error}</div>}{rows.length ? <div className="list transfer-list">{rows.map(row => { const displayedReceived = displayedUploadBytes(row.received, inFlightUploadBytes.get(row.id), row.size); const percent = row.size ? Math.min(100, Math.round(displayedReceived / row.size * 100)) : 0; const pausable = row.status === 'waiting' || row.status === 'uploading'; const resumable = row.status === 'paused' || row.status === 'failed'; const cancellable = !['completed', 'verifying', 'processing-cover'].includes(row.status); return <div key={row.id}><I.ArrowUpToLine /><span><b>{row.name}</b><small>{row.target || 'MyNAS'} · {labels[row.status] || row.status} · {fmt(displayedReceived)} / {fmt(row.size)}</small><progress value={percent} max="100" /></span><em>{percent}%</em><div className="transfer-actions">{pausable && <button onClick={() => void run(() => pauseUpload(row.id))}><I.Pause />{t('暂停','Pause')}</button>}{resumable && <button onClick={() => chooseResume(row)}><I.Play />{t('继续','Resume')}</button>}{cancellable && <button onClick={() => void run(() => cancelUpload(row.id))}><I.X />{t('取消','Cancel')}</button>}</div></div>; })}</div> : <div className="empty"><I.ArrowLeftRight /><h2>{t('暂无传输任务','No transfer tasks')}</h2></div>}<div className="notice download-note"><I.Download />{t('下载由浏览器的下载面板管理，可在浏览器中暂停或取消；服务器已支持断点续传。','Downloads are managed by your browser, where they can be paused or canceled. The server supports resuming downloads.')}</div></>;
 }
 
 function Trash() { const {t}=useLocale(); const [rows, setRows] = useState<TrashRow[]>([]); const [error, setError] = useState(''); const [pending,setPending]=useState<{row:TrashRow;action:'restore'|'purge'}>(); const load = () => api<TrashRow[]>('/trash').then(x => { setRows(Array.isArray(x) ? x : []); setError(''); }).catch(e => setError(errorText(e))); useEffect(() => { void load(); }, []); const act = async () => { if(!pending)return; try { await api('/trash', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id:pending.row.id, volumeId:pending.row.volumeId, action:pending.action }) }); setPending(undefined); void load(); } catch (e) { setError(errorText(e)); } }; return <><header><h1>{t('回收站','Trash')}</h1><button onClick={load}><I.RefreshCw />{t('刷新','Refresh')}</button></header>{error && <div className="notice">{error}</div>}<div className="list">{rows.map(row => <div key={`${row.volumeId}:${row.id}`}><I.Trash2 /><span><b>{row.original}</b><small>{row.volumeName}</small></span><button onClick={() => setPending({row,action:'restore'})}>{t('恢复','Restore')}</button><button className="danger" onClick={() => setPending({row,action:'purge'})}>{t('永久删除','Delete forever')}</button></div>)}{!rows.length && !error && <div className="empty">{t('回收站为空','Trash is empty')}</div>}</div>{pending&&<div className="preview" role="dialog" aria-modal="true"><div className="preview-card"><button className="close" aria-label={t('关闭','Close')} onClick={()=>setPending(undefined)}><I.X/></button><h2>{pending.action==='purge'?t('确认永久删除','Delete forever?'):t('确认恢复','Restore item?')}</h2><p>{pending.action==='purge'?t('此操作无法撤销。将永久删除：','This cannot be undone. Permanently delete:'):t('将文件恢复到原始位置：','Restore the file to its original location:')}<br/><b>{pending.row.volumeName} / {pending.row.original}</b></p><div className="row"><button onClick={()=>setPending(undefined)}>{t('取消','Cancel')}</button><button className={pending.action==='purge'?'danger primary':'primary'} onClick={()=>void act()}>{pending.action==='purge'?t('永久删除','Delete forever'):t('恢复','Restore')}</button></div></div></div>}</>; }

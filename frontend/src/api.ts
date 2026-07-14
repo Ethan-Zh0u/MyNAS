@@ -41,4 +41,6 @@ export const rememberNode=(node:MyNASNode)=>{const next=[node,...loadNodes().fil
 export const removeNode=(apiUrl:string)=>{const next=loadNodes().filter(row=>row.apiUrl!==apiUrl);storageSet(nodeRegistryKey,JSON.stringify(next));if(storageGet(activeNodeKey)===apiUrl)storageSet(activeNodeKey,'');return next};
 export const activateNode=(apiUrl:string)=>storageSet(activeNodeKey,apiUrl);
 export const fmt=(n:number)=>n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:n<1073741824?`${(n/1048576).toFixed(1)} MB`:`${(n/1073741824).toFixed(2)} GB`;
+export const bytesPerSecond=(current:number,previous:number,elapsedMs:number)=>elapsedMs>0?Math.max(0,current-previous)*1000/elapsedMs:0;
+export const displayedUploadBytes=(confirmed:number,inFlight:number|undefined,total:number)=>Math.min(total,Math.max(confirmed,inFlight??0));
 export const parent=(p:string)=>p.split('/').slice(0,-1).join('/');

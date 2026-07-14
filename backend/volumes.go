@@ -189,7 +189,9 @@ func (a *App) measureVolume(v Volume) Volume {
 		return v
 	}
 	v.Total, v.Free, v.Used, v.Status = total, free, total-free, "online"
-	v.ReadBytes, v.WriteBytes = diskIOForDevice(v.Device)
+	// Report bytes transferred through MyNAS itself. Linux block-device counters
+	// are delayed by the page cache and commonly stay at zero during uploads.
+	v.ReadBytes, v.WriteBytes = a.volumeIO(v.ID)
 	return v
 }
 
