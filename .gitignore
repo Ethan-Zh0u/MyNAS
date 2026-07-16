@@ -4,6 +4,7 @@ frontend/dist/
 .cache/
 .dev-state/
 backend/mynas
+backend/backend
 backend/mynas-linux-arm64
 backend/mynas-setup-linux-arm64
 dev-data/
