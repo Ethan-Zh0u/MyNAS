@@ -255,7 +255,7 @@ func (a *App) emit(v any) {
 }
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	u, _ := a.user(r)
-	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.3.0"})
+	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.3.1"})
 }
 func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
