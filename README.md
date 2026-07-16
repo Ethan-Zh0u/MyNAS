@@ -122,7 +122,7 @@ rsp.tail681937.ts.net
 
 - `frontend/`：React + TypeScript + Vite 客户端
 - `backend/`：Go API 与 `mynas-setup` 接盘工具
-- `scripts/`：Windows 本地开发和构建脚本
+- `scripts/`：Windows 与 macOS 本地开发和构建脚本
 - `deploy/`：树莓派 systemd、部署与 Cloudflare Pages 发布脚本
 - `docs/`：新手指南、运行、回滚和故障排查说明
 
@@ -153,6 +153,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\scripts\stop-lo
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\deploy\deploy.ps1 -PagesOrigin https://mynas-rsp.pages.dev
 ```
+
+macOS 首次部署前，需要把专用公钥加入树莓派的 `~/.ssh/authorized_keys`。默认密钥路径为 `~/.ssh/mynas_deploy`；完成一次授权后，运行：
+
+```bash
+MYNAS_REMOTE=rbp@100.119.44.117 ./deploy/deploy-macos.sh
+```
+
+macOS 脚本会显式绕过 Clash 的 SSH 代理，完成前后端测试、Linux ARM64 构建、上传、原子切换、服务重启和版本健康检查。可通过 `MYNAS_DEPLOY_KEY`、`MYNAS_REMOTE`、`MYNAS_PAGES_ORIGIN` 和 `MYNAS_PRIVATE_ORIGIN` 覆盖默认值。
 
 部署使用 `/opt/mynas/releases/<UTC时间>/` 保存版本，并通过 `/opt/mynas/current` 原子切换。运维、回滚和故障排查见 [docs/operations.md](docs/operations.md)。
 
