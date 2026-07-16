@@ -4,7 +4,7 @@ import * as I from 'lucide-react';
 import '@fontsource/barlow-condensed/500.css';
 import '@fontsource/barlow-condensed/600.css';
 import '@fontsource/barlow-condensed/700.css';
-import { API, api, fmt, parent, Item, PairedNode, MyNASNode, parsePairedNode, loadNodes, rememberNode, removeNode, activateNode, normalizeNodeUrl } from './api';
+import { API, ApiError, api, bytesPerSecond, displayedUploadBytes, fmt, parent, Item, PairedNode, MyNASNode, parsePairedNode, loadNodes, rememberNode, removeNode, activateNode, normalizeNodeUrl, proxyBypassGuide } from './api';
 import './style.css';
 
 type Page = 'home' | 'files' | 'transfers' | 'trash' | 'settings';
@@ -18,6 +18,13 @@ type Locale = 'zh' | 'en';
 type SetupPlatform = 'windows' | 'macos' | 'linux';
 
 const uploadControllers = new Map<string, AbortController>();
+const inFlightUploadBytes = new Map<string, number>();
+const uploadProgressListeners = new Set<() => void>();
+let uploadProgressFrame = 0;
+const updateUploadProgress = (id: string, bytes?: number) => {
+  if (bytes === undefined) inFlightUploadBytes.delete(id); else inFlightUploadBytes.set(id, bytes);
+  if (!uploadProgressFrame) uploadProgressFrame = requestAnimationFrame(() => { uploadProgressFrame = 0; uploadProgressListeners.forEach(listener => listener()); });
+};
 const activeUploadKey = 'activeUploadIds';
 const readActiveUploads = () => { try { return JSON.parse(localStorage.getItem(activeUploadKey) || '[]') as string[]; } catch { return []; } };
 const writeActiveUploads = (ids: string[]) => { try { localStorage.setItem(activeUploadKey, JSON.stringify(ids)); } catch { /* best effort */ } };
@@ -31,6 +38,7 @@ async function setUploadStatus(id: string, status: 'paused' | 'uploading') {
 async function pauseUpload(id: string) {
   uploadControllers.get(id)?.abort();
   uploadControllers.delete(id);
+  updateUploadProgress(id);
   forgetActiveUpload(id);
   await setUploadStatus(id, 'paused');
 }
@@ -38,12 +46,32 @@ async function pauseUpload(id: string) {
 async function cancelUpload(id: string) {
   uploadControllers.get(id)?.abort();
   uploadControllers.delete(id);
+  updateUploadProgress(id);
   forgetActiveUpload(id);
   try { await setUploadStatus(id, 'paused'); } catch { /* DELETE below is authoritative */ }
   for (let attempt = 0; attempt < 4; attempt++) {
     try { await api(`/uploads/${id}`, { method: 'DELETE' }); return; }
     catch (error) { if (attempt === 3) throw error; await new Promise(resolve => setTimeout(resolve, 150)); }
   }
+}
+
+function sendUploadChunk(id: string, offset: number, body: Blob, total: number, signal: AbortSignal) {
+  return new Promise<{ received: number }>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const cleanup = () => signal.removeEventListener('abort', abort);
+    const abort = () => xhr.abort();
+    xhr.open('PATCH', `${API}/api/v1/uploads/${id}`);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('X-MyNAS-Request', '1');
+    xhr.setRequestHeader('X-Upload-Offset', String(offset));
+    xhr.upload.onprogress = event => updateUploadProgress(id, Math.min(total, offset + event.loaded));
+    xhr.onload = () => { cleanup(); if (xhr.status < 200 || xhr.status >= 300) { reject(new Error(xhr.responseText.trim() || `HTTP ${xhr.status}`)); return; } try { resolve(JSON.parse(xhr.responseText) as { received: number }); } catch { reject(new Error('Invalid upload response')); } };
+    xhr.onerror = () => { cleanup(); reject(new Error('Upload connection failed')); };
+    xhr.onabort = () => { cleanup(); reject(new DOMException('Upload paused', 'AbortError')); };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) { abort(); return; }
+    xhr.send(body);
+  });
 }
 
 async function sendUpload(file: File, session: UploadSession) {
@@ -53,22 +81,26 @@ async function sendUpload(file: File, session: UploadSession) {
   uploadControllers.get(session.id)?.abort();
   uploadControllers.set(session.id, controller);
   rememberActiveUpload(session.id);
+  let completed = false;
   try {
     await setUploadStatus(session.id, 'uploading');
     const chunkSize = session.chunkSize || 8 * 1024 * 1024;
+    updateUploadProgress(session.id, session.received || 0);
     for (let offset = session.received || 0; offset < file.size;) {
       const body = file.slice(offset, offset + chunkSize);
-      const response = await fetch(`${API}/api/v1/uploads/${session.id}`, { method: 'PATCH', headers: { 'X-MyNAS-Request': '1', 'X-Upload-Offset': String(offset) }, body, credentials: 'include', signal: controller.signal });
-      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
-      const result = await response.json() as { received: number };
+      const result = await sendUploadChunk(session.id, offset, body, file.size, controller.signal);
       offset = result.received;
+      updateUploadProgress(session.id, offset);
     }
+    completed = true;
   } catch (error) {
+    updateUploadProgress(session.id);
     try { await setUploadStatus(session.id, 'paused'); } catch { /* upload may already be finalizing */ }
     throw error;
   } finally {
     if (uploadControllers.get(session.id) === controller) uploadControllers.delete(session.id);
     forgetActiveUpload(session.id);
+    if (completed) { const finalBytes = inFlightUploadBytes.get(session.id); setTimeout(() => { if (inFlightUploadBytes.get(session.id) === finalBytes) updateUploadProgress(session.id); }, 3000); }
   }
 }
 
@@ -113,15 +145,15 @@ function App() {
   const [pairedNode, setPairedNode] = useState<PairedNode | undefined>(() => readPairedNode());
   const [nodeManager, setNodeManager] = useState(false);
   const [connection, setConnection] = useState<'checking' | 'offline'>('checking');
-  const [connectionError, setConnectionError] = useState('');
+  const [connectionError, setConnectionError] = useState<unknown>();
   const [page, setPage] = useState<Page>('home');
   const [dark, setDark] = useState(() => { const saved=readSetting('theme'); return saved ? saved === 'dark' : globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false; });
   const checking = useRef(false);
   const check = useCallback(async () => {
     if(checking.current)return;
-    checking.current=true; setConnection('checking'); setConnectionError('');
-    try { const result=await api<Health>('/health'); const paired={apiUrl:API,host:new URL(API).host,user:result.user.login,verifiedAt:new Date().toISOString()}; const known=loadNodes().find(node=>node.apiUrl===API); const pendingName=readSetting(`pendingNodeName:${API}`).trim(); setHealth(result); setPairedNode(paired); setConnectionError(''); saveSetting('lastUser',result.user.login); saveSetting(pairedNodeKey,JSON.stringify(paired)); rememberNode({...paired,name:pendingName||known?.name||connectedNodeName()}); if(pendingName)saveSetting(`pendingNodeName:${API}`,''); }
-    catch(e) { setHealth(undefined); setConnection('offline'); setConnectionError(errorText(e)); }
+    checking.current=true; setConnection('checking'); setConnectionError(undefined);
+    try { const result=await api<Health>('/health'); const paired={apiUrl:API,host:new URL(API).host,user:result.user.login,verifiedAt:new Date().toISOString()}; const known=loadNodes().find(node=>node.apiUrl===API); const pendingName=readSetting(`pendingNodeName:${API}`).trim(); setHealth(result); setPairedNode(paired); setConnectionError(undefined); saveSetting('lastUser',result.user.login); saveSetting(pairedNodeKey,JSON.stringify(paired)); rememberNode({...paired,name:pendingName||known?.name||connectedNodeName()}); if(pendingName)saveSetting(`pendingNodeName:${API}`,''); }
+    catch(e) { setHealth(undefined); setConnection('offline'); setConnectionError(e); }
     finally { checking.current=false; }
   }, []);
   useEffect(() => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; saveSetting('theme',dark ? 'dark' : 'light'); }, [dark]);
@@ -143,8 +175,8 @@ function App() {
   }, []);
   const onboardingPreview=typeof location!=='undefined'&&['localhost','127.0.0.1'].includes(location.hostname)&&new URLSearchParams(location.search).has('onboarding');
   const offlinePreview=typeof location!=='undefined'&&['localhost','127.0.0.1'].includes(location.hostname)&&new URLSearchParams(location.search).has('offline');
-  if(onboardingPreview)return <Connect checking={false} error="" retry={check} previewGuide/>;
-  if(offlinePreview)return <Connect checking={false} error="无法连接树莓派的 MyNAS 服务，请检查设备电源、网络和 Tailscale。" retry={check} pairedNode={pairedNode||{apiUrl:API,host:'rsp',user:'已授权用户',verifiedAt:new Date().toISOString()}}/>;
+  if(onboardingPreview)return <Connect checking={false} retry={check} previewGuide/>;
+  if(offlinePreview)return <Connect checking={false} error={new ApiError('无法连接树莓派的 MyNAS 服务，请检查设备电源、网络、Tailscale 或代理设置。',0,'network')} retry={check} pairedNode={{apiUrl:'https://rsp.tail681937.ts.net',host:'rsp.tail681937.ts.net',user:'已授权用户',verifiedAt:new Date().toISOString()}}/>;
   if (!health) return <Connect checking={connection==='checking'} error={connectionError} retry={check} pairedNode={pairedNode} />;
   const PageView = page === 'home' ? Home : page === 'files' ? Files : page === 'transfers' ? Transfers : page === 'trash' ? Trash : Settings;
   return <main className="app">
@@ -161,11 +193,13 @@ function App() {
   </main>;
 }
 
-function Connect({ checking, error, retry, pairedNode, previewGuide=false }: { checking: boolean; error: string; retry: () => void; pairedNode?: PairedNode; previewGuide?: boolean }) {
+function Connect({ checking, error, retry, pairedNode, previewGuide=false }: { checking: boolean; error?: unknown; retry: () => void; pairedNode?: PairedNode; previewGuide?: boolean }) {
   const {locale,setLocale,t}=useLocale();
-  const privateOrigin=typeof location!=='undefined'&&new URL(API).origin!==location.origin;
   const [guide,setGuide]=useState(previewGuide);
-  return <><button className="connect-language" onClick={()=>setLocale(locale==='zh'?'en':'zh')} aria-label={t('切换到英文','Switch to Chinese')}><I.Languages/><span>{locale==='zh'?'English':'中文'}</span></button><div className={`connect ${pairedNode ? 'returning-node' : 'first-connect'}`}><div className="line-art"><I.HardDrive />{checking?<I.LoaderCircle className="spin"/>:pairedNode?<I.Unplug/>:<I.RadioTower/>}</div><h1>MyNAS</h1><h2>{checking ? t('正在验证私有连接…','Verifying private connection…') : pairedNode ? t(`树莓派 ${pairedNode.host} 当前未连接`,`Raspberry Pi ${pairedNode.host} is offline`) : t('连接你的第一台 MyNAS','Connect your first MyNAS')}</h2><p>{pairedNode ? t('这台设备已经完成过配对，不需要重新安装。请恢复树莓派电源、网络或 Tailscale 连接。','This device is already paired. Restore power, network, or its Tailscale connection; no reinstall is required.') : t('没有发现已配对的 MyNAS。首次使用需要准备树莓派、开启 SSH，并让电脑与树莓派加入同一个 Tailscale 私有网络。','No paired MyNAS was found. Prepare a Raspberry Pi, enable SSH, and join both devices to the same Tailscale network.')}</p>{error&&<p className="connection-error">{error}</p>}{!checking&&pairedNode&&<ol><li>{t('确认树莓派已经开机并连接网络','Make sure the Raspberry Pi is powered on and online')}</li><li>{t('打开电脑端 Tailscale，确认状态为已连接','Open Tailscale on this computer and confirm it is connected')}</li><li>{t('点击下方按钮重新连接树莓派','Use the button below to reconnect')}</li></ol>}<div className="row">{!checking&&!pairedNode&&<button className="primary onboarding-start" onClick={()=>setGuide(true)}><I.Route/>{t('开始首次连接向导','Start setup guide')}</button>}{privateOrigin&&pairedNode&&<a className="ghost" href={API + '/'}><I.ShieldCheck />{t('尝试打开私有地址','Open private address')}</a>}<button className={pairedNode?'primary':'ghost'} disabled={checking} onClick={() => void retry()}><I.RefreshCw />{checking?t('正在连接','Connecting'):t('重新连接树莓派','Reconnect Raspberry Pi')}</button>{pairedNode&&<a className="ghost" href="https://login.tailscale.com/admin/machines" target="_blank" rel="noreferrer">{t('查看 Tailscale 设备','View Tailscale devices')}</a>}</div>{pairedNode&&<small>{t('已配对设备','Paired device')}：{pairedNode.host} · {pairedNode.user || t('已授权用户','Authorized user')}。{t('连接恢复后会自动返回主页。','The dashboard will return automatically after reconnection.')}</small>}</div>{guide&&!pairedNode&&<FirstConnectionGuide close={()=>setGuide(false)}/>}</>;
+  const [proxyHelp,setProxyHelp]=useState(false);
+  const proxyGuide=error instanceof ApiError&&['network','timeout'].includes(error.kind)?proxyBypassGuide(pairedNode?.apiUrl||API):undefined;
+  const message=error?errorText(error):'';
+  return <><button className="connect-language" onClick={()=>setLocale(locale==='zh'?'en':'zh')} aria-label={t('切换到英文','Switch to Chinese')}><I.Languages/><span>{locale==='zh'?'English':'中文'}</span></button><div className={`connect ${pairedNode ? 'returning-node' : 'first-connect'}`}><div className="line-art"><I.HardDrive />{checking?<I.LoaderCircle className="spin"/>:pairedNode?<I.Unplug/>:<I.RadioTower/>}</div><h1>MyNAS</h1><h2>{checking ? t('正在验证私有连接…','Verifying private connection…') : pairedNode ? t(`树莓派 ${pairedNode.host} 当前未连接`,`Raspberry Pi ${pairedNode.host} is offline`) : t('连接你的第一台 MyNAS','Connect your first MyNAS')}</h2><p>{pairedNode ? t('这台设备已经完成过配对，不需要重新安装。请恢复树莓派电源、网络或 Tailscale 连接。','This device is already paired. Restore power, network, or its Tailscale connection; no reinstall is required.') : t('没有发现已配对的 MyNAS。首次使用需要准备树莓派、开启 SSH，并让电脑与树莓派加入同一个 Tailscale 私有网络。','No paired MyNAS was found. Prepare a Raspberry Pi, enable SSH, and join both devices to the same Tailscale network.')}</p>{message&&<p className="connection-error">{message}</p>}{!checking&&proxyGuide&&<div className="proxy-diagnostic"><div><I.TriangleAlert/><span><b>{t('是否同时开启了代理软件？','Using a proxy at the same time?')}</b><small>{t('Clash、Surge 等工具的 TUN 或 Fake-IP 可能拦截 Tailscale 私有流量。网页不会修改你的代理设置。','TUN or Fake-IP in tools such as Clash and Surge may intercept private Tailscale traffic. MyNAS will not change your proxy settings.')}</small></span><button onClick={()=>setProxyHelp(value=>!value)}>{proxyHelp?t('收起排查','Hide diagnostics'):t('排查代理冲突','Check proxy conflict')}</button></div>{proxyHelp&&<section><ol><li>{t('临时关闭代理的 TUN/增强模式，然后点击“重新连接”','Temporarily disable TUN/enhanced mode, then select Reconnect')}</li><li>{t('如果连接恢复，将下方规则加入代理的扩展/合并配置','If that works, add the rules below to the proxy extension/merge configuration')}</li><li>{t('重新启用代理，再次检测连接','Re-enable the proxy and test the connection again')}</li></ol><CommandBlock label={t('Clash / mihomo 绕过规则','Clash / mihomo bypass rules')} value={proxyGuide.clashConfig} badge="PROXY BYPASS"/><div className="proxy-targets"><b>{t('其他代理软件请将以下目标设为 DIRECT：','For other proxy tools, set these targets to DIRECT:')}</b><code>{proxyGuide.targets.join('\n')}</code></div><p>{t('请不要直接编辑 Clash 自动生成的配置文件；应使用扩展配置或合并配置，避免订阅更新后丢失。','Do not edit Clash generated configuration directly. Use extension or merge configuration so subscription updates do not overwrite the rules.')}</p></section>}</div>}{!checking&&pairedNode&&<ol><li>{t('确认树莓派已经开机并连接网络','Make sure the Raspberry Pi is powered on and online')}</li><li>{t('打开电脑端 Tailscale，确认状态为已连接','Open Tailscale on this computer and confirm it is connected')}</li><li>{t('点击下方按钮重新连接树莓派','Use the button below to reconnect')}</li></ol>}<div className="row">{!checking&&!pairedNode&&<button className="primary onboarding-start" onClick={()=>setGuide(true)}><I.Route/>{t('开始首次连接向导','Start setup guide')}</button>}<button className={pairedNode?'primary':'ghost'} disabled={checking} onClick={() => void retry()}><I.RefreshCw />{checking?t('正在连接','Connecting'):t('重新连接树莓派','Reconnect Raspberry Pi')}</button>{pairedNode&&<a className="ghost" href="https://login.tailscale.com/admin/machines" target="_blank" rel="noreferrer">{t('查看 Tailscale 设备','View Tailscale devices')}</a>}</div>{pairedNode&&<small>{t('已配对设备','Paired device')}：{pairedNode.host} · {pairedNode.user || t('已授权用户','Authorized user')}。{t('请始终从 MyNAS 公共入口打开界面；私有地址仅用于后台数据连接。','Always open the MyNAS public entry. The private address is used only for background data access.')} {t('连接恢复后会自动返回主页。','The dashboard will return automatically after reconnection.')}</small>}</div>{guide&&!pairedNode&&<FirstConnectionGuide close={()=>setGuide(false)}/>}</>;
 }
 
 const driveDemoVolumes=():Volume[]=>{
@@ -181,22 +215,23 @@ const driveDemoVolumes=():Volume[]=>{
 function Home() {
   const {t}=useLocale();
   const demo=typeof location!=='undefined'&&['localhost','127.0.0.1'].includes(location.hostname)&&new URLSearchParams(location.search).get('demo')==='drives';
-  const [volumes, setVolumes] = useState<Volume[]>(()=>demo?driveDemoVolumes():[]);
-  const [previous, setPrevious] = useState<Record<string, Volume>>({});
-  const [selected, setSelected] = useState<Volume>();
+  const [sample, setSample] = useState<{volumes:Volume[];sampledAt:number;previous:Record<string,Volume>;elapsedMs:number}>(()=>({volumes:demo?driveDemoVolumes():[],sampledAt:0,previous:{},elapsedMs:0}));
+  const {volumes,previous,elapsedMs}=sample;
+  const [selectedId, setSelectedId] = useState<string>();
   const [renameVolume, setRenameVolume] = useState<Volume>();
   const [wizard, setWizard] = useState(false);
-  useEffect(() => { if(demo)return; const load = () => api<Volume[]>('/volumes').then(next => { setVolumes(current => { setPrevious(Object.fromEntries(current.map(volume => [volume.id, volume]))); return Array.isArray(next) ? next : []; }); }).catch(() => {}); void load(); const timer = setInterval(load, 2000); return () => clearInterval(timer); }, [demo]);
-  const speed = (now: number, old?: number) => old === undefined ? '—' : `${fmt(Math.max(0, now - old))}/2s`;
-  const rename=async(volume:Volume,name:string)=>{const updated=demo?{...volume,name}:await api<Volume>('/volumes',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:volume.id,name})});setVolumes(rows=>rows.map(row=>row.id===updated.id?updated:row));setSelected(current=>current?.id===updated.id?updated:current);setRenameVolume(undefined)};
+  const selected=volumes.find(volume=>volume.id===selectedId);
+  useEffect(() => { if(demo)return; const load = () => api<Volume[]>('/volumes').then(next => { const now=Date.now(); setSample(current=>({volumes:Array.isArray(next)?next:[],sampledAt:now,previous:Object.fromEntries(current.volumes.map(volume=>[volume.id,volume])),elapsedMs:current.sampledAt>0?now-current.sampledAt:0})); }).catch(() => {}); void load(); const timer = setInterval(load, 2000); return () => clearInterval(timer); }, [demo]);
+  const speed = (now: number, old?: number) => old === undefined || elapsedMs <= 0 ? '—' : `${fmt(bytesPerSecond(now,old,elapsedMs))}/s`;
+  const rename=async(volume:Volume,name:string)=>{const updated=demo?{...volume,name}:await api<Volume>('/volumes',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:volume.id,name})});setSample(current=>({...current,volumes:current.volumes.map(row=>row.id===updated.id?updated:row)}));setRenameVolume(undefined)};
   return <><header className="home-header"><div><span className="eyebrow">STORAGE OVERVIEW / {t(demo?'多硬盘演示':'实时状态',demo?'DRIVE DEMO':'LIVE STATUS')}</span><h1>{t('你的私有存储空间','Your private storage')}</h1><p>{t(`${volumes.length} 块独立硬盘，文件只经由加密的 Tailscale 通道传输。`,`${volumes.length} independent drives. Files travel only through the encrypted Tailscale link.`)}</p></div><div className="home-actions"><button onClick={() => setWizard(true)}><I.Plus />{t('接入新硬盘','Add a drive')}</button><div className="live-stamp"><i /> {demo?'DEMO':'LIVE'}<br/><small>{demo?t('模拟数据','SAMPLE DATA'):t('每 2 秒更新','UPDATED EVERY 2S')}</small></div></div></header>
-    {volumes.length ? <section className="volume-grid" aria-label={t('硬盘列表','Drive list')}>{volumes.map((volume, index) => { const percent = volume.total ? Math.round(volume.used / volume.total * 100) : 0; return <button className={`diskcard volume-card ${volume.status}`} onClick={() => setSelected(volume)} aria-label={t(`查看 ${volume.name} 详情`,`View details for ${volume.name}`)} key={volume.id}>
+    {volumes.length ? <section className="volume-grid" aria-label={t('硬盘列表','Drive list')}>{volumes.map((volume, index) => { const percent = volume.total ? Math.round(volume.used / volume.total * 100) : 0; return <button className={`diskcard volume-card ${volume.status}`} onClick={() => setSelectedId(volume.id)} aria-label={t(`查看 ${volume.name} 详情`,`View details for ${volume.name}`)} key={volume.id}>
       <div className="disk-id"><span>VOLUME {String(index + 1).padStart(2, '0')} · {volume.status === 'online' ? t('在线','ONLINE') : t('离线','OFFLINE')}</span><h2>{volume.name}</h2><p>{volume.device} · {volume.filesystem}</p></div>
       <div className="capacity-number"><strong>{percent}</strong><span>%<small>USED</small></span></div>
       <div className="capacity-track" style={{ '--p': percent } as React.CSSProperties}><i /><span>{fmt(volume.used)} {t('已用','used')}</span><span>{fmt(volume.free)} {t('可用','free')}</span></div>
       <div className="disk-total"><span>TOTAL CAPACITY</span><strong>{volume.status === 'online' ? fmt(volume.total) : 'OFFLINE'}</strong></div><I.ArrowUpRight />
     </button>; })}</section> : <div className="empty"><I.LoaderCircle className="spin" /><p>{t('正在读取硬盘信息…','Reading drive information…')}</p></div>}
-    {selected && <div className="drawer"><button className="close" onClick={() => setSelected(undefined)} aria-label={t('关闭','Close')}><I.X /></button><span className="eyebrow">DEVICE INSPECTION</span><div className="drawer-title"><h2>{selected.name}</h2><button onClick={()=>setRenameVolume(selected)} aria-label={t(`重命名 ${selected.name}`,`Rename ${selected.name}`)}><I.Pencil/>{t('重命名','Rename')}</button></div><dl><dt>{t('状态','Status')}</dt><dd>{selected.status === 'online' ? t('在线','Online') : t('离线','Offline')}</dd><dt>{t('设备','Device')}</dt><dd>{selected.device}</dd><dt>UUID</dt><dd>{selected.uuid || t('主数据盘','Primary data drive')}</dd><dt>{t('文件系统','File system')}</dt><dd>{selected.filesystem}</dd><dt>{t('挂载点','Mount point')}</dt><dd>{selected.mount}</dd><dt>{t('总容量','Total capacity')}</dt><dd>{fmt(selected.total)}</dd><dt>{t('已用 / 可用','Used / Free')}</dt><dd>{fmt(selected.used)} / {fmt(selected.free)}</dd><dt>{t('读取 / 写入','Read / Write')}</dt><dd>{speed(selected.readBytes, previous[selected.id]?.readBytes)} · {speed(selected.writeBytes, previous[selected.id]?.writeBytes)}</dd><dt>SMART</dt><dd>{selected.smart}</dd></dl></div>}
+    {selected && <div className="drawer"><button className="close" onClick={() => setSelectedId(undefined)} aria-label={t('关闭','Close')}><I.X /></button><span className="eyebrow">DEVICE INSPECTION</span><div className="drawer-title"><h2>{selected.name}</h2><button onClick={()=>setRenameVolume(selected)} aria-label={t(`重命名 ${selected.name}`,`Rename ${selected.name}`)}><I.Pencil/>{t('重命名','Rename')}</button></div><dl><dt>{t('状态','Status')}</dt><dd>{selected.status === 'online' ? t('在线','Online') : t('离线','Offline')}</dd><dt>{t('设备','Device')}</dt><dd>{selected.device}</dd><dt>UUID</dt><dd>{selected.uuid || t('主数据盘','Primary data drive')}</dd><dt>{t('文件系统','File system')}</dt><dd>{selected.filesystem}</dd><dt>{t('挂载点','Mount point')}</dt><dd>{selected.mount}</dd><dt>{t('总容量','Total capacity')}</dt><dd>{fmt(selected.total)}</dd><dt>{t('已用 / 可用','Used / Free')}</dt><dd>{fmt(selected.used)} / {fmt(selected.free)}</dd><dt>{t('读取 / 写入','Read / Write')}</dt><dd>{speed(selected.readBytes, previous[selected.id]?.readBytes)} · {speed(selected.writeBytes, previous[selected.id]?.writeBytes)}</dd><dt>SMART</dt><dd>{selected.smart}</dd></dl></div>}
     {renameVolume&&<VolumeRenameDialog volume={renameVolume} close={()=>setRenameVolume(undefined)} save={name=>rename(renameVolume,name)}/>}
     {wizard && <VolumeWizard close={() => setWizard(false)} />}</>;
 }
@@ -224,11 +259,11 @@ function VolumeWizard({ close }: { close: () => void }) {
     <CommandBlock label={t('在树莓派终端运行','Run in the Raspberry Pi terminal')} value="sudo mynas-setup" /></div></div>;
 }
 
-function CommandBlock({ label, value }: { label: string; value: string }) {
+function CommandBlock({ label, value, badge='SECURE TERMINAL' }: { label: string; value: string; badge?: string }) {
   const {t}=useLocale();
   const [state,setState]=useState<'idle'|'copied'|'failed'>('idle');
   const copy=async()=>{try{await navigator.clipboard.writeText(value);setState('copied');globalThis.setTimeout(()=>setState('idle'),1600)}catch{setState('failed')}};
-  return <div className="command-block"><div className="command-meta"><span>{label}</span><i>SECURE TERMINAL</i></div><div className="command-line"><code>{value}</code><button className={`command-copy ${state}`} onClick={()=>void copy()} aria-label={t(`复制命令：${value}`,`Copy command: ${value}`)}>{state==='copied'?<I.Check/>:<I.Copy/>}<span>{state==='copied'?t('已复制','Copied'):state==='failed'?t('请手动复制','Copy manually'):t('复制命令','Copy command')}</span></button></div></div>;
+  return <div className="command-block"><div className="command-meta"><span>{label}</span><i>{badge}</i></div><div className="command-line"><code>{value}</code><button className={`command-copy ${state}`} onClick={()=>void copy()} aria-label={t(`复制内容：${value}`,`Copy content: ${value}`)}>{state==='copied'?<I.Check/>:<I.Copy/>}<span>{state==='copied'?t('已复制','Copied'):state==='failed'?t('请手动复制','Copy manually'):t('复制','Copy')}</span></button></div></div>;
 }
 
 function FirstConnectionGuide({ close, another=false, initialName='', onNameChange }: { close: () => void; another?: boolean; initialName?: string; onNameChange?: (value:string)=>void }) {
@@ -249,7 +284,7 @@ function FirstConnectionGuide({ close, another=false, initialName='', onNameChan
     <div className="onboarding-track"><section><b>01</b><span><strong>{t('准备树莓派系统','Prepare Raspberry Pi OS')}</strong><small>{t('在 Raspberry Pi Imager 中设置用户名、密码、Wi-Fi，并在“服务”中开启 SSH。','In Raspberry Pi Imager, set a username, password, and Wi-Fi, then enable SSH under Services.')}</small></span><a href="https://www.raspberrypi.com/documentation/computers/remote-access.html#ssh" target="_blank" rel="noreferrer">{t('SSH 官方步骤','Official SSH guide')} <I.ExternalLink/></a></section><section><b>02</b><span><strong>{t('安装电脑端 Tailscale','Install Tailscale on your computer')}</strong><small>{t(`在 ${platformName} 安装并登录。树莓派稍后通过终端加入同一个 tailnet。`,`Install and sign in on ${platformName}. The Raspberry Pi will join the same tailnet from its terminal later.`)}</small></span><a href="https://tailscale.com/download" target="_blank" rel="noreferrer">{t('下载 Tailscale','Download Tailscale')} <I.ExternalLink/></a></section><section><b>03</b><span><strong>{t(`在 ${platformName} 上打开终端`,`Open a terminal on ${platformName}`)}</strong><small>{terminalHint} {t('下面第一条命令在电脑上运行，不是在树莓派本机上运行。','Run the first command below on your computer, not directly on the Raspberry Pi.')}</small></span></section></div>
     <div className="terminal-location computer"><I.Monitor/><span><b>{t(`运行位置：你的 ${platformName} 电脑`,`Run on: your ${platformName} computer`)}</b><small>{terminalName}</small></span></div><CommandBlock label={t(`在 ${terminalName} 中运行 · 使用 Imager 中设置的用户名`,`Run in ${terminalName} · use the username set in Imager`)} value={t('ssh <用户名>@mynas.local','ssh <username>@mynas.local')}/><div className="platform-note"><I.Info/><span>{t('如果找不到 ','If ')}<code>mynas.local</code>{t('，请在路由器后台查看树莓派 IP，然后使用 ',' cannot be found, check the Raspberry Pi IP in your router, then use ')}<code>{t('ssh 用户名@192.168.x.x','ssh username@192.168.x.x')}</code>{t('。如果 SSH 没有开启且树莓派没有显示器，需要重新用 Imager 写卡并启用 SSH。','. If SSH is disabled and the Pi has no display, rewrite the card with Imager and enable SSH.')}</span></div>
     <div className="onboarding-track compact"><section><b>04</b><span><strong>{t('看到树莓派命令提示符后继续','Continue after the Raspberry Pi prompt appears')}</strong><small>{t('SSH 登录成功后，同一个终端窗口已经进入树莓派；接下来的命令会在树莓派上执行。','After SSH succeeds, that same terminal window is now connected to the Raspberry Pi. Run the next commands there.')}</small></span></section></div><div className="terminal-location raspberry"><I.HardDrive/><span><b>{t('运行位置：已通过 SSH 登录的树莓派终端','Run on: Raspberry Pi terminal connected over SSH')}</b><small>{t('终端提示符通常会变成“用户名@mynas:~ $”','The prompt usually changes to “username@mynas:~ $”')}</small></span></div><CommandBlock label={t('SSH 登录成功后运行 · 安装树莓派端 Tailscale','After SSH login · install Tailscale on Raspberry Pi')} value="curl -fsSL https://tailscale.com/install.sh | sh"/><CommandBlock label={t('仍在树莓派终端运行 · 生成授权网址','Still in the Raspberry Pi terminal · create sign-in URL')} value="sudo tailscale up"/>
-    {another?<div className="platform-note finish-note"><I.Info/><span>{t('完成 MyNAS 安装和 Tailscale Serve 配置后，返回设备管理，点击“已经配置好 MyNAS？”查找并填写这台设备的地址。','After MyNAS and Tailscale Serve are configured, return to Device Manager and choose “MyNAS already configured?” to enter its address.')}</span></div>:<div className="address-card"><div><span>{t('授权完成后验证 MyNAS 地址','Verify the MyNAS address after sign-in')}</span><a href={`https://${host}`} target="_blank" rel="noreferrer">https://{host} <I.ExternalLink /></a></div><i>{t('返回本页点击“重新检测”，连接成功后向导会自动消失。','Return here and select “Scan again”. The guide will disappear after connection succeeds.')}</i></div>}<div className="guide-footer"><button className="ghost" onClick={close}>{t('稍后继续','Continue later')}</button><button className="primary" onClick={close}>{another?t('完成后返回设备管理','Return to Device Manager'):t('完成后返回检测','Return to connection check')}</button></div></div></div>;
+    {another?<div className="platform-note finish-note"><I.Info/><span>{t('完成 MyNAS 安装和 Tailscale Serve 配置后，返回设备管理，点击“已经配置好 MyNAS？”查找并填写这台设备的地址。','After MyNAS and Tailscale Serve are configured, return to Device Manager and choose “MyNAS already configured?” to enter its address.')}</span></div>:<div className="address-card"><div><span>{t('授权完成后的 MyNAS 数据地址','MyNAS data address after sign-in')}</span><code>https://{host}</code></div><i>{t('不要直接打开这个私有地址。保留当前公共页面并点击“重新检测”，这样连接失败时仍能看到诊断提示。','Do not open this private address directly. Keep this public page open and select Scan again so diagnostics remain available if the connection fails.')}</i></div>}<div className="guide-footer"><button className="ghost" onClick={close}>{t('稍后继续','Continue later')}</button><button className="primary" onClick={close}>{another?t('完成后返回设备管理','Return to Device Manager'):t('完成后返回检测','Return to connection check')}</button></div></div></div>;
 }
 
 function ExistingNodeGuide({close}:{close:()=>void}) {
@@ -316,14 +351,16 @@ function Transfers() {
   const [rows, setRows] = useState<UploadRow[]>([]);
   const [error, setError] = useState('');
   const [resumeRow, setResumeRow] = useState<UploadRow>();
+  const [, setProgressVersion] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const load = useCallback(() => api<UploadRow[]>('/uploads').then(x => setRows(Array.isArray(x) ? x : [])).catch(e => setError(errorText(e))), []);
   useEffect(() => { void load(); const timer = setInterval(load, 1500); return () => clearInterval(timer); }, [load]);
+  useEffect(() => { const listener = () => setProgressVersion(version => version + 1); uploadProgressListeners.add(listener); return () => { uploadProgressListeners.delete(listener); }; }, []);
   const run = async (action: () => Promise<void>) => { try { setError(''); await action(); await load(); } catch (e) { setError(errorText(e)); } };
   const chooseResume = (row: UploadRow) => { setResumeRow(row); fileInput.current?.click(); };
   const resume = (file?: File) => { const row = resumeRow; setResumeRow(undefined); if (!row || !file) return; void run(() => sendUpload(file, row)); };
   const labels: Record<string, string> = { waiting: t('等待上传','Waiting'), uploading: t('上传中','Uploading'), paused: t('已暂停','Paused'), verifying: t('正在校验','Verifying'), 'processing-cover': t('正在生成封面','Creating thumbnail'), completed: t('已完成','Completed'), failed: t('失败','Failed') };
-  return <><header><div><h1>{t('传输','Transfers')}</h1><p>{t('上传可暂停、续传或取消；续传时浏览器会要求重新选择原文件。','Uploads can be paused, resumed, or canceled. To resume, select the original file again.')}</p></div><button onClick={() => void load()}><I.RefreshCw />{t('刷新','Refresh')}</button></header><input ref={fileInput} hidden type="file" onChange={e => { resume(e.target.files?.[0]); e.currentTarget.value = ''; }} />{error && <div className="notice">{error}</div>}{rows.length ? <div className="list transfer-list">{rows.map(row => { const percent = row.size ? Math.min(100, Math.round(row.received / row.size * 100)) : 0; const pausable = row.status === 'waiting' || row.status === 'uploading'; const resumable = row.status === 'paused' || row.status === 'failed'; const cancellable = !['completed', 'verifying', 'processing-cover'].includes(row.status); return <div key={row.id}><I.ArrowUpToLine /><span><b>{row.name}</b><small>{row.target || 'MyNAS'} · {labels[row.status] || row.status} · {fmt(row.received)} / {fmt(row.size)}</small><progress value={percent} max="100" /></span><em>{percent}%</em><div className="transfer-actions">{pausable && <button onClick={() => void run(() => pauseUpload(row.id))}><I.Pause />{t('暂停','Pause')}</button>}{resumable && <button onClick={() => chooseResume(row)}><I.Play />{t('继续','Resume')}</button>}{cancellable && <button onClick={() => void run(() => cancelUpload(row.id))}><I.X />{t('取消','Cancel')}</button>}</div></div>; })}</div> : <div className="empty"><I.ArrowLeftRight /><h2>{t('暂无传输任务','No transfer tasks')}</h2></div>}<div className="notice download-note"><I.Download />{t('下载由浏览器的下载面板管理，可在浏览器中暂停或取消；服务器已支持断点续传。','Downloads are managed by your browser, where they can be paused or canceled. The server supports resuming downloads.')}</div></>;
+  return <><header><div><h1>{t('传输','Transfers')}</h1><p>{t('上传可暂停、续传或取消；续传时浏览器会要求重新选择原文件。','Uploads can be paused, resumed, or canceled. To resume, select the original file again.')}</p></div><button onClick={() => void load()}><I.RefreshCw />{t('刷新','Refresh')}</button></header><input ref={fileInput} hidden type="file" onChange={e => { resume(e.target.files?.[0]); e.currentTarget.value = ''; }} />{error && <div className="notice">{error}</div>}{rows.length ? <div className="list transfer-list">{rows.map(row => { const displayedReceived = displayedUploadBytes(row.received, inFlightUploadBytes.get(row.id), row.size); const percent = row.size ? Math.min(100, Math.round(displayedReceived / row.size * 100)) : 0; const pausable = row.status === 'waiting' || row.status === 'uploading'; const resumable = row.status === 'paused' || row.status === 'failed'; const cancellable = !['completed', 'verifying', 'processing-cover'].includes(row.status); return <div key={row.id}><I.ArrowUpToLine /><span><b>{row.name}</b><small>{row.target || 'MyNAS'} · {labels[row.status] || row.status} · {fmt(displayedReceived)} / {fmt(row.size)}</small><progress value={percent} max="100" /></span><em>{percent}%</em><div className="transfer-actions">{pausable && <button onClick={() => void run(() => pauseUpload(row.id))}><I.Pause />{t('暂停','Pause')}</button>}{resumable && <button onClick={() => chooseResume(row)}><I.Play />{t('继续','Resume')}</button>}{cancellable && <button onClick={() => void run(() => cancelUpload(row.id))}><I.X />{t('取消','Cancel')}</button>}</div></div>; })}</div> : <div className="empty"><I.ArrowLeftRight /><h2>{t('暂无传输任务','No transfer tasks')}</h2></div>}<div className="notice download-note"><I.Download />{t('下载由浏览器的下载面板管理，可在浏览器中暂停或取消；服务器已支持断点续传。','Downloads are managed by your browser, where they can be paused or canceled. The server supports resuming downloads.')}</div></>;
 }
 
 function Trash() { const {t}=useLocale(); const [rows, setRows] = useState<TrashRow[]>([]); const [error, setError] = useState(''); const [pending,setPending]=useState<{row:TrashRow;action:'restore'|'purge'}>(); const load = () => api<TrashRow[]>('/trash').then(x => { setRows(Array.isArray(x) ? x : []); setError(''); }).catch(e => setError(errorText(e))); useEffect(() => { void load(); }, []); const act = async () => { if(!pending)return; try { await api('/trash', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id:pending.row.id, volumeId:pending.row.volumeId, action:pending.action }) }); setPending(undefined); void load(); } catch (e) { setError(errorText(e)); } }; return <><header><h1>{t('回收站','Trash')}</h1><button onClick={load}><I.RefreshCw />{t('刷新','Refresh')}</button></header>{error && <div className="notice">{error}</div>}<div className="list">{rows.map(row => <div key={`${row.volumeId}:${row.id}`}><I.Trash2 /><span><b>{row.original}</b><small>{row.volumeName}</small></span><button onClick={() => setPending({row,action:'restore'})}>{t('恢复','Restore')}</button><button className="danger" onClick={() => setPending({row,action:'purge'})}>{t('永久删除','Delete forever')}</button></div>)}{!rows.length && !error && <div className="empty">{t('回收站为空','Trash is empty')}</div>}</div>{pending&&<div className="preview" role="dialog" aria-modal="true"><div className="preview-card"><button className="close" aria-label={t('关闭','Close')} onClick={()=>setPending(undefined)}><I.X/></button><h2>{pending.action==='purge'?t('确认永久删除','Delete forever?'):t('确认恢复','Restore item?')}</h2><p>{pending.action==='purge'?t('此操作无法撤销。将永久删除：','This cannot be undone. Permanently delete:'):t('将文件恢复到原始位置：','Restore the file to its original location:')}<br/><b>{pending.row.volumeName} / {pending.row.original}</b></p><div className="row"><button onClick={()=>setPending(undefined)}>{t('取消','Cancel')}</button><button className={pending.action==='purge'?'danger primary':'primary'} onClick={()=>void act()}>{pending.action==='purge'?t('永久删除','Delete forever'):t('恢复','Restore')}</button></div></div></div>}</>; }

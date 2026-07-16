@@ -2,7 +2,7 @@
 
 这份指南面向第一次接触树莓派、SSH、Tailscale 和外接硬盘的用户。请按顺序完成，不要先插硬盘、再边通电边反复拔线。
 
-> MyNAS v0.2.0 仍是测试版本。网页中的连接、设备管理和接盘向导已经面向新手设计，但“在一台全新的树莓派上一键安装 MyNAS 服务”仍在开发中。当前发布版的树莓派端首次部署仍由项目维护者完成；安装好 MyNAS 后，普通用户可以通过网页向导和 `sudo mynas-setup` 接入硬盘。
+> MyNAS v0.3.1 仍是测试版本。网页中的连接、设备管理和接盘向导已经面向新手设计，但“在一台全新的树莓派上一键安装 MyNAS 服务”仍在开发中。当前发布版的树莓派端首次部署仍由项目维护者完成；安装好 MyNAS 后，普通用户可以通过网页向导和 `sudo mynas-setup` 接入硬盘。
 
 ## 1. 需要准备什么
 
@@ -104,7 +104,7 @@ sudo tailscale up
 
 ## 6. 安装 MyNAS 服务
 
-v0.2.0 的通用一键初装程序仍在开发中。当前项目维护者从 Windows 工作区执行经过测试的部署脚本，把后端、网页、systemd 服务和 `mynas-setup` 安装到指定树莓派：
+v0.3.1 的通用一键初装程序仍在开发中。当前项目维护者从 Windows 工作区执行经过测试的部署脚本，把后端、网页、systemd 服务和 `mynas-setup` 安装到指定树莓派：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\deploy\deploy.ps1 -PagesOrigin https://mynas-rsp.pages.dev
@@ -117,7 +117,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\deploy\deploy.p
 - `mynas` 服务处于 `active (running)`；
 - Tailscale Serve 已将私有 HTTPS 地址转发到 `127.0.0.1:8080`；
 - 终端中可以运行 `sudo mynas-setup`；
-- 浏览器可以打开设备的 `https://设备名.tailxxxx.ts.net` 地址。
+- 在公共 MyNAS 页面中可以通过设备的 `https://设备名.tailxxxx.ts.net` 数据地址完成健康检查；不要把私有地址作为日常网页入口。
 
 ## 7. 接入第一块或新增硬盘
 
@@ -141,7 +141,7 @@ sudo mynas-setup
 ## 8. 打开网页并完成首次连接
 
 1. 确认电脑端 Tailscale 已登录并显示“已连接”。
-2. 打开 [MyNAS 公共入口](https://mynas-rsp.pages.dev/)。公共页面只提供界面和连接引导，不保存硬盘文件。
+2. 打开并收藏 [MyNAS 公共入口](https://mynas-rsp.pages.dev/)。这是唯一推荐的网页入口；公共页面提供界面和连接诊断，但不保存硬盘文件。不要直接打开或收藏设备的 `*.ts.net` 私有数据地址，否则代理冲突发生在页面加载前时将无法显示诊断提示。
 3. 第一次使用时，按照网页中的首次连接向导操作。
 4. 给树莓派 MyNAS 设置容易识别的名称，例如“客厅 NAS”或“书房备份”。
 5. 如果有多台 MyNAS，在“设置 → 多 MyNAS 设备”中分别添加、命名和切换。
@@ -187,4 +187,4 @@ journalctl -k -n 100 --no-pager
 
 ### 可以不使用 Tailscale 吗
 
-同一局域网内未来可以提供本地账号模式；当前 v0.2.0 的远程访问和身份边界仍依赖 Tailscale，不建议直接暴露到公网。
+同一局域网内未来可以提供本地账号模式；当前 v0.3.1 的远程访问和身份边界仍依赖 Tailscale，不建议直接暴露到公网。

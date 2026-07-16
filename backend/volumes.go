@@ -132,7 +132,7 @@ func (a *App) loadConfiguredVolumes() error {
 		if volume.ID == "" || volume.ID == "primary" || volume.UUID == "" || !filepath.IsAbs(volume.Mount) || !supportedFilesystem(volume.Filesystem) {
 			return fmt.Errorf("invalid configured volume %q", volume.ID)
 		}
-		if runtime.GOOS != "windows" && volume.Mount != "/mnt/mynas" && !strings.HasPrefix(volume.Mount, "/mnt/mynas/") {
+		if runtime.GOOS == "linux" && volume.Mount != "/mnt/mynas" && !strings.HasPrefix(volume.Mount, "/mnt/mynas/") {
 			return fmt.Errorf("configured volume %q is outside /mnt/mynas", volume.ID)
 		}
 		if volume.ID != stableVolumeID(volume.UUID, volume.Device) {
@@ -189,7 +189,9 @@ func (a *App) measureVolume(v Volume) Volume {
 		return v
 	}
 	v.Total, v.Free, v.Used, v.Status = total, free, total-free, "online"
-	v.ReadBytes, v.WriteBytes = diskIOForDevice(v.Device)
+	// Report bytes transferred through MyNAS itself. Linux block-device counters
+	// are delayed by the page cache and commonly stay at zero during uploads.
+	v.ReadBytes, v.WriteBytes = a.volumeIO(v.ID)
 	return v
 }
 
