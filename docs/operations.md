@@ -9,7 +9,7 @@ journalctl -u mynas -f
 tailscale serve status
 ```
 
-当前私有入口：`https://rsp.tail681937.ts.net/`。后端仅监听 `127.0.0.1:8080`，浏览器身份由 Tailscale Serve 注入。
+当前私有数据 API：`https://rsp.tail681937.ts.net/`。它不作为推荐的用户网页入口；用户应始终打开 `https://mynas-rsp.pages.dev/`，再由公共前端连接私有 API。后端仅监听 `127.0.0.1:8080`，浏览器身份由 Tailscale Serve 注入。
 
 部署前会确认现有主盘 `/mnt/nas` 已挂载。服务以 `rbp` 身份运行，应用数据为 `/home/rbp/.local/share/mynas`。新增硬盘使用 `sudo mynas-setup` 接入；向导会备份 `/etc/fstab`、按 UUID 挂载到 `/mnt/mynas/<volume-id>`，并更新 `/etc/mynas/volumes.json`，但不会修改 Samba 配置。
 
