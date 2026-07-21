@@ -8,7 +8,7 @@ import { API, ApiError, api, bytesPerSecond, displayedUploadBytes, fmt, parent, 
 import './style.css';
 
 type Page = 'home' | 'files' | 'transfers' | 'trash' | 'settings';
-type Health = { ok: boolean; user: { login: string; name: string; avatar: string }; protocol: string };
+type Health = { ok: boolean; user: { login: string; name: string; avatar: string }; protocol: string; storage?: { status: 'online' | 'offline'; mount: string; device: string; filesystem: string; uuid: string; message: string } };
 type Volume = { id: string; name: string; uuid: string; device: string; filesystem: string; mount: string; status: 'online' | 'offline'; total: number; free: number; used: number; readBytes: number; writeBytes: number; protocol: string; smart: string };
 type VolumeCandidate = { device: string; uuid: string; label: string; model: string; serial: string; filesystem: string; mount: string; size: number; removable: boolean; supported: boolean; registered: boolean; reason?: string };
 type TrashRow = { id: string; volumeId: string; volumeName: string; original: string };
@@ -179,6 +179,7 @@ function App() {
   if(offlinePreview)return <Connect checking={false} error={new ApiError('无法连接树莓派的 MyNAS 服务，请检查设备电源、网络、Tailscale 或代理设置。',0,'network')} retry={check} pairedNode={{apiUrl:'https://rsp.tail681937.ts.net',host:'rsp.tail681937.ts.net',user:'已授权用户',verifiedAt:new Date().toISOString()}}/>;
   if (!health) return <Connect checking={connection==='checking'} error={connectionError} retry={check} pairedNode={pairedNode} />;
   const PageView = page === 'home' ? Home : page === 'files' ? Files : page === 'transfers' ? Transfers : page === 'trash' ? Trash : Settings;
+  const storageOffline = health.storage?.status === 'offline';
   return <main className="app">
     <aside>
       <div className="brand"><span className="brand-mark"><I.HardDrive /></span><span>MY<span>NAS</span><small>PRIVATE STORAGE</small></span></div>
@@ -189,7 +190,7 @@ function App() {
       <div className="secure-note"><I.ShieldCheck /><span>TAILSCALE LINK<small>{t('端到端私有通道','End-to-end private link')}</small></span></div>
       <div className="profile">{health.user.avatar ? <img src={health.user.avatar} alt="" /> : <I.UserRound />}<span><b>{health.user.name || health.user.login}</b><small>{health.user.login}</small></span></div>
     </aside>
-    <section className="content"><PageBoundary key={page}><PageView /></PageBoundary></section>{nodeManager&&<NodeManager close={()=>setNodeManager(false)}/>}
+    <section className="content">{storageOffline && <div className="notice storage-alert" role="status"><I.HardDrive /><span><b>{t('数据硬盘未挂载','NAS data drive is not mounted')}</b><small>{health.storage?.message || t('文件操作已暂停，系统会自动重试挂载。','File operations are paused while the system retries the mount.')}</small></span><button onClick={() => void check()}><I.RefreshCw />{t('重新检测','Check again')}</button></div>}<PageBoundary key={page}><PageView /></PageBoundary></section>{nodeManager&&<NodeManager close={()=>setNodeManager(false)}/>}
   </main>;
 }
 

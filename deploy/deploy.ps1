@@ -22,7 +22,7 @@ if ($PagesOrigin -and -not [Uri]::IsWellFormedUriString($PagesOrigin, [UriKind]:
 Invoke-NativeRetry 'remote preflight' { ssh @sshOptions $remote "set -eu; findmnt -no SOURCE,FSTYPE,TARGET /mnt/nas; df -h /mnt/nas; systemctl is-active --quiet smbd; mkdir -p '$release/web'" }
 Invoke-NativeRetry 'backend upload' { scp @sshOptions (Join-Path $root 'backend\mynas-linux-arm64') "$remote`:$release/mynas" }
 Invoke-NativeRetry 'setup wizard upload' { scp @sshOptions (Join-Path $root 'backend\mynas-setup-linux-arm64') "$remote`:$release/mynas-setup" }
-Invoke-NativeRetry 'deployment files upload' { scp @sshOptions (Join-Path $root 'deploy\mynas.service') (Join-Path $root 'deploy\install-pi.sh') "$remote`:$release/" }
+Invoke-NativeRetry 'deployment files upload' { scp @sshOptions (Join-Path $root 'deploy\mynas.service') (Join-Path $root 'deploy\install-pi.sh') (Join-Path $root 'deploy\mynas-storage-recover.sh') (Join-Path $root 'deploy\mynas-storage-recover.service') (Join-Path $root 'deploy\mynas-storage-recover.timer') "$remote`:$release/" }
 $webArchive = Join-Path $root '.dev-state\frontend-dist.tar'
 if (Test-Path $webArchive) { Remove-Item -LiteralPath $webArchive -Force }
 tar.exe -cf $webArchive -C (Join-Path $root 'frontend\dist') .

@@ -49,6 +49,7 @@ func mountedVolumeInfo(mount string) (device, filesystem, uuid, label string) {
 		Filesystems []struct {
 			Source string `json:"source"`
 			FSType string `json:"fstype"`
+			Target string `json:"target"`
 			UUID   string `json:"uuid"`
 			Label  string `json:"label"`
 		} `json:"filesystems"`
@@ -57,6 +58,9 @@ func mountedVolumeInfo(mount string) (device, filesystem, uuid, label string) {
 		return "", "", "", ""
 	}
 	row := result.Filesystems[0]
+	if filepath.Clean(row.Target) != filepath.Clean(mount) {
+		return "", "", "", ""
+	}
 	return row.Source, row.FSType, row.UUID, row.Label
 }
 

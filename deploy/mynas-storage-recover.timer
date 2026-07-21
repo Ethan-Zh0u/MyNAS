@@ -1,0 +1,10 @@
+[Unit]
+Description=Retry MyNAS NAS volume mount
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+Unit=mynas-storage-recover.service
+
+[Install]
+WantedBy=timers.target
