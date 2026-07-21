@@ -57,6 +57,25 @@ func TestProdAuthentication(t *testing.T) {
 		t.Fatalf("got %d", w.Code)
 	}
 }
+
+func TestHealthIncludesStorageState(t *testing.T) {
+	root := t.TempDir()
+	a := &App{c: Config{Root: root}}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	w := httptest.NewRecorder()
+	a.health(w, r)
+	var body struct {
+		OK      bool          `json:"ok"`
+		Storage StorageHealth `json:"storage"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || body.Storage.Mount != root || body.Storage.Status == "" {
+		t.Fatalf("health storage=%+v body=%s", body.Storage, w.Body.String())
+	}
+}
+
 func TestPrivateNetworkPreflight(t *testing.T) {
 	a := &App{c: Config{Origin: "https://mynas.pages.dev"}}
 	h := a.middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))

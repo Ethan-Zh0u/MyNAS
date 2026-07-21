@@ -1,0 +1,7 @@
+[Unit]
+Description=Recover MyNAS NAS volume mount
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/mynas-storage-recover

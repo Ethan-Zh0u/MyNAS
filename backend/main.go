@@ -28,6 +28,14 @@ type Config struct {
 	Root, DataDir, Listen, Origin, PrivateOrigin string
 	DevIdentity                                  bool
 }
+type StorageHealth struct {
+	Status     string `json:"status"`
+	Mount      string `json:"mount"`
+	Device     string `json:"device"`
+	Filesystem string `json:"filesystem"`
+	UUID       string `json:"uuid"`
+	Message    string `json:"message"`
+}
 type App struct {
 	c             Config
 	db            *sql.DB
@@ -77,10 +85,14 @@ func main() {
 	if err := os.MkdirAll(c.DataDir, 0700); err != nil {
 		log.Fatal(err)
 	}
-	for _, d := range []string{"staging", "thumbnails", "trash"} {
-		if err := os.MkdirAll(filepath.Join(c.Root, ".mynas", d), 0700); err != nil {
-			log.Fatal(err)
+	if storageRootAvailable(c.Root) {
+		for _, d := range []string{"staging", "thumbnails", "trash"} {
+			if err := os.MkdirAll(filepath.Join(c.Root, ".mynas", d), 0700); err != nil {
+				log.Fatal(err)
+			}
 		}
+	} else {
+		log.Printf("storage unavailable at %s; starting in safe read-only API mode", c.Root)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(c.DataDir, "mynas.db"))
 	if err != nil {
@@ -255,7 +267,27 @@ func (a *App) emit(v any) {
 }
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	u, _ := a.user(r)
-	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.3.1"})
+	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.3.2", "storage": a.storageHealth()})
+}
+
+func (a *App) storageHealth() StorageHealth {
+	storage := StorageHealth{Status: "offline", Mount: a.c.Root, Message: "NAS 数据盘未挂载，文件操作已暂停"}
+	volume, err := a.volumeByID("primary")
+	if err != nil {
+		storage.Message = "NAS 数据盘状态暂时无法读取"
+		return storage
+	}
+	storage.Status = volume.Status
+	storage.Mount = volume.Mount
+	storage.Device = volume.Device
+	storage.Filesystem = volume.Filesystem
+	storage.UUID = volume.UUID
+	if volume.Status == "online" {
+		storage.Message = "NAS 数据盘已挂载"
+	} else if volume.Smart != "" {
+		storage.Message = volume.Smart
+	}
+	return storage
 }
 func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")

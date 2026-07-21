@@ -7,11 +7,16 @@ sudo systemctl status mynas
 sudo systemctl restart mynas
 journalctl -u mynas -f
 tailscale serve status
+systemctl status mynas-storage-recover.timer
 ```
 
 当前私有数据 API：`https://rsp.tail681937.ts.net/`。它不作为推荐的用户网页入口；用户应始终打开 `https://mynas-rsp.pages.dev/`，再由公共前端连接私有 API。后端仅监听 `127.0.0.1:8080`，浏览器身份由 Tailscale Serve 注入。
 
 部署前会确认现有主盘 `/mnt/nas` 已挂载。服务以 `rbp` 身份运行，应用数据为 `/home/rbp/.local/share/mynas`。新增硬盘使用 `sudo mynas-setup` 接入；向导会备份 `/etc/fstab`、按 UUID 挂载到 `/mnt/mynas/<volume-id>`，并更新 `/etc/mynas/volumes.json`，但不会修改 Samba 配置。
+
+MyNAS 后端启动时会确认 `/mnt/nas` 是真实挂载点；硬盘掉线时进入安全只读 API 模式，所有文件操作都会被拒绝，避免误写系统盘。`mynas-storage-recover.timer` 每 30 秒重试一次 fstab 挂载，挂载成功后恢复文件操作。健康接口会返回 `storage.status=offline` 和原因，前端会显示“数据硬盘未挂载”，而不是把它误报成 Tailscale 离线。
+
+自动恢复只执行安全的重新挂载，不会自动运行 `ntfsfix`、`fsck -y` 或强制挂载。NTFS 出现 dirty 标记时，应先停止写入并在 Windows 上运行 `chkdsk <盘符>: /f`；确认文件系统正常后再重新接回树莓派。
 
 ## 接入新硬盘
 
@@ -66,6 +71,8 @@ tailscale ping rsp
 tailscale serve status
 findmnt -no SOURCE,FSTYPE,TARGET /mnt/nas
 df -h /mnt/nas
+systemctl status mnt-nas.mount mynas-storage-recover.timer
+sudo journalctl -u mnt-nas.mount -u mynas-storage-recover.service -n 100 --no-pager
 ```
 
 浏览器显示 `ERR_CONNECTION_CLOSED` 而 `tailscale ping rsp` 正常时，优先检查代理绕过列表；浏览器能打开页面但 API 显示未连接时，确认当前设备登录的是拥有 rsp 权限的 Tailscale 账号。

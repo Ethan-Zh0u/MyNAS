@@ -105,6 +105,23 @@ func (a *App) seedPrimaryVolume() error {
 	if name == "" {
 		name = "NAS 数据盘"
 	}
+	var existing struct {
+		Name, UUID, Device, Filesystem string
+	}
+	if err := a.db.QueryRow("SELECT name,uuid,device,filesystem FROM volumes WHERE id='primary'").Scan(&existing.Name, &existing.UUID, &existing.Device, &existing.Filesystem); err == nil {
+		if uuid == "" {
+			uuid = existing.UUID
+		}
+		if device == a.c.Root && existing.Device != "" {
+			device = existing.Device
+		}
+		if filesystem == "unknown" && existing.Filesystem != "" {
+			filesystem = existing.Filesystem
+		}
+		if name == "NAS 数据盘" && existing.Name != "" {
+			name = existing.Name
+		}
+	}
 	_, err := a.db.Exec(`INSERT INTO volumes(id,name,uuid,device,filesystem,mount,enabled,created)
 		VALUES('primary',?,?,?,?,?,1,?)
 		ON CONFLICT(id) DO UPDATE SET uuid=excluded.uuid,device=excluded.device,filesystem=excluded.filesystem,mount=excluded.mount`,
@@ -181,6 +198,23 @@ func (a *App) measureVolume(v Volume) Volume {
 	v.Status = "offline"
 	v.Protocol = "HTTPS over Tailscale Serve"
 	v.Smart = "当前设备不支持或未授予最小权限"
+	if requiresManagedMount(v.Mount) {
+		device, filesystem, uuid, _ := mountedVolumeInfo(v.Mount)
+		if device == "" {
+			v.Smart = "数据盘未挂载"
+			return v
+		}
+		if v.UUID != "" && uuid != "" && !strings.EqualFold(v.UUID, uuid) {
+			v.Smart = "挂载设备 UUID 不匹配"
+			return v
+		}
+		if v.Device == "" || v.Device == v.Mount {
+			v.Device = device
+		}
+		if v.Filesystem == "" || v.Filesystem == "unknown" {
+			v.Filesystem = normalizeFilesystem(filesystem)
+		}
+	}
 	if info, err := os.Stat(v.Mount); err != nil || !info.IsDir() {
 		return v
 	}
@@ -193,6 +227,23 @@ func (a *App) measureVolume(v Volume) Volume {
 	// are delayed by the page cache and commonly stay at zero during uploads.
 	v.ReadBytes, v.WriteBytes = a.volumeIO(v.ID)
 	return v
+}
+
+func requiresManagedMount(path string) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	path = filepath.Clean(path)
+	return path == "/mnt/nas" || path == "/mnt/mynas" || strings.HasPrefix(path, "/mnt/mynas"+string(filepath.Separator))
+}
+
+func storageRootAvailable(root string) bool {
+	if requiresManagedMount(root) {
+		device, _, _, _ := mountedVolumeInfo(root)
+		return device != ""
+	}
+	info, err := os.Stat(root)
+	return err == nil && info.IsDir()
 }
 
 func (a *App) listVolumes() ([]Volume, error) {

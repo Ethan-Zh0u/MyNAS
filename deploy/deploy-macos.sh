@@ -81,7 +81,9 @@ echo "Uploading release files..."
 retry "backend upload" scp "${ssh_options[@]}" "$build_dir/mynas" "$remote:$remote_release/mynas"
 retry "setup wizard upload" scp "${ssh_options[@]}" "$build_dir/mynas-setup" "$remote:$remote_release/mynas-setup"
 retry "deployment files upload" scp "${ssh_options[@]}" \
-  "$root/deploy/mynas.service" "$root/deploy/install-pi.sh" "$remote:$remote_release/"
+  "$root/deploy/mynas.service" "$root/deploy/install-pi.sh" \
+  "$root/deploy/mynas-storage-recover.sh" "$root/deploy/mynas-storage-recover.service" \
+  "$root/deploy/mynas-storage-recover.timer" "$remote:$remote_release/"
 retry "frontend upload" scp "${ssh_options[@]}" "$archive" "$remote:$remote_release/frontend-dist.tar"
 retry "environment upload" scp "${ssh_options[@]}" "$env_file" "$remote:$remote_release/mynas.env"
 

@@ -6,6 +6,9 @@ test -x "$release_source/mynas"
 test -x "$release_source/mynas-setup"
 test -f "$release_source/web/index.html"
 test -f "$release_source/mynas.service"
+test -f "$release_source/mynas-storage-recover.sh"
+test -f "$release_source/mynas-storage-recover.service"
+test -f "$release_source/mynas-storage-recover.timer"
 test -f "$release_source/mynas.env"
 findmnt -no TARGET /mnt/nas | grep -qx '/mnt/nas'
 df -h /mnt/nas
@@ -21,12 +24,16 @@ sudo install -m 0755 "$release_source/mynas-setup" /usr/local/bin/mynas-setup
 sudo cp -a "$release_source/web/." "$release_target/web/"
 sudo chown -R root:root "$release_target"
 sudo install -D -m 0644 "$release_source/mynas.service" /etc/systemd/system/mynas.service
+sudo install -D -m 0755 "$release_source/mynas-storage-recover.sh" /usr/local/libexec/mynas-storage-recover
+sudo install -D -m 0644 "$release_source/mynas-storage-recover.service" /etc/systemd/system/mynas-storage-recover.service
+sudo install -D -m 0644 "$release_source/mynas-storage-recover.timer" /etc/systemd/system/mynas-storage-recover.timer
 sudo install -D -m 0600 "$release_source/mynas.env" /etc/mynas/mynas.env
 previous="$(readlink -f /opt/mynas/current 2>/dev/null || true)"
 sudo ln -sfn "$release_target" /opt/mynas/current
 printf '%s\n' "$previous" | sudo tee "$release_target/previous-release" >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable mynas
+sudo systemctl enable --now mynas-storage-recover.timer
 sudo systemctl restart mynas
 systemctl is-active --quiet mynas
 echo "release=$release_target"
