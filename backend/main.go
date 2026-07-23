@@ -267,7 +267,7 @@ func (a *App) emit(v any) {
 }
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	u, _ := a.user(r)
-	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.3.2", "storage": a.storageHealth()})
+	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.4.0", "storage": a.storageHealth()})
 }
 
 func (a *App) storageHealth() StorageHealth {
