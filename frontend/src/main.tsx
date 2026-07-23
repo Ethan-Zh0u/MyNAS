@@ -1,9 +1,14 @@
 import React, { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as I from 'lucide-react';
-import '@fontsource/barlow-condensed/500.css';
-import '@fontsource/barlow-condensed/600.css';
-import '@fontsource/barlow-condensed/700.css';
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/inter/600.css';
+import '@fontsource/inter/700.css';
+import '@fontsource/jetbrains-mono/400.css';
+import '@fontsource/jetbrains-mono/500.css';
+import '@fontsource/jetbrains-mono/600.css';
+import '@fontsource/jetbrains-mono/700.css';
 import { API, ApiError, api, bytesPerSecond, displayedUploadBytes, fmt, parent, Item, PairedNode, MyNASNode, parsePairedNode, loadNodes, rememberNode, removeNode, activateNode, normalizeNodeUrl, proxyBypassGuide } from './api';
 import './style.css';
 
@@ -182,11 +187,12 @@ function App() {
   const storageOffline = health.storage?.status === 'offline';
   return <main className="app">
     <aside>
-      <div className="brand"><span className="brand-mark"><I.HardDrive /></span><span>MY<span>NAS</span><small>PRIVATE STORAGE</small></span></div>
+      <div className="brand"><span className="brand-mark"><I.HardDrive /></span><span><b>MyNAS</b><small>PRIVATE STORAGE</small></span></div>
       <button className="node-switcher" onClick={()=>setNodeManager(true)} aria-label={t('管理 MyNAS 设备','Manage MyNAS devices')}><i /><span><b>{connectedNodeName()}</b><small>{t('已连接 · 管理设备','Connected · Manage')}</small></span><I.ChevronDown /></button>
+      <div className="nav-label">MENU</div>
+      <nav aria-label={t('主导航','Main navigation')}>{nav.map(([key, zh, en, Icon]) => <button className={page === key ? 'active' : ''} onClick={() => setPage(key)} key={key}><Icon />{locale==='en'?en:zh}</button>)}</nav>
       <button className="language-toggle" onClick={()=>setLocale(locale==='zh'?'en':'zh')} aria-label={t('切换到英文','Switch to Chinese')}><I.Languages/><span>{locale==='zh'?'中文':'English'}</span><b>{locale==='zh'?'EN':'中'}</b></button>
       <label className="theme-toggle" title={dark ? t('切换到浅色主题','Switch to light theme') : t('切换到深色主题','Switch to dark theme')}>{dark ? <I.Sun /> : <I.Moon />}<span>{t('深色主题','Dark theme')}</span><input type="checkbox" checked={dark} onChange={e => setDark(e.target.checked)} aria-label={t('使用深色主题','Use dark theme')} /><i aria-hidden="true" /></label>
-      <nav aria-label={t('主导航','Main navigation')}>{nav.map(([key, zh, en, Icon], index) => <button className={page === key ? 'active' : ''} onClick={() => setPage(key)} key={key}><span className="nav-index">0{index + 1}</span><Icon />{locale==='en'?en:zh}</button>)}</nav>
       <div className="secure-note"><I.ShieldCheck /><span>TAILSCALE LINK<small>{t('端到端私有通道','End-to-end private link')}</small></span></div>
       <div className="profile">{health.user.avatar ? <img src={health.user.avatar} alt="" /> : <I.UserRound />}<span><b>{health.user.name || health.user.login}</b><small>{health.user.login}</small></span></div>
     </aside>
@@ -226,13 +232,27 @@ function Home() {
   useEffect(() => { if(demo)return; const load = () => api<Volume[]>('/volumes').then(next => { const now=Date.now(); setSample(current=>({volumes:Array.isArray(next)?next:[],sampledAt:now,previous:Object.fromEntries(current.volumes.map(volume=>[volume.id,volume])),elapsedMs:current.sampledAt>0?now-current.sampledAt:0})); }).catch(() => {}); void load(); const timer = setInterval(load, 2000); return () => clearInterval(timer); }, [demo]);
   const speed = (now: number, old?: number) => old === undefined || elapsedMs <= 0 ? '—' : `${fmt(bytesPerSecond(now,old,elapsedMs))}/s`;
   const rename=async(volume:Volume,name:string)=>{const updated=demo?{...volume,name}:await api<Volume>('/volumes',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:volume.id,name})});setSample(current=>({...current,volumes:current.volumes.map(row=>row.id===updated.id?updated:row)}));setRenameVolume(undefined)};
-  return <><header className="home-header"><div><span className="eyebrow">STORAGE OVERVIEW / {t(demo?'多硬盘演示':'实时状态',demo?'DRIVE DEMO':'LIVE STATUS')}</span><h1>{t('你的私有存储空间','Your private storage')}</h1><p>{t(`${volumes.length} 块独立硬盘，文件只经由加密的 Tailscale 通道传输。`,`${volumes.length} independent drives. Files travel only through the encrypted Tailscale link.`)}</p></div><div className="home-actions"><button onClick={() => setWizard(true)}><I.Plus />{t('接入新硬盘','Add a drive')}</button><div className="live-stamp"><i /> {demo?'DEMO':'LIVE'}<br/><small>{demo?t('模拟数据','SAMPLE DATA'):t('每 2 秒更新','UPDATED EVERY 2S')}</small></div></div></header>
-    {volumes.length ? <section className="volume-grid" aria-label={t('硬盘列表','Drive list')}>{volumes.map((volume, index) => { const percent = volume.total ? Math.round(volume.used / volume.total * 100) : 0; return <button className={`diskcard volume-card ${volume.status}`} onClick={() => setSelectedId(volume.id)} aria-label={t(`查看 ${volume.name} 详情`,`View details for ${volume.name}`)} key={volume.id}>
-      <div className="disk-id"><span>VOLUME {String(index + 1).padStart(2, '0')} · {volume.status === 'online' ? t('在线','ONLINE') : t('离线','OFFLINE')}</span><h2>{volume.name}</h2><p>{volume.device} · {volume.filesystem}</p></div>
-      <div className="capacity-number"><strong>{percent}</strong><span>%<small>USED</small></span></div>
-      <div className="capacity-track" style={{ '--p': percent } as React.CSSProperties}><i /><span>{fmt(volume.used)} {t('已用','used')}</span><span>{fmt(volume.free)} {t('可用','free')}</span></div>
-      <div className="disk-total"><span>TOTAL CAPACITY</span><strong>{volume.status === 'online' ? fmt(volume.total) : 'OFFLINE'}</strong></div><I.ArrowUpRight />
-    </button>; })}</section> : <div className="empty"><I.LoaderCircle className="spin" /><p>{t('正在读取硬盘信息…','Reading drive information…')}</p></div>}
+  const onlineCount=volumes.filter(volume=>volume.status==='online').length;
+  const totalBytes=volumes.reduce((sum,volume)=>sum+volume.total,0);
+  const usedBytes=volumes.reduce((sum,volume)=>sum+volume.used,0);
+  const usedRatio=totalBytes?Math.round(usedBytes/totalBytes*100):0;
+  const rateOf=(now:number,old?:number)=>old===undefined?0:bytesPerSecond(now,old,elapsedMs);
+  const readRate=volumes.reduce((sum,volume)=>sum+rateOf(volume.readBytes,previous[volume.id]?.readBytes),0);
+  const writeRate=volumes.reduce((sum,volume)=>sum+rateOf(volume.writeBytes,previous[volume.id]?.writeBytes),0);
+  return <><header className="home-header"><div><span className="eyebrow">STORAGE OVERVIEW / {t(demo?'多硬盘演示':'实时状态',demo?'DRIVE DEMO':'LIVE STATUS')}</span><h1>{t('你的私有存储空间','Your private storage')}</h1><p><b>{volumes.length}</b> {t('块硬盘','drives')} · {t('总容量','total')} <b>{fmt(totalBytes)}</b> · {t('所有数据仅经由 Tailscale 加密通道传输','All data travels only through the encrypted Tailscale link')}</p></div><div className="home-actions"><span className="live-stamp"><i />{demo?'DEMO':'LIVE'}<small>{demo?t('模拟数据','SAMPLE DATA'):t('每 2 秒更新','EVERY 2S')}</small></span><button className="primary" onClick={() => setWizard(true)}><I.Plus />{t('接入新硬盘','Add a drive')}</button></div></header>
+    {volumes.length ? <>
+    <div className="stats" aria-label={t('存储统计','Storage statistics')}>
+      <div className="stat"><label>{t('总容量 / Total','Total capacity')}</label><strong>{fmt(totalBytes)}</strong><em>{t(`${volumes.length} 块已注册硬盘`,`${volumes.length} registered drives`)}</em></div>
+      <div className="stat"><label>{t('已用 / Used','Used')}</label><strong>{fmt(usedBytes)}</strong><em>{t('占比','Share')} <b>{usedRatio}%</b> · {t('剩余','Free')} {fmt(Math.max(0,totalBytes-usedBytes))}</em></div>
+      <div className="stat"><label>{t('在线硬盘 / Online','Online drives')}</label><strong>{onlineCount}<span>/ {volumes.length}</span></strong><em>{volumes.length-onlineCount?t(`${volumes.length-onlineCount} 块离线`,`${volumes.length-onlineCount} offline`):t('全部在线','All online')}</em></div>
+      <div className="stat"><label>{t('实时吞吐 / Throughput','Throughput')}</label><strong className="throughput">↓ {fmt(readRate)}/s · ↑ {fmt(writeRate)}/s</strong><em>{demo?t('模拟数据','Sample data'):t('每 2 秒采样一次','Sampled every 2 seconds')}</em></div>
+    </div>
+    <section className="volume-grid" aria-label={t('硬盘列表','Drive list')}>{volumes.map((volume, index) => { const percent = volume.total ? Math.round(volume.used / volume.total * 100) : 0; const online = volume.status === 'online'; return <button className={`volume-card ${volume.status}`} onClick={() => setSelectedId(volume.id)} aria-label={t(`查看 ${volume.name} 详情`,`View details for ${volume.name}`)} key={volume.id}>
+      <div className="vol-head"><span className="vol-icon"><I.HardDrive /></span><span className="vol-name"><b>{volume.name}</b><small>{volume.device} · {volume.filesystem}</small></span><span className={`pill ${online ? 'on' : 'off'}`}><i />{online ? t('在线','Online') : t('离线','Offline')}</span></div>
+      <div className="vol-body"><div><div className="pct">{online ? percent : '—'}{online && <small>%</small>}</div><div className="pct-label">{t('已用','Used')} {fmt(volume.used)} · {t('可用','Free')} {fmt(volume.free)}</div></div><div className="vol-total"><label>{t('总容量','Total')}</label><strong>{fmt(volume.total)}</strong></div></div>
+      <div className={`bar ${online && percent >= 75 ? 'warn' : ''}`}><i style={{ width: `${percent}%` }} /></div>
+      <div className="vol-meta"><span>VOL-{String(index + 1).padStart(2, '0')} · {volume.filesystem.toUpperCase()}</span>{online ? <span className="rw"><b className="d">↓</b> <b>{speed(volume.readBytes, previous[volume.id]?.readBytes)}</b> &nbsp;<b className="u">↑</b> <b>{speed(volume.writeBytes, previous[volume.id]?.writeBytes)}</b></span> : <span>{volume.smart || t('设备未连接','Device offline')}</span>}</div>
+    </button>; })}</section></> : <div className="empty"><I.LoaderCircle className="spin" /><p>{t('正在读取硬盘信息…','Reading drive information…')}</p></div>}
     {selected && <div className="drawer"><button className="close" onClick={() => setSelectedId(undefined)} aria-label={t('关闭','Close')}><I.X /></button><span className="eyebrow">DEVICE INSPECTION</span><div className="drawer-title"><h2>{selected.name}</h2><button onClick={()=>setRenameVolume(selected)} aria-label={t(`重命名 ${selected.name}`,`Rename ${selected.name}`)}><I.Pencil/>{t('重命名','Rename')}</button></div><dl><dt>{t('状态','Status')}</dt><dd>{selected.status === 'online' ? t('在线','Online') : t('离线','Offline')}</dd><dt>{t('设备','Device')}</dt><dd>{selected.device}</dd><dt>UUID</dt><dd>{selected.uuid || t('主数据盘','Primary data drive')}</dd><dt>{t('文件系统','File system')}</dt><dd>{selected.filesystem}</dd><dt>{t('挂载点','Mount point')}</dt><dd>{selected.mount}</dd><dt>{t('总容量','Total capacity')}</dt><dd>{fmt(selected.total)}</dd><dt>{t('已用 / 可用','Used / Free')}</dt><dd>{fmt(selected.used)} / {fmt(selected.free)}</dd><dt>{t('读取 / 写入','Read / Write')}</dt><dd>{speed(selected.readBytes, previous[selected.id]?.readBytes)} · {speed(selected.writeBytes, previous[selected.id]?.writeBytes)}</dd><dt>SMART</dt><dd>{selected.smart}</dd></dl></div>}
     {renameVolume&&<VolumeRenameDialog volume={renameVolume} close={()=>setRenameVolume(undefined)} save={name=>rename(renameVolume,name)}/>}
     {wizard && <VolumeWizard close={() => setWizard(false)} />}</>;

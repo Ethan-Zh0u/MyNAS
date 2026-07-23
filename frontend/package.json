@@ -10,7 +10,8 @@
     "lint": "tsc --noEmit --pretty false"
   },
   "dependencies": {
-    "@fontsource/barlow-condensed": "^5.2.8",
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
     "@vitejs/plugin-react": "latest",
     "lucide-react": "latest",
     "react": "latest",
