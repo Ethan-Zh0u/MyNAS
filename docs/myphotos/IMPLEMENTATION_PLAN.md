@@ -6,12 +6,12 @@
 
 | 项目 | 已核查事实 | 证据 |
 | --- | --- | --- |
-| 版本 | E3 候选版的 MyNAS 后端声明和仓库 `VERSION` 均为 `0.8.0`；iOS target 的 `MARKETING_VERSION` 为 `1.0`。 | `backend/photos_phase2.go`、`VERSION`、`ios/MyPhotos/MyPhotos.xcodeproj/project.pbxproj` |
-| 代码状态 | Photos 后端文件、iOS 项目和本目录文档均为未跟踪的工作区交付物；另有 `VERSION`、后端入口和前端文件的用户改动。不得覆盖或提交这些改动。 | `git status --short` |
+| 版本 | E3 ProRAW fallback 修正版的 MyNAS 后端声明和仓库 `VERSION` 均为 `0.8.1`；iOS target 的 `MARKETING_VERSION` 为 `1.0`。 | `backend/photos_phase2.go`、`VERSION`、`ios/MyPhotos/MyPhotos.xcodeproj/project.pbxproj` |
+| 代码状态 | E3/ProRAW、既有 iOS 功能和文档改动仍在工作区；LaunchScreen 资源另有用户已暂存改动。不得覆盖或擅自提交这些改动。 | `git status --short` |
 | 后端测试 | 除握手、上传和 E1/E2 worker 测试外，E3 已覆盖 owner 隔离、分页、changes、ETag/304、Range/206、路径不泄露和正确的 CORS 分片 hash header；`go test -race ./...`、`go vet ./...` 通过。 | `backend/photos_browse_test.go` 及既有 Photos 测试；本轮命令记录 |
-| iOS 验证 | 项目没有可发现的 iOS 单元测试 target；E1 已使用 Xcode 27 beta 对 iPhone 17 Pro 模拟器目标构建成功并安装启动，界面显示“原件已上传”语义。另有 iPhone 16 Pro 人工验证及真实端到端上传与大视频续传记录。 | Xcode 工程、本轮构建/模拟器验收、用户提供的部署/验收记录 |
-| 已部署能力 | 树莓派 MyNAS `0.7.0` 已于 2026-07-24 部署；Tailscale HTTPS health 返回实时 CPU 温度，capabilities 返回状态模型 v1、`photos-browse-v1` 和三项 derivative recipe。43 个旧 asset 已迁移并完成 129 个派生文件，处理中的服务重启恢复通过。 | 真实部署健康检查、数据库状态与 systemd 重启验收 |
-| E1/E2 状态 | 状态模型、兼容迁移、持久化任务、单线程幂等 derivative worker 和 iOS 原件/可浏览文案已经实现并部署；上线前后的 43/43 原件 SHA-256 一致，129/129 派生 JPEG 的 hash、尺寸和元数据一致，SQLite 完整性正常。树莓派 FFmpeg 7.1.5 已验证 JPG/HEIC/MP4/MOV；真实 DNG/ProRAW 与 Live Photo 派生选择仍缺样本验收。 | `backend/photos_derivatives.go`、`photos_derivative_worker.go` 及测试、iOS backup models/views；2026-07-24 部署验收记录 |
+| iOS 验证 | 项目没有可发现的 iOS 单元测试 target；E4 首个只读远端图库切片已使用 Xcode 27 beta 对 iPhone 17 Pro 模拟器构建、安装并连接真实 MyNAS，读取 45 项远端资产、45 张网格图及详情 preview。另有 iPhone 16 Pro 人工验证及真实端到端上传与大视频续传记录。 | Xcode 工程、本轮构建/模拟器验收、账号隔离缓存及用户提供的部署/验收记录 |
+| 已部署能力 | 树莓派 MyNAS `0.8.1` 已于 2026-07-24 部署；Tailscale HTTPS health 返回实时 CPU 温度，capabilities 返回状态模型 v1、`photos-browse-v1`、remote browsing/change feed 和三项 derivative recipe。45 个 asset、46 个原始资源和 135 个派生文件全部 ready。 | 真实部署健康检查、数据库状态、原件清单和 E3 验收脚本 |
+| E1–E3 状态 | 状态模型、持久化任务、FFmpeg/LibRaw 衍生 worker、owner-scoped assets/changes/detail、ETag/304、Range/206 和路径隔离已经部署。46/46 原件 SHA-256 与 pre-E3 快照清单一致；真实 Live Photo 保留 `photo + pairedVideo`，IMG_4074.DNG 原件 SHA-256 不变并成功生成 tiny/grid/preview。 | 后端 Photos 文件及测试、0.8.1 真实部署验收记录 |
 
 ### 术语与状态约束（先于所有阶段）
 
@@ -33,7 +33,7 @@
 | B | 本地图库与应用外壳 | 已完成 | 补足可访问性/真机回归自动化 |
 | C | 私有 MyNAS 连接、配对与账号隔离 | 已完成 | 持续在真实 tailnet 回归 |
 | D | 手动原始资源备份（安全入库） | 已完成（首版） | 做崩溃一致性硬化；不能视为可浏览备份 |
-| E | 衍生文件、远程图库与可浏览备份 | 进行中（E1/E2 已部署；E3 本地实现完成） | 部署 E3 并用真实 DNG/Live Photo 验证受控读取 |
+| E | 衍生文件、远程图库与可浏览备份 | 进行中（E1–E4 首个 iOS 只读切片已验收） | 补齐远端视频/Live Photo 播放、原件读取与 changes 增量刷新 |
 | F | 本地/远程统一时间线与去重 | 未开始 | 依赖 E 的远端索引和版本模型 |
 | G | 后台自动备份 | 未开始 | 依赖 D 的稳定恢复语义及 iOS 后台策略 |
 | H | 恢复、导出、删除与缓存管理 | 未开始 | 依赖 E；删除还依赖完整可浏览备份 |
@@ -79,14 +79,14 @@
 ## 阶段 D — 手动原始资源备份（安全入库）
 
 - **阶段目标：** 在用户手动触发时，把一个 PhotoKit asset 的所有原始资源完整、可续传地写入用户选定 MyNAS 卷，并以 SHA-256 证明字节一致。
-- **用户可见成果：** 设置和照片页可进入备份，显示等待/读取/上传/完成/失败、项目数、进度和已上传/总文件大小；尚未读出全部 PhotoKit 资源大小时会显示待统计项目数；断网后前台重试，重新打开 App 时从服务器已接收的位置续传；Live Photo、HDR、RAW/ProRAW 和视频不转 JPEG。
-- **iOS 端改动：** `PhotoLibraryClient.prepareBackupAsset` 导出全部 `PHAssetResource`（显式备份时允许 iCloud 下载），临时文件逐个 SHA-256；`PhotoBackupUploader` 4 MiB 分片、每片 SHA-256、5 次瞬态网络重试；`PhotoBackupCoordinator` 持久化队列并按账号隔离。
+- **用户可见成果：** 设置和照片页可进入备份，显示等待/读取/上传/完成/失败、项目数、进度和已上传/总文件大小；尚未读出全部 PhotoKit 资源大小时会显示待统计项目数；失败项按网络、本地原件、空间、完整性、身份、服务和配置分类，并可“仅重试失败项”；断网后前台重试，重新打开 App 时从服务器已接收的位置续传；Live Photo、HDR、RAW/ProRAW 和视频不转 JPEG。
+- **iOS 端改动：** `PhotoLibraryClient.prepareBackupAsset` 导出全部 `PHAssetResource`（显式备份时允许 iCloud 下载），临时文件逐个 SHA-256；`PhotoBackupUploader` 4 MiB 分片、每片 SHA-256，并对网络错误与 408/429/5xx 做瞬态退避；`PhotoBackupCoordinator` 持久化队列、错误分类和按账号隔离，只将当前可访问的失败任务重置为等待，已完成任务保持不变。
 - **MyNAS 后端改动：** 创建/读取 session、按 owner/volume/fingerprint 去重、offset 冲突处理、分片和全文件 SHA-256、同卷 rename、asset/resource/mapping SQLite 事务、按 owner 的原件目录。
 - **数据模型/API 变化：** 新增 `photo_assets`、`photo_resources`、`photo_upload_sessions`、`photo_upload_resources`、`device_asset_mappings` 及 `/photos/upload-sessions` 协议。兼容字段 `photo_assets.backup_state = backedUp` 仅表示“原始资源安全入库”；E1 的细分状态不改变阶段 D 的验收边界。
 - **前置依赖：** 阶段 C、可访问的 PhotoKit asset、在线且空间足够的卷。
 - **验收标准和测试方法：** 对普通照片、Live Photo、HDR、RAW/ProRAW/DNG 和大视频，比较每个资源服务端 SHA-256；中断后检查 offset 续传；重复上传验证 owner+volume 去重；未上传完整 Live Photo 必须拒绝提交；检查多账号不能读取/续传对方会话。
 - **明确不包含：** 衍生文件、远端照片列表/预览、后台 URLSession/BGTask、删除本机原件或“完整可浏览备份”承诺。
-- **状态与证据：** **已完成（首版原始资源安全入库）。** `PhotoBackupUploader.swift`、`PhotoBackupCoordinator.swift`、`PhotoLibraryClient.swift`、`backend/photos_uploads.go`；`TestPhotosMultiResourceUploadResumesVerifiesAndDeduplicates`、坏分片 hash 与不完整 Live Photo 的测试；用户已完成真实媒体及大视频端到端续传验证。
+- **状态与证据：** **已完成（首版原始资源安全入库与前台失败恢复）。** `PhotoBackupUploader.swift`、`PhotoBackupCoordinator.swift`、`PhotoBackupModels.swift`、`PhotoBackupView.swift`、`PhotoLibraryClient.swift`、`backend/photos_uploads.go`；`TestPhotosMultiResourceUploadResumesVerifiesAndDeduplicates`、坏分片 hash 与不完整 Live Photo 的测试；用户已完成真实媒体及大视频端到端续传验证。iPhone 17 Pro 模拟器已用 44 完成 + 1 网络失败的可恢复队列验证 98% 摘要、失败分类、“仅重试 1 项”及恢复后 45/45，旧版无 failure 字段的队列可直接解码。
 
   **需在后续硬化：** 当前实现以 rename 后 SQLite 事务及失败回移组成应用级提交；进程在二者之间崩溃的恢复扫描、目录 fsync 策略、session 过期清理、并发/断电故障注入和可观测的修复流程尚未实现。服务端还把一个 asset 限制为最多 32 个 resource；超过上限必须显式失败而不能丢资源，需用罕见编辑资产验证或调整该上限。因此不能把“代码中的 `backedUp`”扩展解释为灾难恢复级保证。
 
@@ -94,13 +94,13 @@
 
 - **阶段目标：** 为安全入库的原件生成受版本约束的 tiny/grid/preview，并提供 owner-scoped 远程列表、资源读取和变更同步。
 - **用户可见成果：** 用户能从 MyNAS 浏览照片、缩略图、预览、视频 Range 播放和 Live Photo；仅在所需衍生文件可用时，界面显示“完整可浏览备份”。
-- **iOS 端改动：** `ServerAsset`、分页/ETag 缓存、远程缩略图/预览/原图加载、派生处理中 UI；不把失败的 preview 伪装成原件或成功备份。
-- **MyNAS 后端改动：** E2 已部署 durable derivative queue、单线程幂等 FFmpeg worker、recipe/version、失败退避和重启恢复；E3 已在本地加入资源授权、`assets`/`changes`、ETag 和受控 Range 下载。
+- **iOS 端改动：** E4 已新增 `ServerPhotoAsset`、分页/ETag 客户端、SHA-256 校验的账号隔离 grid/preview 缓存、独立只读远端方形网格、捏合 2–10 列、Live Photo/RAW/视频标记、派生处理中 UI 和详情 preview；尚需补齐视频 Range/Live Photo 播放、原件读取及 changes 增量刷新。不把失败的 preview 伪装成原件或成功备份。
+- **MyNAS 后端改动：** E2 已部署 durable derivative queue、单线程幂等 worker、recipe/version、失败退避和重启恢复；普通媒体由 FFmpeg 处理，DNG/ProRAW 通过 `simple_dcraw` 提取内嵌全尺寸 JPEG 后再生成衍生文件；E3 已部署资源授权、`assets`/`changes`、ETag 和受控 Range 下载。
 - **数据模型/API 变化：** E1 已为 asset 加入 `source_state`、`derivative_state`、recipe/version/error/updated_at，并新增 `photo_derivatives` 与 `photo_derivative_jobs`；E3 新增 `photo_changes` 及 `GET /photos/assets`、`/changes`、`/assets/{id}`、`/{tiny|grid|preview|original}`。FFmpeg processor 可用时发布三项 recipe，工具缺失时仍保持空数组。
 - **前置依赖：** 阶段 D；明确每种媒体的 required derivative policy 和低资源树莓派转码预算。
 - **验收标准和测试方法：** 新上传及重启后重建任务；校验 owner 越权为 404/403、不泄露路径；ETag/条件请求、分页/cursor 过期、Range、Live Photo 配对展示；任何 required derivative 缺失时，状态必须不是“完整可浏览备份”。
 - **明确不包含：** 本地/远端合并时间线、后台自动扫描、删除工作流、AI。
-- **状态与证据：** **进行中。E1/E2 已部署；E3 已在本地实现并通过自动化测试，尚待真实 MyNAS 验收。** 首批 43/43 asset、43 个任务和 129/129 输出已复核通过；随后 iPhone 17 Pro 模拟器加入一组 Live Photo 和 IMG_4074.DNG，iOS 已识别并以原始资源完成服务器完整性确认。E3 代码现包含 owner-scoped assets/detail/changes、tiny/grid/preview/original、ETag、Range 与路径不泄露测试，`go test ./...`、`go test -race ./...`、`go vet ./...` 通过。仍需部署后确认 DNG 衍生输出、Live Photo 配对读取及真实 45 项分页，因此阶段 E 未完成。
+- **状态与证据：** **进行中。E1–E3 服务端已部署；E4 的只读远端网格、preview 和账号隔离缓存已完成首个 iOS 切片。** iPhone 17 Pro 模拟器通过真实 Tailscale/MyNAS 读取 45/45 browse-ready asset（含 1 个 Live Photo、1 个 DNG），缓存 45 张 grid 和 1 张 preview；元数据缓存保存服务器 ETag，目录为实际 server/user namespace。远端网格不显示重复的绿色“已备份”角标，仅非 ready 项显示处理中状态。尚未完成远端视频/Live Photo 播放、original 读取 UI 和 changes 增量刷新，因此阶段 E 仍未完成。0.8.1 数据库为 45/45 asset ready、46 个原始资源、135 个衍生文件、SQLite integrity `ok`；pre-E3 清单 46/46 SHA-256 通过。服务端真实验收覆盖 45 项/5 页、46 条 changes、ETag/304、Range/206、owner 隔离、路径不泄露、Live Photo 双资源，以及 91,483,916 字节 IMG_4074.DNG 的原件哈希和三档衍生图。自动化 `go test ./...`、`go test -race ./...`、`go vet ./...` 通过。
 
 ## 阶段 F — 本地与远程统一时间线及去重
 
@@ -112,7 +112,7 @@
 - **前置依赖：** 阶段 E 的远端索引、可读取的版本和明确的 merge policy。
 - **验收标准和测试方法：** 同设备重复、不同设备相同内容、相似时间但不同照片、编辑后版本和 Live Photo 组的测试；离线/分页/过期 cursor 回归。
 - **明确不包含：** 自动上传调度、删除、AI 自动聚类。
-- **状态与证据：** **未开始。** iOS 仅有 `LocalPhotoAsset` 时间线，`ServerAssetPage` 只是空协议占位；后端无远端 asset list API。
+- **状态与证据：** **未开始。** iOS 已有独立的 `LocalPhotoAsset` 本地时间线和 `ServerPhotoAsset` 远端时间线，但有意保持两套列表分离；尚无统一排序、跨端映射合并或冲突策略。
 
 ## 阶段 G — 后台自动备份
 
@@ -136,7 +136,7 @@
 - **前置依赖：** 阶段 E；“完整可浏览备份”状态与恢复演练。
 - **验收标准和测试方法：** SHA-256 导出比对、断点下载、低磁盘 LRU、不同账号缓存隔离、单端/双端删除确认、误删除恢复、无衍生文件或验证失败时禁止“保留 MyNAS 后删除本机”。
 - **明确不包含：** 绕过 PhotoKit 对其他 App 删除的限制；静默跨端删除。
-- **状态与证据：** **未开始。** `StorageProvider`、`CacheDirectoryKind` 是占位；无 Photos 下载、trash、restore 或 cache eviction 实现。
+- **状态与证据：** **未开始。** E4 已写入按账号隔离并进行 SHA-256 校验的 metadata/grid/preview 文件缓存，但尚无 `CacheEntry` 索引、容量展示、LRU 淘汰、原件导出、trash 或 restore。
 
 ## 阶段 I — 端侧 AI 搜索、人物/物体分类
 
@@ -162,11 +162,10 @@
 - **明确不包含：** 把本机和单块 NAS 宣称为唯一灾备；不承诺未演练的 RPO/RTO。
 - **状态与证据：** **部分完成。** 通用 MyNAS 已有健康检查、稳定卷 ID、离线状态和 SQLite 单连接以降低 `SQLITE_BUSY`；Photos 专用 migration version、灾备扫描、断电恢复和大规模基准尚未实现。
 
-## 下一步：部署验证 E3，再进入 E4
+## 下一步：E4 iOS 远端图库，并行补强大库弱网可恢复性
 
-E3 的受控读取 API 已在本地实现并通过自动化测试。下一道门槛是 **在真实树莓派验证读取协议，然后才让 iOS 使用远端图库**：
+E3 的受控读取 API 已部署并通过真实树莓派验收。下一道门槛是 **让 iOS 以只读方式消费远端图库，同时先把大相册的失败恢复做成用户可理解、可重复执行的闭环**：
 
-1. 部署 E3，迁移并检查 `photo_changes`，确认既有照片原件和派生文件没有变化。
-2. 用当前 45 项真实资产回归分页、changes、ETag、Range 和越权；保持路径永不出现在 API 响应中。
-3. 通过 E3 读取 IMG_4074.DNG 的 grid/preview/original，并验证 Live Photo 静态资源与 paired video 均可授权读取且 hash 不变。
-4. E4 再在 iOS 增加只读远端网格、处理/失败状态与账号隔离缓存，最后显示真实的“完整可浏览备份”。
+1. 在 iOS 增加 `ServerAsset`、远端分页客户端、账号隔离 metadata/thumbnail 缓存，以及 processing/failed/browse-ready 状态。
+2. 用数千项模拟数据和真实弱网继续测试 4 MiB offset 续传、App 重启、MyNAS 重启、网络切换及 Live Photo 多资源的部分失败；当前已完成失败分类和定向重试的 45 项功能验收，尚不能替代大规模压力测试。
+3. 远端网格验收稳定后，再进入阶段 F 的本地/远端统一时间线；后台自动备份仍留在阶段 G。

@@ -73,7 +73,8 @@ type photosDerivativeJobRow struct {
 }
 
 type ffmpegPhotosDerivativeProcessor struct {
-	executable string
+	executable             string
+	rawThumbnailExecutable string
 }
 
 type cappedPhotosDiagnosticWriter struct {
@@ -106,7 +107,14 @@ func (a *App) startPhotoDerivativeWorker() error {
 		log.Printf("photos derivative worker paused: ffmpeg is unavailable")
 		return nil
 	}
-	a.derivativeProcessor = &ffmpegPhotosDerivativeProcessor{executable: executable}
+	rawThumbnailExecutable, _ := exec.LookPath("simple_dcraw")
+	if rawThumbnailExecutable == "" {
+		log.Printf("photos derivative worker: LibRaw thumbnail extraction is unavailable")
+	}
+	a.derivativeProcessor = &ffmpegPhotosDerivativeProcessor{
+		executable:             executable,
+		rawThumbnailExecutable: rawThumbnailExecutable,
+	}
 	a.derivativeWake = make(chan struct{}, 1)
 	go a.runPhotoDerivativeWorker()
 	a.wakePhotoDerivativeWorker()
@@ -691,12 +699,25 @@ func (p *ffmpegPhotosDerivativeProcessor) Process(
 		if err != nil {
 			return photosDerivativeResult{}, err
 		}
-		generateErr := p.generateAll(ctx, request, source, workDirectory)
+		generationSource := source
+		if p.rawThumbnailExecutable != "" && isPhotosRAWSource(source) {
+			generationSource.Path, err = p.extractRAWPreview(ctx, source, workDirectory)
+			if err != nil {
+				_ = os.RemoveAll(workDirectory)
+				failures = append(
+					failures,
+					source.ResourceRole+": LibRaw preview: "+err.Error(),
+				)
+				continue
+			}
+		}
+		generateErr := p.generateAll(ctx, request, generationSource, workDirectory)
 		if generateErr != nil {
 			_ = os.RemoveAll(workDirectory)
 			failures = append(failures, source.ResourceRole+": "+generateErr.Error())
 			continue
 		}
+		_ = os.RemoveAll(filepath.Join(workDirectory, ".raw-preview"))
 		staleDirectory := request.FinalDirectory + ".stale"
 		_ = os.RemoveAll(staleDirectory)
 		if _, statErr := os.Stat(request.FinalDirectory); statErr == nil {
@@ -724,6 +745,91 @@ func (p *ffmpegPhotosDerivativeProcessor) Process(
 		"ffmpeg could not decode any candidate: %s",
 		strings.Join(failures, "; "),
 	)
+}
+
+func isPhotosRAWSource(source photosDerivativeSource) bool {
+	contentType := strings.ToLower(strings.TrimSpace(source.ContentType))
+	extension := strings.ToLower(filepath.Ext(source.Path))
+	return extension == ".dng" ||
+		extension == ".raw" ||
+		strings.Contains(contentType, "raw-image") ||
+		strings.Contains(contentType, "digital-negative") ||
+		strings.Contains(contentType, "adobe.raw")
+}
+
+func (p *ffmpegPhotosDerivativeProcessor) extractRAWPreview(
+	ctx context.Context,
+	source photosDerivativeSource,
+	workDirectory string,
+) (string, error) {
+	rawDirectory := filepath.Join(workDirectory, ".raw-preview")
+	if err := os.MkdirAll(rawDirectory, 0700); err != nil {
+		return "", err
+	}
+	inputExtension := filepath.Ext(source.Path)
+	if inputExtension == "" {
+		inputExtension = ".raw"
+	}
+	inputName := "raw-input" + inputExtension
+	inputPath := filepath.Join(rawDirectory, inputName)
+	if err := os.Symlink(source.Path, inputPath); err != nil {
+		return "", err
+	}
+
+	commandContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(
+		commandContext,
+		p.rawThumbnailExecutable,
+		"-E",
+		inputName,
+	)
+	command.Dir = rawDirectory
+	var diagnostics bytes.Buffer
+	diagnosticWriter := &cappedPhotosDiagnosticWriter{
+		buffer:    &diagnostics,
+		remaining: 16 * 1024,
+	}
+	command.Stdout = diagnosticWriter
+	command.Stderr = diagnosticWriter
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf(
+			"extract embedded preview: %w: %s",
+			err,
+			strings.TrimSpace(diagnostics.String()),
+		)
+	}
+
+	entries, err := os.ReadDir(rawDirectory)
+	if err != nil {
+		return "", err
+	}
+	var bestPath string
+	var bestPixels int64
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(strings.ToLower(entry.Name())) != ".jpg" {
+			continue
+		}
+		candidate := filepath.Join(rawDirectory, entry.Name())
+		file, openErr := os.Open(candidate)
+		if openErr != nil {
+			continue
+		}
+		config, decodeErr := jpeg.DecodeConfig(file)
+		closeErr := file.Close()
+		if decodeErr != nil || closeErr != nil || config.Width <= 0 || config.Height <= 0 {
+			continue
+		}
+		pixels := int64(config.Width) * int64(config.Height)
+		if pixels > bestPixels {
+			bestPath = candidate
+			bestPixels = pixels
+		}
+	}
+	if bestPath == "" {
+		return "", errors.New("DNG contains no decodable embedded JPEG preview")
+	}
+	return bestPath, nil
 }
 
 func (p *ffmpegPhotosDerivativeProcessor) generateAll(

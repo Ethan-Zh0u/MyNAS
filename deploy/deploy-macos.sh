@@ -75,7 +75,7 @@ printf 'MYNAS_ALLOWED_ORIGIN=%s\nMYNAS_PRIVATE_ORIGIN=%s\n' "$pages_origin" "$pr
 
 echo "Checking $remote before deployment..."
 retry "remote preflight" ssh "${ssh_options[@]}" "$remote" \
-  "set -eu; sudo -n true; findmnt -no SOURCE,FSTYPE,TARGET /mnt/nas; df -h /mnt/nas; systemctl is-active --quiet smbd; mkdir -p '$remote_release/web'"
+  "set -eu; sudo -n true; command -v ffmpeg; command -v simple_dcraw; findmnt -no SOURCE,FSTYPE,TARGET /mnt/nas; df -h /mnt/nas; systemctl is-active --quiet smbd; mkdir -p '$remote_release/web'"
 
 echo "Uploading release files..."
 retry "backend upload" scp "${ssh_options[@]}" "$build_dir/mynas" "$remote:$remote_release/mynas"

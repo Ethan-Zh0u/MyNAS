@@ -464,11 +464,37 @@ func (a *App) servePhotoFile(w http.ResponseWriter, r *http.Request, stored phot
 		return
 	}
 	modified, _ := time.Parse(time.RFC3339Nano, stored.Updated)
-	w.Header().Set("Content-Type", stored.ContentType)
+	w.Header().Set("Content-Type", photosHTTPContentType(stored.ContentType))
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.Header().Set("ETag", `"`+stored.SHA256+`"`)
 	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, filepath.Base(path), modified, file)
+}
+
+// PhotoKit commonly reports Uniform Type Identifier values (for example
+// com.apple.quicktime-movie) for original resources. They are useful metadata,
+// but are not valid HTTP media types and AVPlayer may refuse to stream them.
+// Preserve a supplied MIME type, otherwise translate the UTI values MyNAS
+// stores for media that the iOS client can display or play.
+func photosHTTPContentType(contentType string) string {
+	value := strings.ToLower(strings.TrimSpace(contentType))
+	if strings.Contains(value, "/") {
+		return contentType
+	}
+	switch value {
+	case "com.apple.quicktime-movie":
+		return "video/quicktime"
+	case "public.mpeg-4", "public.mpeg4", "public.mp4":
+		return "video/mp4"
+	case "public.heic", "public.heif":
+		return "image/heic"
+	case "public.jpeg", "public.jpg":
+		return "image/jpeg"
+	case "public.png":
+		return "image/png"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func photosPageLimit(raw string, defaultValue int) (int, error) {

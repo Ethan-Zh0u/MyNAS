@@ -111,6 +111,18 @@ struct PhotoTimelineView: View {
                     .padding(.horizontal, 10)
                     .padding(.top, 2)
 
+                    if !accountStore.current.isLocalOnly {
+                        NavigationLink {
+                            RemotePhotoLibraryView(account: accountStore.current)
+                        } label: {
+                            RemoteLibraryEntryRow(
+                                serverName: accountStore.current.displayName
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 10)
+                    }
+
                     if viewModel.authorization == .limited {
                         LimitedAccessBanner(action: viewModel.showLimitedPicker)
                             .padding(.horizontal)
@@ -242,6 +254,52 @@ struct PhotoTimelineView: View {
             assets: viewModel.assets,
             targetSize: thumbnailTargetSize
         )
+    }
+}
+
+private struct RemoteLibraryEntryRow: View {
+    let serverName: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "externaldrive.fill")
+                .font(.title3)
+                .foregroundStyle(Color.accentColor)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("浏览 MyNAS 图库")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(serverName) · 独立远端视图，不与本地照片混合")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .remoteLibraryEntrySurface()
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func remoteLibraryEntrySurface() -> some View {
+        if #available(iOS 26.0, *) {
+            glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        } else {
+            background(
+                .regularMaterial,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+        }
     }
 }
 

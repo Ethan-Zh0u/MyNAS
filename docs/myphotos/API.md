@@ -1,6 +1,6 @@
 # MyNAS Photos — API 契约
 
-当前已部署 MyNAS `0.7.0` 使用 API version `v1`，包含 E1 状态字段和 E2 服务端派生任务；远程读取接口仍未实现。路由以 `/api/v1/photos` 为前缀，不改变 MyNAS 的通用 `health`、`files`、`uploads`、`trash` 等 API；后者不是 Photos 授权或完整性协议的替代品。通用 `GET /api/v1/health` 在 Linux thermal zone 可读时返回 `system.temperatureC`，不可读时省略该字段。
+当前已部署 MyNAS `0.8.1` 使用 API version `v1`，包含 E1 状态字段、E2 服务端派生任务和 E3 受控远程读取接口。路由以 `/api/v1/photos` 为前缀，不改变 MyNAS 的通用 `health`、`files`、`uploads`、`trash` 等 API；后者不是 Photos 授权或完整性协议的替代品。通用 `GET /api/v1/health` 在 Linux thermal zone 可读时返回 `system.temperatureC`，不可读时省略该字段。
 
 ## 共同安全规则
 
@@ -55,22 +55,23 @@ iOS 必须依序调用 capabilities → me → volumes，并验证 capabilities 
 }
 ```
 
-响应包含 session/asset ID、`waiting|uploading|completed|failed|duplicate`、fingerprint、总/已接收字节和资源状态。完成或去重响应还包含 `sourceState`、`derivativeState` 和 `browseReady`。上传完成的即时结果通常是 `sourceCommitted + pending + false`；E2 worker 只有在 required outputs 均完成后才把 asset 变为 ready。E3 读取 API 上线前，客户端仍不能仅凭 ready 浏览远端内容。
+响应包含 session/asset ID、`waiting|uploading|completed|failed|duplicate`、fingerprint、总/已接收字节和资源状态。完成或去重响应还包含 `sourceState`、`derivativeState` 和 `browseReady`。上传完成的即时结果通常是 `sourceCommitted + pending + false`；E2 worker 只有在 required outputs 均完成后才把 asset 变为 ready。
+
+## 当前已实现：远程图库与资源读取
+
+| Method | Path | 行为 |
+| --- | --- | --- |
+| GET/HEAD | `/assets?cursor=&limit=` | owner-scoped，按捕获时间与 asset ID 稳定分页；`limit` 最大 200，返回 next cursor、资源与可用衍生文件。 |
+| GET/HEAD | `/changes?cursor=&limit=` | owner-scoped 连续 sequence 增量流，返回 next cursor、hasMore 和 resetRequired。 |
+| GET/HEAD | `/assets/{id}` | 单 asset 的来源、状态、版本、资源、衍生文件和 `browseReady`。 |
+| GET/HEAD | `/assets/{id}/{tiny|grid|preview}` | 仅返回当前 recipe 的 ready 衍生文件；支持 ETag 与 `If-None-Match`。 |
+| GET/HEAD | `/assets/{id}/original?resourceID=` | 读取一个原始资源；多资源 Live Photo/调整资源通过 resource ID 选择，支持 ETag、Range/206。 |
+
+所有 metadata 与文件查询先用 Tailscale owner 过滤 asset；不匹配的账号得到 404/空列表。响应只包含服务器生成的下载 URL，不泄露 mount 或 `storage_path`。
 
 ## 当前接口缺口与实现注意
 
-- E1/E2 已部署持久化 job、状态契约和执行 worker，但仍没有 `GET /assets`、`/changes`、asset metadata、tiny/grid/preview/original 下载、trash 或 restore 路由；任何文档将这些读取/删除路由写成“当前可调用 API”都是错误的。
-- middleware 当前 CORS allow-list 中保留的是旧 `X-Chunk-Checksum`，而 Photos 分片实际验证 `X-Chunk-SHA256`。原生 iOS 上传不受此影响；阶段 E 若增加 web Photos 客户端，必须先更正 allow-list 并以预检测试锁定它。
 - 上传完成的正常路径使用同卷 rename 和 SQLite transaction；断电/进程崩溃恢复协议尚未定义，见阶段 D/J。
-
-## 阶段 E 以后保留的 API（未实现）
-
-| Method | Path | 目标 |
-| --- | --- | --- |
-| GET | `/assets?cursor=&limit=` | owner-scoped、按捕获时间分页的远程 metadata 与 next cursor/version。 |
-| GET | `/changes?cursor=` | 增量变更；过期 cursor 应返回受控的全量重建信号。 |
-| GET | `/assets/{id}` | 单 asset 的版本、来源、原件/派生/回收站状态。 |
-| GET | `/assets/{id}/{tiny|grid|preview|original}` | owner 授权、ETag/条件请求；original 支持 Range。 |
-| POST | `/assets/{id}/trash`、`/restore` | owner-scoped 软删除和恢复；只在阶段 H 的确认策略完成后开放。 |
-
-这些端点落地前必须定义 derivative recipe/version、状态机、错误码、cursor 过期语义、ETag 和 Range 测试；不得仅因上传成功而提前暴露原始路径。
+- `changes.resetRequired` 与 cursor 保留/过期策略尚未启用；当前变更日志不裁剪。
+- `POST /assets/{id}/trash`、`/restore` 尚未实现，只能在阶段 H 的确认、恢复与审计策略完成后开放。
+- iOS 客户端尚未消费 E3 远程读取 API；当前上线的是服务端契约，不等于统一远程时间线已经交付。

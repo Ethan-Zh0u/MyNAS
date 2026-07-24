@@ -119,6 +119,79 @@ enum PhotoBackupJobStatus: String, Codable, Sendable {
     }
 }
 
+enum PhotoBackupFailureKind: String, Codable, Sendable {
+    case network
+    case sourceUnavailable
+    case localStorage
+    case myNASStorage
+    case integrity
+    case authorization
+    case server
+    case configuration
+    case unknown
+
+    var title: String {
+        switch self {
+        case .network: "网络连接中断"
+        case .sourceUnavailable: "无法读取本地原件"
+        case .localStorage: "iPhone 临时空间不足"
+        case .myNASStorage: "MyNAS 存储不可用"
+        case .integrity: "完整性校验失败"
+        case .authorization: "MyNAS 身份或权限失效"
+        case .server: "MyNAS 服务异常"
+        case .configuration: "连接配置不完整"
+        case .unknown: "未分类错误"
+        }
+    }
+
+    var guidance: String {
+        switch self {
+        case .network:
+            "保持 iPhone 与 MyNAS 在线后可从服务器已接收的位置继续。"
+        case .sourceUnavailable:
+            "确认照片仍在系统相册、照片权限可用，且 iCloud 原件可以下载。"
+        case .localStorage:
+            "释放一些 iPhone 空间后重试；临时导出完成后文件会自动清理。"
+        case .myNASStorage:
+            "检查树莓派硬盘是否在线并有足够可用空间，然后重试。"
+        case .integrity:
+            "原件、分片或资源组校验未通过；MyNAS 不会把该项目标记为已备份。"
+        case .authorization:
+            "确认 Tailscale 已登录正确账号，并重新检查 MyNAS 连接。"
+        case .server:
+            "确认 MyNAS 服务在线；短暂的服务器错误可以稍后重试。"
+        case .configuration:
+            "重新选择当前 MyNAS 和备份硬盘后再试。"
+        case .unknown:
+            "可再次重试；如果持续失败，请保留此错误信息用于诊断。"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .network: "wifi.exclamationmark"
+        case .sourceUnavailable: "photo.badge.exclamationmark"
+        case .localStorage: "iphone.gen3.slash"
+        case .myNASStorage: "externaldrive.badge.exclamationmark"
+        case .integrity: "checkmark.shield.trianglebadge.exclamationmark"
+        case .authorization: "person.badge.key"
+        case .server: "server.rack"
+        case .configuration: "gearshape.badge.exclamationmark"
+        case .unknown: "exclamationmark.triangle"
+        }
+    }
+
+    var isLikelyTransient: Bool {
+        self == .network || self == .server
+    }
+}
+
+struct PhotoBackupFailure: Codable, Equatable, Sendable {
+    let kind: PhotoBackupFailureKind
+    let detail: String
+    let occurredAt: Date
+}
+
 enum PhotoSourceState: String, Codable, Sendable {
     case committed = "sourceCommitted"
 }
@@ -145,6 +218,7 @@ struct PhotoBackupJob: Identifiable, Codable, Sendable {
     var sourceState: PhotoSourceState?
     var derivativeState: PhotoDerivativeState?
     var message: String?
+    var failure: PhotoBackupFailure?
     var updatedAt: Date
 
     var isBrowseReady: Bool {
@@ -161,6 +235,7 @@ struct PhotoBackupJob: Identifiable, Codable, Sendable {
 
 struct PhotoBackupProgressSnapshot: Equatable, Sendable {
     let completedCount: Int
+    let failedCount: Int
     let totalCount: Int
     let isRunning: Bool
     let uploadedBytes: Int64

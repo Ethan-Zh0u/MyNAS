@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -247,6 +248,80 @@ func TestPhotosCapabilitiesAdvertiseRecipesOnlyWithProcessor(t *testing.T) {
 	}
 	if len(capabilities.DerivativeRecipes) != len(photosBrowseRecipesV1) {
 		t.Fatalf("advertised recipes=%v", capabilities.DerivativeRecipes)
+	}
+}
+
+func TestPhotosDerivativeProcessorExtractsLargestEmbeddedRAWPreview(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "IMG_4074.DNG")
+	sourceBytes := []byte("immutable-proraw-source")
+	if err := os.WriteFile(sourcePath, sourceBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	fixturePath := filepath.Join(directory, "embedded-preview.jpg")
+	fixture, err := os.OpenFile(fixturePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	picture := image.NewRGBA(image.Rect(0, 0, 640, 480))
+	if err = jpeg.Encode(fixture, picture, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	executable := filepath.Join(directory, "simple_dcraw")
+	script := fmt.Sprintf(
+		"#!/bin/sh\nset -eu\ncp '%s' \"$PWD/raw-input.DNG.thumb.0.jpg\"\n",
+		fixturePath,
+	)
+	if err = os.WriteFile(executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	workDirectory := filepath.Join(directory, "work")
+	if err = os.MkdirAll(workDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	processor := &ffmpegPhotosDerivativeProcessor{
+		rawThumbnailExecutable: executable,
+	}
+	source := photosDerivativeSource{
+		Path:         sourcePath,
+		ResourceRole: "photo",
+		ContentType:  "com.adobe.raw-image",
+	}
+	previewPath, err := processor.extractRAWPreview(
+		context.Background(),
+		source,
+		workDirectory,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := os.Open(previewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, decodeErr := jpeg.DecodeConfig(preview)
+	closeErr := preview.Close()
+	if decodeErr != nil || closeErr != nil || config.Width != 640 || config.Height != 480 {
+		t.Fatalf("preview config=%#v decode=%v close=%v", config, decodeErr, closeErr)
+	}
+	after, err := os.ReadFile(sourcePath)
+	if err != nil || string(after) != string(sourceBytes) {
+		t.Fatalf("RAW source changed: %q err=%v", after, err)
+	}
+	if !isPhotosRAWSource(source) {
+		t.Fatal("DNG source was not classified as RAW")
+	}
+	if isPhotosRAWSource(photosDerivativeSource{
+		Path:        filepath.Join(directory, "photo.heic"),
+		ContentType: "public.heic",
+	}) {
+		t.Fatal("HEIC source was classified as RAW")
 	}
 }
 

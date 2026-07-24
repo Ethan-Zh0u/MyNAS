@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// The identity boundary for every future network request, transfer, cache entry, and database row.
-struct AccountContext: Identifiable, Codable, Hashable, Sendable {
+nonisolated struct AccountContext: Identifiable, Codable, Hashable, Sendable {
     let accountID: String
     let serverID: String
     let serverURL: URL?
@@ -41,11 +41,14 @@ struct AccountContext: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
-struct ServerCapabilities: Codable, Hashable, Sendable {
+nonisolated struct ServerCapabilities: Codable, Hashable, Sendable {
     var apiVersion: String?
     var supportsPhotoAssets: Bool
     var supportsBackgroundTransfers: Bool
     var supportsLivePhotos: Bool
+    /// Optional so accounts persisted by MyNAS Photos 1.0 remain decodable.
+    var supportsRemoteBrowsing: Bool?
+    var supportsChangeFeed: Bool?
     var backupStateModelVersion: Int?
     var derivativePolicyVersion: String?
     var availableDerivativeRecipes: [String]?
@@ -55,13 +58,15 @@ struct ServerCapabilities: Codable, Hashable, Sendable {
         supportsPhotoAssets: false,
         supportsBackgroundTransfers: false,
         supportsLivePhotos: false,
+        supportsRemoteBrowsing: false,
+        supportsChangeFeed: false,
         backupStateModelVersion: nil,
         derivativePolicyVersion: nil,
         availableDerivativeRecipes: nil
     )
 }
 
-struct MyNASVolume: Identifiable, Codable, Hashable, Sendable {
+nonisolated struct MyNASVolume: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let name: String
     let status: String
@@ -74,7 +79,7 @@ struct MyNASVolume: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
-enum CacheDirectoryKind: String, CaseIterable, Sendable {
+nonisolated enum CacheDirectoryKind: String, CaseIterable, Sendable {
     case thumbnails
     case previews
     case livePhotos = "live-photo"
@@ -84,7 +89,7 @@ enum CacheDirectoryKind: String, CaseIterable, Sendable {
 }
 
 /// Owns the account-isolated directory convention. Cache eviction and downloads arrive in stage H.
-struct CacheDirectoryProvider {
+nonisolated struct CacheDirectoryProvider {
     private let fileManager = FileManager.default
 
     func directory(for account: AccountContext, kind: CacheDirectoryKind) throws -> URL {
@@ -128,10 +133,6 @@ protocol StorageProvider: Sendable {
     func delete(assetID: String) async throws
     func quota() async throws -> StorageQuota
     func capabilities() async throws -> ServerCapabilities
-}
-
-struct ServerAssetPage: Sendable {
-    let nextCursor: String?
 }
 
 struct StorageUploadRequest: Sendable {
@@ -218,7 +219,7 @@ final class AccountStore: ObservableObject {
 }
 
 private extension String {
-    var cachePathComponent: String {
+    nonisolated var cachePathComponent: String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
         let encoded = unicodeScalars.map { allowed.contains($0) ? String($0) : "-" }.joined()
         return encoded.isEmpty ? "unknown" : String(encoded.prefix(120))

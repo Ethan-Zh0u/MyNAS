@@ -65,6 +65,7 @@ final class PhotoBackupCoordinator: ObservableObject {
         let sizePendingCount = assets.count - currentJobs.filter { $0.totalBytes > 0 }.count
         return PhotoBackupProgressSnapshot(
             completedCount: currentJobs.filter { $0.status == .completed }.count,
+            failedCount: currentJobs.filter { $0.status == .failed }.count,
             totalCount: assets.count,
             isRunning: isRunning && accountJobs.contains {
                 $0.status == .preparing || $0.status == .uploading || $0.status == .waiting
@@ -91,6 +92,18 @@ final class PhotoBackupCoordinator: ObservableObject {
                 return
             }
         }
+    }
+
+    func retryableFailedCount(
+        for assets: [LocalPhotoAsset],
+        accountID: String
+    ) -> Int {
+        let availableIdentifiers = Set(assets.map(\.localIdentifier))
+        return jobs.filter {
+            $0.accountID == accountID
+                && $0.status == .failed
+                && availableIdentifiers.contains($0.localIdentifier)
+        }.count
     }
 
     func synchronizeLibrary(
@@ -139,6 +152,7 @@ final class PhotoBackupCoordinator: ObservableObject {
         account: AccountContext,
         client: PhotoLibraryClient
     ) {
+        refreshHeadline(accountID: account.accountID)
         guard !isRunning, !account.isLocalOnly else { return }
         let interrupted = jobs.contains {
             $0.accountID == account.accountID && ($0.status == .waiting || $0.status == .uploading || $0.status == .preparing)
@@ -153,12 +167,31 @@ final class PhotoBackupCoordinator: ObservableObject {
         client: PhotoLibraryClient
     ) {
         guard !isRunning else { return }
+        let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) })
+        var retryCount = 0
         for index in jobs.indices where
             jobs[index].accountID == account.accountID && jobs[index].status == .failed {
+            guard let asset = assetsByID[jobs[index].localIdentifier] else { continue }
+            if jobs[index].sourceModificationDate != asset.modificationDate {
+                jobs[index].sourceModificationDate = asset.modificationDate
+                jobs[index].uploadedBytes = 0
+                jobs[index].totalBytes = 0
+                jobs[index].resourceCount = 0
+                jobs[index].assetID = nil
+                jobs[index].sourceState = nil
+                jobs[index].derivativeState = nil
+            }
             jobs[index].status = .waiting
             jobs[index].message = "等待重试"
+            jobs[index].failure = nil
             jobs[index].updatedAt = Date()
+            retryCount += 1
         }
+        guard retryCount > 0 else {
+            headline = "失败项目当前不在可访问的照片库中"
+            return
+        }
+        headline = "仅重试 \(retryCount) 个失败项目"
         persist()
         run(account: account, assets: assets, client: client)
     }
@@ -182,6 +215,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                     if jobs[index].status == .failed, retryFailed {
                         jobs[index].status = .waiting
                         jobs[index].message = "等待重试"
+                        jobs[index].failure = nil
                         jobs[index].updatedAt = Date()
                         queuedCount += 1
                         changed = true
@@ -197,6 +231,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                 jobs[index].sourceState = nil
                 jobs[index].derivativeState = nil
                 jobs[index].message = sourceChanged ? "源文件已变化，准备重新备份" : "等待上传"
+                jobs[index].failure = nil
                 jobs[index].updatedAt = Date()
                 queuedCount += 1
                 changed = true
@@ -217,6 +252,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                         sourceState: nil,
                         derivativeState: nil,
                         message: "等待上传",
+                        failure: nil,
                         updatedAt: Date()
                     )
                 )
@@ -302,6 +338,7 @@ final class PhotoBackupCoordinator: ObservableObject {
     ) async {
         update(jobID) {
             $0.status = .preparing
+            $0.failure = nil
             $0.message = asset.mediaKind == .livePhoto
                 ? "读取静态原图、配对视频与编辑资源"
                 : "读取 PhotoKit 原始资源"
@@ -330,6 +367,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                 $0.assetID = outcome.assetID
                 $0.sourceState = outcome.sourceState
                 $0.derivativeState = outcome.derivativeState
+                $0.failure = nil
                 if outcome.browseReady {
                     $0.message = "原件和浏览预览均已就绪"
                 } else if outcome.wasDuplicate {
@@ -341,12 +379,15 @@ final class PhotoBackupCoordinator: ObservableObject {
         } catch is CancellationError {
             update(jobID) {
                 $0.status = .waiting
+                $0.failure = nil
                 $0.message = "备份已暂停，将在下次打开时继续"
             }
         } catch {
+            let failure = Self.failure(from: error)
             update(jobID) {
                 $0.status = .failed
-                $0.message = error.localizedDescription
+                $0.message = failure.kind.title
+                $0.failure = failure
             }
         }
         preparedAsset?.removeTemporaryFiles()
@@ -376,7 +417,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                         }
                     }
                 }
-            } catch let error as URLError where Self.isTransient(error) {
+            } catch let error where PhotoBackupUploader.isTransient(error) {
                 lastError = error
                 update(jobID) {
                     $0.status = .waiting
@@ -397,10 +438,20 @@ final class PhotoBackupCoordinator: ObservableObject {
 
     private func normalizeInterruptedJobs() {
         var changed = false
-        for index in jobs.indices where jobs[index].status == .preparing || jobs[index].status == .uploading {
-            jobs[index].status = .waiting
-            jobs[index].message = "等待从 MyNAS 已接收的位置继续"
-            changed = true
+        for index in jobs.indices {
+            if jobs[index].status == .preparing || jobs[index].status == .uploading {
+                jobs[index].status = .waiting
+                jobs[index].message = "等待从 MyNAS 已接收的位置继续"
+                jobs[index].failure = nil
+                changed = true
+            } else if jobs[index].status == .failed, jobs[index].failure == nil {
+                jobs[index].failure = PhotoBackupFailure(
+                    kind: .unknown,
+                    detail: jobs[index].message ?? "旧版本未保存具体错误信息。",
+                    occurredAt: jobs[index].updatedAt
+                )
+                changed = true
+            }
         }
         if changed {
             persist()
@@ -434,14 +485,62 @@ final class PhotoBackupCoordinator: ObservableObject {
         return value
     }
 
-    private static func isTransient(_ error: URLError) -> Bool {
-        switch error.code {
-        case .timedOut, .networkConnectionLost, .notConnectedToInternet,
-                .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
-            true
-        default:
-            false
+    private static func failure(from error: Error) -> PhotoBackupFailure {
+        let detail = error.localizedDescription
+        let kind: PhotoBackupFailureKind
+
+        if error is URLError {
+            kind = .network
+        } else if let preparationError = error as? PhotoBackupPreparationError {
+            switch preparationError {
+            case .assetUnavailable, .noResources:
+                kind = .sourceUnavailable
+            case .invalidResource:
+                kind = .integrity
+            }
+        } else if let uploadError = error as? PhotoBackupUploadError {
+            switch uploadError {
+            case .accountNotConnected, .volumeNotSelected:
+                kind = .configuration
+            case .invalidResponse:
+                kind = .server
+            case .server(let status, let message):
+                let normalized = message.lowercased()
+                if status == 401 || status == 403 {
+                    kind = .authorization
+                } else if normalized.contains("insufficient space")
+                    || normalized.contains("selected volume is offline")
+                    || normalized.contains("selected volume is offline or unavailable") {
+                    kind = .myNASStorage
+                } else if status == 422
+                    || normalized.contains("checksum")
+                    || normalized.contains("fingerprint")
+                    || normalized.contains("size mismatch")
+                    || normalized.contains("not all resources") {
+                    kind = .integrity
+                } else {
+                    kind = .server
+                }
+            }
+        } else {
+            let cocoaError = error as NSError
+            if cocoaError.domain == NSCocoaErrorDomain,
+               cocoaError.code == CocoaError.Code.fileWriteOutOfSpace.rawValue {
+                kind = .localStorage
+            } else if cocoaError.domain == NSCocoaErrorDomain,
+                      cocoaError.code == CocoaError.Code.fileReadNoSuchFile.rawValue
+                        || cocoaError.code == CocoaError.Code.fileReadNoPermission.rawValue {
+                kind = .sourceUnavailable
+            } else if cocoaError.domain == "PHPhotosErrorDomain" {
+                kind = .sourceUnavailable
+            } else if cocoaError.domain == NSURLErrorDomain {
+                kind = .network
+            } else {
+                kind = .unknown
+            }
         }
+
+        return PhotoBackupFailure(kind: kind, detail: detail, occurredAt: Date())
     }
 }
 

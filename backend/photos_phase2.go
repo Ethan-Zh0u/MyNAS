@@ -15,7 +15,7 @@ import (
 
 const (
 	photosAPIVersion       = "v1"
-	photosServerVersion    = "0.8.0"
+	photosServerVersion    = "0.8.1"
 	photosMinimumApp       = "1.0"
 	photosServerSettingKey = "photos.server_id"
 )

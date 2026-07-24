@@ -169,6 +169,21 @@ func TestPhotosChangesReportSourceAndDerivativeUpdates(t *testing.T) {
 	}
 }
 
+func TestPhotosHTTPContentTypeMapsPhotoKitUTIsForStreaming(t *testing.T) {
+	cases := map[string]string{
+		"com.apple.quicktime-movie": "video/quicktime",
+		"public.mpeg-4":              "video/mp4",
+		"public.heic":                "image/heic",
+		"image/jpeg":                 "image/jpeg",
+		"unrecognized.type":          "application/octet-stream",
+	}
+	for input, want := range cases {
+		if got := photosHTTPContentType(input); got != want {
+			t.Errorf("photosHTTPContentType(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
 func TestPhotosCORSAllowsActualChunkChecksumHeader(t *testing.T) {
 	app := newPhotosPhase2TestApp(t)
 	request := httptest.NewRequest(

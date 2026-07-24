@@ -26,6 +26,15 @@ enum PhotoBackupUploadError: LocalizedError {
             "MyNAS 上传失败（\(status)）：\(message)"
         }
     }
+
+    var isTransient: Bool {
+        switch self {
+        case .server(let status, _):
+            status == 408 || status == 429 || (500...599).contains(status)
+        case .accountNotConnected, .volumeNotSelected, .invalidResponse:
+            false
+        }
+    }
 }
 
 actor PhotoBackupUploader {
@@ -216,7 +225,7 @@ actor PhotoBackupUploader {
                     partNumber: partNumber,
                     offset: offset
                 )
-            } catch let error as URLError where Self.isTransient(error) {
+            } catch let error where Self.isTransient(error) {
                 lastError = error
                 if attempt < 4 {
                     try await Task.sleep(for: .seconds(1 << attempt))
@@ -284,13 +293,17 @@ actor PhotoBackupUploader {
         }
     }
 
-    private nonisolated static func isTransient(_ error: URLError) -> Bool {
-        switch error.code {
+    nonisolated static func isTransient(_ error: Error) -> Bool {
+        if let uploadError = error as? PhotoBackupUploadError {
+            return uploadError.isTransient
+        }
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
         case .timedOut, .networkConnectionLost, .notConnectedToInternet,
                 .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
-            true
+            return true
         default:
-            false
+            return false
         }
     }
 

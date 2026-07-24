@@ -5,13 +5,37 @@ struct PhotoBackupView: View {
     @ObservedObject var coordinator: PhotoBackupCoordinator
     let assets: [LocalPhotoAsset]
     let client: PhotoLibraryClient
+    @State private var showsAllFailures = false
 
     private var accountJobs: [PhotoBackupJob] {
         coordinator.jobs(for: accountStore.current.accountID)
     }
 
     private var failedCount: Int {
-        accountJobs.filter { $0.status == .failed }.count
+        failedJobs.count
+    }
+
+    private var failedJobs: [PhotoBackupJob] {
+        accountJobs.filter { $0.status == .failed }
+    }
+
+    private var retryableFailedCount: Int {
+        coordinator.retryableFailedCount(
+            for: assets,
+            accountID: accountStore.current.accountID
+        )
+    }
+
+    private var visibleFailedJobs: [PhotoBackupJob] {
+        showsAllFailures ? failedJobs : Array(failedJobs.prefix(100))
+    }
+
+    private var queueJobs: [PhotoBackupJob] {
+        accountJobs.filter { $0.status != .failed }
+    }
+
+    private var visibleQueueJobs: [PhotoBackupJob] {
+        Array(queueJobs.prefix(50))
     }
 
     private var backupProgress: PhotoBackupProgressSnapshot {
@@ -46,21 +70,37 @@ struct PhotoBackupView: View {
                 } else {
                     startButton
                     if failedCount > 0 {
-                        Button {
-                            coordinator.retryFailed(
-                                assets: assets,
-                                account: accountStore.current,
-                                client: client
+                        retryFailedButton
+                        if retryableFailedCount < failedCount {
+                            Label(
+                                "\(failedCount - retryableFailedCount) 个失败项目当前不在照片访问范围内",
+                                systemImage: "photo.badge.exclamationmark"
                             )
-                        } label: {
-                            Label("重试 \(failedCount) 个失败项目", systemImage: "arrow.clockwise")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
                         }
-                        .disabled(coordinator.isRunning)
                     }
                 }
                 Text("App 在前台检测到新照片或视频后会自动加入并开始备份；这个按钮用于手动补充未完成项目。网络中断时会从 MyNAS 已记录的字节位置继续。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+
+            if !failedJobs.isEmpty {
+                Section {
+                    ForEach(visibleFailedJobs) { job in
+                        BackupJobRow(job: job)
+                    }
+                    if failedJobs.count > 100 {
+                        Button(showsAllFailures ? "只显示最近 100 项" : "显示全部 \(failedJobs.count) 个失败项目") {
+                            showsAllFailures.toggle()
+                        }
+                    }
+                } header: {
+                    Label("需要处理（\(failedJobs.count)）", systemImage: "exclamationmark.triangle.fill")
+                } footer: {
+                    Text("已完成项目不会重新上传；重试会继续使用 MyNAS 已确认的分片位置。")
+                }
             }
 
             Section("原始格式") {
@@ -72,11 +112,18 @@ struct PhotoBackupView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if !accountJobs.isEmpty {
-                Section("备份队列") {
-                    ForEach(accountJobs) { job in
+            if !queueJobs.isEmpty {
+                Section {
+                    ForEach(visibleQueueJobs) { job in
                         BackupJobRow(job: job)
                     }
+                    if queueJobs.count > visibleQueueJobs.count {
+                        Text("为保持大图库滚动流畅，这里只显示最近 \(visibleQueueJobs.count) 项；完成统计仍包含全部任务。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("最近任务")
                 }
             }
         }
@@ -125,6 +172,31 @@ struct PhotoBackupView: View {
         }
         return "立即备份 \(pendingCount) 项"
     }
+
+    @ViewBuilder
+    private var retryFailedButton: some View {
+        let button = Button {
+            coordinator.retryFailed(
+                assets: assets,
+                account: accountStore.current,
+                client: client
+            )
+        } label: {
+            HStack {
+                Spacer(minLength: 0)
+                Label("仅重试 \(retryableFailedCount) 个失败项目", systemImage: "arrow.clockwise")
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .disabled(coordinator.isRunning || retryableFailedCount == 0)
+
+        if #available(iOS 26.0, *) {
+            button.buttonStyle(.glass)
+        } else {
+            button.buttonStyle(.bordered)
+        }
+    }
 }
 
 private struct BackupSummaryCard: View {
@@ -156,6 +228,14 @@ private struct BackupSummaryCard: View {
             }
             if progress.totalCount > 0 {
                 ProgressView(value: progress.fractionCompleted)
+                if progress.failedCount > 0 {
+                    Label(
+                        "\(progress.failedCount) 项失败，其他已完成项目保持不变",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red)
+                }
                 Text(sizeSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -219,9 +299,27 @@ private struct BackupJobRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 if let message = job.message {
-                    Text(message)
+                    if job.status != .failed || job.failure == nil {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(job.status == .failed ? Color.red : Color.secondary)
+                    }
+                }
+                if let failure = job.failure {
+                    Label(failure.kind.title, systemImage: failure.kind.systemImage)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                    Text(failure.detail)
                         .font(.caption)
-                        .foregroundStyle(job.status == .failed ? Color.red : Color.secondary)
+                        .foregroundStyle(.red)
+                    Text(failure.kind.guidance)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if failure.kind.isLikelyTransient {
+                        Text("这类错误通常可以从断点继续。")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    }
                 }
                 if job.status == .completed && !job.isBrowseReady {
                     Label("尚未成为完整可浏览备份", systemImage: "photo.badge.clock")
@@ -231,6 +329,7 @@ private struct BackupJobRow: View {
             }
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
     }
 
     private var statusColor: Color {
