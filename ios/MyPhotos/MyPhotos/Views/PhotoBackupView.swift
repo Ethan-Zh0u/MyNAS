@@ -17,7 +17,14 @@ struct PhotoBackupView: View {
     private var backupProgress: PhotoBackupProgressSnapshot {
         coordinator.progress(
             for: accountStore.current.accountID,
-            fallbackTotalCount: assets.count
+            assets: assets
+        )
+    }
+
+    private var pendingCount: Int {
+        coordinator.pendingCount(
+            for: assets,
+            accountID: accountStore.current.accountID
         )
     }
 
@@ -51,7 +58,7 @@ struct PhotoBackupView: View {
                         .disabled(coordinator.isRunning)
                     }
                 }
-                Text("第一版只在你点击后开始。网络中断时，MyNAS 会保留已完成分片；App 会从服务器记录的字节位置继续。")
+                Text("App 在前台检测到新照片或视频后会自动加入并开始备份；这个按钮用于手动补充未完成项目。网络中断时会从 MyNAS 已记录的字节位置继续。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -93,19 +100,30 @@ struct PhotoBackupView: View {
                 client: client
             )
         } label: {
-            Label(
-                coordinator.isRunning ? "正在备份…" : "立即备份 \(assets.count) 项",
-                systemImage: "arrow.up.circle.fill"
-            )
-            .frame(maxWidth: .infinity)
+            HStack {
+                Spacer(minLength: 0)
+                Label(startButtonTitle, systemImage: "arrow.up.circle.fill")
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
         }
-        .disabled(coordinator.isRunning || assets.isEmpty)
+        .disabled(coordinator.isRunning || pendingCount == 0)
 
         if #available(iOS 26.0, *) {
             button.buttonStyle(.glassProminent)
         } else {
             button.buttonStyle(.borderedProminent)
         }
+    }
+
+    private var startButtonTitle: String {
+        if coordinator.isRunning {
+            return pendingCount > 0 ? "正在备份 \(pendingCount) 项…" : "正在完成备份…"
+        }
+        if pendingCount == 0 {
+            return assets.isEmpty ? "没有可备份的项目" : "全部 \(assets.count) 项均已备份"
+        }
+        return "立即备份 \(pendingCount) 项"
     }
 }
 

@@ -37,6 +37,7 @@ struct LocalPhotoAsset: Identifiable, Hashable, Sendable {
     let creationDate: Date?
     let modificationDate: Date?
     let mediaKind: LocalMediaKind
+    let isRAW: Bool
     let pixelWidth: Int
     let pixelHeight: Int
     let duration: TimeInterval
@@ -44,6 +45,9 @@ struct LocalPhotoAsset: Identifiable, Hashable, Sendable {
 
     var id: String { localIdentifier }
     var pixelSizeText: String { "\(pixelWidth) × \(pixelHeight)" }
+    var displayMediaName: String {
+        isRAW ? "RAW / ProRAW 照片" : mediaKind.displayName
+    }
 }
 
 enum PhotoAuthorizationState: Equatable {

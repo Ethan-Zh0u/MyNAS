@@ -15,7 +15,7 @@ import (
 
 const (
 	photosAPIVersion       = "v1"
-	photosServerVersion    = "0.7.0"
+	photosServerVersion    = "0.8.0"
 	photosMinimumApp       = "1.0"
 	photosServerSettingKey = "photos.server_id"
 )
@@ -36,6 +36,8 @@ type photosFeatureResponse struct {
 	PhotoAssets         bool `json:"photoAssets"`
 	BackgroundTransfers bool `json:"backgroundTransfers"`
 	LivePhotos          bool `json:"livePhotos"`
+	RemoteBrowsing      bool `json:"remoteBrowsing"`
+	ChangeFeed          bool `json:"changeFeed"`
 }
 
 type photosPairingResponse struct {
@@ -119,6 +121,8 @@ func (a *App) photosCapabilities(w http.ResponseWriter, r *http.Request) {
 			PhotoAssets:         true,
 			BackgroundTransfers: false,
 			LivePhotos:          true,
+			RemoteBrowsing:      true,
+			ChangeFeed:          true,
 		},
 		// Recipes are advertised only when a real processor is available.
 		DerivativeRecipes: derivativeRecipes,

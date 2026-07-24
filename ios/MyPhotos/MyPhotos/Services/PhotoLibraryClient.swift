@@ -1,4 +1,5 @@
 @preconcurrency import Photos
+import AVFoundation
 import PhotosUI
 import UIKit
 import Combine
@@ -120,6 +121,77 @@ final class PhotoLibraryClient: NSObject {
         }
     }
 
+    func previewImage(
+        for localIdentifier: String,
+        targetSize: CGSize
+    ) async -> PhotoImageResult {
+        guard let asset = photoAsset(localIdentifier) else {
+            return PhotoImageResult(image: nil, isCloudOnly: false)
+        }
+
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .exact
+        options.isNetworkAccessAllowed = true
+
+        return await withCheckedContinuation { continuation in
+            var resumed = false
+            imageManager.requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFit,
+                options: options
+            ) { image, info in
+                guard !resumed else { return }
+                resumed = true
+                let isCloudOnly = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
+                continuation.resume(
+                    returning: PhotoImageResult(
+                        image: image,
+                        isCloudOnly: isCloudOnly && image == nil
+                    )
+                )
+            }
+        }
+    }
+
+    func playerItem(for localIdentifier: String) async -> AVPlayerItem? {
+        guard let asset = photoAsset(localIdentifier) else { return nil }
+        let options = PHVideoRequestOptions()
+        options.deliveryMode = .automatic
+        options.isNetworkAccessAllowed = true
+        return await withCheckedContinuation { continuation in
+            imageManager.requestPlayerItem(forVideo: asset, options: options) { item, _ in
+                continuation.resume(returning: item)
+            }
+        }
+    }
+
+    func livePhoto(
+        for localIdentifier: String,
+        targetSize: CGSize
+    ) async -> PHLivePhoto? {
+        guard let asset = photoAsset(localIdentifier) else { return nil }
+        let options = PHLivePhotoRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.isNetworkAccessAllowed = true
+        return await withCheckedContinuation { continuation in
+            var resumed = false
+            imageManager.requestLivePhoto(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFit,
+                options: options
+            ) { livePhoto, info in
+                guard !resumed else { return }
+                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                if degraded { return }
+                resumed = true
+                continuation.resume(returning: livePhoto)
+            }
+        }
+    }
+
     func prepareBackupAsset(_ localAsset: LocalPhotoAsset) async throws -> PreparedPhotoAsset {
         guard let asset = photoAsset(localAsset.localIdentifier) else {
             throw PhotoBackupPreparationError.assetUnavailable
@@ -233,11 +305,37 @@ final class PhotoLibraryClient: NSObject {
             creationDate: asset.creationDate,
             modificationDate: asset.modificationDate,
             mediaKind: mediaKind,
+            isRAW: isRAWAsset(asset),
             pixelWidth: asset.pixelWidth,
             pixelHeight: asset.pixelHeight,
             duration: asset.duration,
             isFavorite: asset.isFavorite
         )
+    }
+
+    /// PhotoKit has no `PHAssetMediaSubtype` dedicated to RAW. Inspecting the
+    /// original resource metadata identifies ProRAW/DNG without decoding it.
+    private func isRAWAsset(_ asset: PHAsset) -> Bool {
+        let rawFilenameExtensions: Set<String> = [
+            "3fr", "arw", "cr2", "cr3", "dng", "erf", "fff", "iiq",
+            "kdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "pef",
+            "raf", "raw", "rw2", "rwl", "sr2", "srf", "x3f",
+        ]
+
+        return PHAssetResource.assetResources(for: asset).contains { resource in
+            let filenameExtension = URL(fileURLWithPath: resource.originalFilename)
+                .pathExtension
+                .lowercased()
+            if rawFilenameExtensions.contains(filenameExtension) {
+                return true
+            }
+
+            let contentType = Self.resourceContentTypeIdentifier(resource).lowercased()
+            return contentType == "com.adobe.raw-image"
+                || contentType == "com.adobe.digital-negative"
+                || contentType == "public.camera-raw-image"
+                || contentType.contains("digital-negative")
+        }
     }
 
     private func localThumbnailOptions() -> PHImageRequestOptions {

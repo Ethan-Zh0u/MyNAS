@@ -27,6 +27,18 @@ struct PhotoTimelineView: View {
         return CGSize(width: edge, height: edge)
     }
 
+    private var completedBackupIdentifiers: Set<String> {
+        Set(
+            backupCoordinator.jobs
+                .lazy
+                .filter {
+                    $0.accountID == accountStore.current.accountID
+                        && $0.status == .completed
+                }
+                .map(\.localIdentifier)
+        )
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -60,9 +72,6 @@ struct PhotoTimelineView: View {
                     .accessibilityLabel("搜索照片")
                 }
             }
-            .navigationDestination(for: LocalPhotoAsset.self) { asset in
-                PhotoDetailView(asset: asset, client: viewModel.imageClient)
-            }
         }
     }
 
@@ -92,7 +101,7 @@ struct PhotoTimelineView: View {
                         PhotoTimelineBackupBanner(
                             progress: backupCoordinator.progress(
                                 for: accountStore.current.accountID,
-                                fallbackTotalCount: viewModel.assets.count
+                                assets: viewModel.assets
                             ),
                             headline: backupCoordinator.headline,
                             isConnected: !accountStore.current.isLocalOnly
@@ -126,7 +135,7 @@ struct PhotoTimelineView: View {
                 }
             }
             .refreshable { await viewModel.refresh() }
-            .simultaneousGesture(gridMagnificationGesture)
+            .simultaneousGesture(gridMagnificationGesture, including: .gesture)
             .sensoryFeedback(.selection, trigger: columnCount)
             .onChange(of: viewModel.assets.map(\.id)) { _, _ in
                 prefetchVisibleDensity()
@@ -142,31 +151,42 @@ struct PhotoTimelineView: View {
         if selectionMode {
             PhotoGridCell(
                 asset: asset,
+                isBackedUp: completedBackupIdentifiers.contains(asset.localIdentifier),
                 isSelected: selectedIDs.contains(asset.id),
-                isSelectionMode: true,
                 targetSize: thumbnailTargetSize,
                 client: viewModel.imageClient
             )
                 .onTapGesture { toggleSelection(asset) }
                 .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("选择 \(asset.mediaKind.displayName)")
+                .accessibilityLabel(accessibilityLabel(for: asset, action: "选择"))
         } else {
-            NavigationLink(value: asset) {
+            NavigationLink {
+                PhotoDetailView(
+                    asset: asset,
+                    isBackedUp: completedBackupIdentifiers.contains(asset.localIdentifier),
+                    client: viewModel.imageClient
+                )
+            } label: {
                 PhotoGridCell(
                     asset: asset,
+                    isBackedUp: completedBackupIdentifiers.contains(asset.localIdentifier),
                     isSelected: false,
-                    isSelectionMode: false,
                     targetSize: thumbnailTargetSize,
                     client: viewModel.imageClient
                 )
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .simultaneousGesture(LongPressGesture(minimumDuration: 0.45).onEnded { _ in
-                selectionMode = true
-                selectedIDs.insert(asset.id)
-            })
-            .accessibilityLabel("打开\(asset.mediaKind.displayName)")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(accessibilityLabel(for: asset, action: "打开"))
         }
+    }
+
+    private func accessibilityLabel(for asset: LocalPhotoAsset, action: String) -> String {
+        let backupState = completedBackupIdentifiers.contains(asset.localIdentifier)
+            ? "，已完成备份"
+            : ""
+        return "\(action)\(asset.displayMediaName)\(backupState)"
     }
 
     private func toggleSelection(_ asset: LocalPhotoAsset) {
@@ -339,39 +359,68 @@ private extension View {
 
 private struct PhotoGridCell: View {
     let asset: LocalPhotoAsset
+    let isBackedUp: Bool
     let isSelected: Bool
-    let isSelectionMode: Bool
     let targetSize: CGSize
     let client: PhotoLibraryClient
 
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .bottomTrailing) {
+            ZStack {
                 PhotoThumbnailView(asset: asset, targetSize: targetSize, client: client)
-                    .allowsHitTesting(!isSelectionMode)
+                    .allowsHitTesting(false)
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .clipped()
 
                 if asset.mediaKind == .video {
                     Text(durationText)
-                        .font(.caption2.weight(.medium))
+                        .font(.system(size: metadataFontSize(for: geometry.size.width), weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
-                        .padding(6)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 3)
+                        .background(.black.opacity(0.48), in: Capsule())
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                        .padding(badgeInset(for: geometry.size.width))
                         .accessibilityHidden(true)
-                } else if asset.mediaKind == .livePhoto {
-                    Image(systemName: "livephoto")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(6)
-                        .accessibilityHidden(true)
+                }
+
+                if asset.mediaKind == .livePhoto || asset.isRAW {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if asset.mediaKind == .livePhoto {
+                            Image(systemName: "livephoto")
+                                .metadataBadge(fontSize: metadataFontSize(for: geometry.size.width))
+                        }
+                        if asset.isRAW {
+                            HStack(spacing: 2) {
+                                Image(systemName: "camera.aperture")
+                                if geometry.size.width >= 52 {
+                                    Text("RAW")
+                                        .fontWeight(.bold)
+                                }
+                            }
+                            .metadataBadge(fontSize: metadataFontSize(for: geometry.size.width))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(badgeInset(for: geometry.size.width))
+                    .accessibilityHidden(true)
                 }
 
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.title2)
+                        .font(.system(size: statusBadgeSize(for: geometry.size.width), weight: .semibold))
                         .foregroundStyle(.white, Color.accentColor)
-                        .padding(7)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding(badgeInset(for: geometry.size.width))
+                        .accessibilityHidden(true)
+                } else if isBackedUp {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: statusBadgeSize(for: geometry.size.width), weight: .semibold))
+                        .foregroundStyle(.white, Color.green)
+                        .shadow(color: .black.opacity(0.24), radius: 2, y: 1)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding(badgeInset(for: geometry.size.width))
                         .accessibilityHidden(true)
                 }
             }
@@ -392,6 +441,29 @@ private struct PhotoGridCell: View {
         formatter.zeroFormattingBehavior = .pad
         return formatter.string(from: asset.duration) ?? "视频"
     }
+
+    private func statusBadgeSize(for cellWidth: CGFloat) -> CGFloat {
+        min(24, max(14, cellWidth * 0.19))
+    }
+
+    private func metadataFontSize(for cellWidth: CGFloat) -> CGFloat {
+        min(12, max(8, cellWidth * 0.09))
+    }
+
+    private func badgeInset(for cellWidth: CGFloat) -> CGFloat {
+        min(7, max(3, cellWidth * 0.05))
+    }
+}
+
+private extension View {
+    func metadataBadge(fontSize: CGFloat) -> some View {
+        self
+            .font(.system(size: fontSize, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 4)
+            .background(.black.opacity(0.48), in: Capsule())
+    }
 }
 
 struct PhotoThumbnailView: View {
@@ -401,7 +473,6 @@ struct PhotoThumbnailView: View {
     @State private var image: UIImage?
     @State private var isCloudOnly = false
     @State private var didFail = false
-    @State private var reloadID = UUID()
 
     var body: some View {
         ZStack {
@@ -430,18 +501,13 @@ struct PhotoThumbnailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
-        .task(id: "\(asset.id)-\(Int(targetSize.width))-\(reloadID)") {
+        .task(id: "\(asset.id)-\(Int(targetSize.width))") {
             let result = await client.thumbnail(for: asset.localIdentifier, targetSize: targetSize)
             guard !Task.isCancelled else { return }
             image = result.image
             isCloudOnly = result.isCloudOnly
             didFail = result.image == nil && !result.isCloudOnly
         }
-        .simultaneousGesture(TapGesture().onEnded {
-            if didFail {
-                reloadID = UUID()
-            }
-        })
         .accessibilityLabel(accessibilityDescription)
     }
 

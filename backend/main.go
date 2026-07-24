@@ -141,6 +141,9 @@ func main() {
 	mux.HandleFunc("/api/v1/photos/pairing", a.photosPairing)
 	mux.HandleFunc("/api/v1/photos/me", a.photosMe)
 	mux.HandleFunc("/api/v1/photos/volumes", a.photosVolumes)
+	mux.HandleFunc("/api/v1/photos/assets", a.photosAssets)
+	mux.HandleFunc("/api/v1/photos/assets/", a.photosAssetByPath)
+	mux.HandleFunc("/api/v1/photos/changes", a.photosChanges)
 	mux.HandleFunc("/api/v1/photos/upload-sessions", a.photosUploadSessions)
 	mux.HandleFunc("/api/v1/photos/upload-sessions/", a.photosUploadSessionByPath)
 	if web := os.Getenv("MYNAS_WEB_DIR"); web != "" {
@@ -284,11 +287,21 @@ CREATE TABLE IF NOT EXISTS photo_derivative_jobs(
 	updated TEXT NOT NULL,
 	UNIQUE(asset_id,recipe_version)
 );
+CREATE TABLE IF NOT EXISTS photo_changes(
+	sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+	owner_user_id TEXT NOT NULL,
+	asset_id TEXT NOT NULL,
+	change_type TEXT NOT NULL,
+	asset_updated TEXT NOT NULL,
+	created TEXT NOT NULL,
+	UNIQUE(owner_user_id,asset_id,change_type,asset_updated)
+);
 CREATE INDEX IF NOT EXISTS photo_assets_owner_capture ON photo_assets(owner_user_id,capture_date DESC,id);
 CREATE INDEX IF NOT EXISTS photo_upload_owner_status ON photo_upload_sessions(owner_user_id,status,updated);
 CREATE INDEX IF NOT EXISTS photo_upload_resources_session ON photo_upload_resources(upload_session_id);
 CREATE INDEX IF NOT EXISTS photo_derivative_jobs_status ON photo_derivative_jobs(status,next_attempt_at,updated);
-CREATE INDEX IF NOT EXISTS photo_derivatives_asset ON photo_derivatives(asset_id,kind);`)
+CREATE INDEX IF NOT EXISTS photo_derivatives_asset ON photo_derivatives(asset_id,kind);
+CREATE INDEX IF NOT EXISTS photo_changes_owner_sequence ON photo_changes(owner_user_id,sequence);`)
 	if e != nil {
 		return e
 	}
@@ -346,6 +359,17 @@ CREATE INDEX IF NOT EXISTS photo_derivatives_asset ON photo_derivatives(asset_id
 	); e != nil {
 		return e
 	}
+	if _, e = a.db.Exec(
+		`INSERT OR IGNORE INTO photo_changes(
+			owner_user_id,asset_id,change_type,asset_updated,created
+		 )
+		 SELECT owner_user_id,id,'upsert',updated,?
+		 FROM photo_assets WHERE source_state=?`,
+		now,
+		photosSourceStateCommitted,
+	); e != nil {
+		return e
+	}
 	return nil
 }
 func (a *App) middleware(next http.Handler) http.Handler {
@@ -359,7 +383,10 @@ func (a *App) middleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-MyNAS-Request, X-Upload-Offset, X-Chunk-Checksum")
+			w.Header().Set(
+				"Access-Control-Allow-Headers",
+				"Content-Type, X-MyNAS-Request, X-Upload-Offset, X-Chunk-SHA256, X-Chunk-Checksum",
+			)
 			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 			if strings.EqualFold(r.Header.Get("Access-Control-Request-Private-Network"), "true") {
 				w.Header().Set("Access-Control-Allow-Private-Network", "true")

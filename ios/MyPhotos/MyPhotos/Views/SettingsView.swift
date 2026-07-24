@@ -178,7 +178,7 @@ struct SettingsView: View {
     private var backupProgress: PhotoBackupProgressSnapshot {
         backupCoordinator.progress(
             for: accountStore.current.accountID,
-            fallbackTotalCount: assets.count
+            assets: assets
         )
     }
 

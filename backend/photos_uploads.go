@@ -542,6 +542,14 @@ func (a *App) completePhotoUploadSession(w http.ResponseWriter, ownerUserID stri
 		)
 	}
 	if err == nil {
+		_, err = transaction.Exec(
+			`INSERT OR IGNORE INTO photo_changes(
+				owner_user_id,asset_id,change_type,asset_updated,created
+			 ) VALUES(?,?,'upsert',?,?)`,
+			ownerUserID, session.AssetID, now, now,
+		)
+	}
+	if err == nil {
 		err = transaction.Commit()
 	}
 	if err != nil {

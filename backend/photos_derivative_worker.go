@@ -546,6 +546,17 @@ func (a *App) completePhotoDerivativeJob(
 	); err != nil {
 		return err
 	}
+	if _, err = transaction.Exec(
+		`INSERT OR IGNORE INTO photo_changes(
+			owner_user_id,asset_id,change_type,asset_updated,created
+		 ) VALUES(?,?,'upsert',?,?)`,
+		job.OwnerUserID,
+		job.AssetID,
+		now,
+		now,
+	); err != nil {
+		return err
+	}
 	return transaction.Commit()
 }
 
@@ -590,6 +601,17 @@ func (a *App) failPhotoDerivativeJob(job photosDerivativeJobRow, failure error) 
 		now,
 		job.AssetID,
 		job.OwnerUserID,
+	); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(
+		`INSERT OR IGNORE INTO photo_changes(
+			owner_user_id,asset_id,change_type,asset_updated,created
+		 ) VALUES(?,?,'upsert',?,?)`,
+		job.OwnerUserID,
+		job.AssetID,
+		now,
+		now,
 	); err != nil {
 		return err
 	}

@@ -28,6 +28,7 @@ enum MainSection: String, CaseIterable, Identifiable, Hashable {
 }
 
 struct MyPhotosRootView: View {
+    @EnvironmentObject private var accountStore: AccountStore
     @StateObject private var library = LocalPhotoLibraryViewModel()
     @StateObject private var backupCoordinator = PhotoBackupCoordinator()
     @State private var section: MainSection = .photos
@@ -40,6 +41,20 @@ struct MyPhotosRootView: View {
         }
         .task {
             await library.start()
+        }
+        .onChange(of: library.assets) { _, assets in
+            backupCoordinator.synchronizeLibrary(
+                assets: assets,
+                account: accountStore.current,
+                client: library.imageClient
+            )
+        }
+        .onChange(of: accountStore.current) { _, account in
+            backupCoordinator.synchronizeLibrary(
+                assets: library.assets,
+                account: account,
+                client: library.imageClient
+            )
         }
     }
 

@@ -11,6 +11,13 @@ final class PhotoBackupCoordinator: ObservableObject {
     private let persistence: PhotoBackupPersistenceStore
     private let deviceID: String
     private var runTask: Task<Void, Never>?
+    private var automaticBackupRequests: [String: AutomaticBackupRequest] = [:]
+
+    private struct AutomaticBackupRequest {
+        let assets: [LocalPhotoAsset]
+        let account: AccountContext
+        let client: PhotoLibraryClient
+    }
 
     init(
         uploader: PhotoBackupUploader = PhotoBackupUploader(),
@@ -36,22 +43,29 @@ final class PhotoBackupCoordinator: ObservableObject {
 
     func progress(
         for accountID: String,
-        fallbackTotalCount: Int = 0
+        assets: [LocalPhotoAsset]
     ) -> PhotoBackupProgressSnapshot {
         let accountJobs = jobs.filter { $0.accountID == accountID }
-        let totalCount = accountJobs.isEmpty ? fallbackTotalCount : accountJobs.count
-        let uploadedBytes = accountJobs.reduce(Int64(0)) {
+        let jobsByIdentifier = Dictionary(
+            uniqueKeysWithValues: accountJobs.map { ($0.localIdentifier, $0) }
+        )
+        let currentJobs = assets.compactMap { asset -> PhotoBackupJob? in
+            guard let job = jobsByIdentifier[asset.localIdentifier],
+                  job.sourceModificationDate == asset.modificationDate else {
+                return nil
+            }
+            return job
+        }
+        let uploadedBytes = currentJobs.reduce(Int64(0)) {
             $0 + max(0, min($1.uploadedBytes, $1.totalBytes))
         }
-        let totalBytes = accountJobs.reduce(Int64(0)) {
+        let totalBytes = currentJobs.reduce(Int64(0)) {
             $0 + max(0, $1.totalBytes)
         }
-        let sizePendingCount = accountJobs.isEmpty
-            ? fallbackTotalCount
-            : accountJobs.filter { $0.totalBytes <= 0 }.count
+        let sizePendingCount = assets.count - currentJobs.filter { $0.totalBytes > 0 }.count
         return PhotoBackupProgressSnapshot(
-            completedCount: accountJobs.filter { $0.status == .completed }.count,
-            totalCount: totalCount,
+            completedCount: currentJobs.filter { $0.status == .completed }.count,
+            totalCount: assets.count,
             isRunning: isRunning && accountJobs.contains {
                 $0.status == .preparing || $0.status == .uploading || $0.status == .waiting
             },
@@ -59,6 +73,43 @@ final class PhotoBackupCoordinator: ObservableObject {
             totalBytes: totalBytes,
             sizePendingCount: sizePendingCount
         )
+    }
+
+    func pendingCount(
+        for assets: [LocalPhotoAsset],
+        accountID: String
+    ) -> Int {
+        let accountJobs = jobs.filter { $0.accountID == accountID }
+        let jobsByIdentifier = Dictionary(
+            uniqueKeysWithValues: accountJobs.map { ($0.localIdentifier, $0) }
+        )
+        return assets.reduce(into: 0) { count, asset in
+            guard let job = jobsByIdentifier[asset.localIdentifier],
+                  job.status == .completed,
+                  job.sourceModificationDate == asset.modificationDate else {
+                count += 1
+                return
+            }
+        }
+    }
+
+    func synchronizeLibrary(
+        assets: [LocalPhotoAsset],
+        account: AccountContext,
+        client: PhotoLibraryClient
+    ) {
+        guard !account.isLocalOnly else { return }
+        automaticBackupRequests[account.accountID] = AutomaticBackupRequest(
+            assets: assets,
+            account: account,
+            client: client
+        )
+        enqueue(
+            assets: assets,
+            accountID: account.accountID,
+            retryFailed: false
+        )
+        startAutomaticBackupIfNeeded(accountID: account.accountID)
     }
 
     func startManualBackup(
@@ -75,7 +126,11 @@ final class PhotoBackupCoordinator: ObservableObject {
             headline = "请先选择备份硬盘"
             return
         }
-        enqueue(assets: assets, accountID: account.accountID)
+        enqueue(
+            assets: assets,
+            accountID: account.accountID,
+            retryFailed: true
+        )
         run(account: account, assets: assets, client: client)
     }
 
@@ -108,13 +163,29 @@ final class PhotoBackupCoordinator: ObservableObject {
         run(account: account, assets: assets, client: client)
     }
 
-    private func enqueue(assets: [LocalPhotoAsset], accountID: String) {
+    private func enqueue(
+        assets: [LocalPhotoAsset],
+        accountID: String,
+        retryFailed: Bool
+    ) {
+        var queuedCount = 0
+        var changed = false
         for asset in assets {
             if let index = jobs.firstIndex(where: {
                 $0.accountID == accountID && $0.localIdentifier == asset.localIdentifier
             }) {
                 let sourceChanged = jobs[index].sourceModificationDate != asset.modificationDate
                 if jobs[index].status == .completed, !sourceChanged {
+                    continue
+                }
+                if !sourceChanged {
+                    if jobs[index].status == .failed, retryFailed {
+                        jobs[index].status = .waiting
+                        jobs[index].message = "等待重试"
+                        jobs[index].updatedAt = Date()
+                        queuedCount += 1
+                        changed = true
+                    }
                     continue
                 }
                 jobs[index].sourceModificationDate = asset.modificationDate
@@ -127,6 +198,8 @@ final class PhotoBackupCoordinator: ObservableObject {
                 jobs[index].derivativeState = nil
                 jobs[index].message = sourceChanged ? "源文件已变化，准备重新备份" : "等待上传"
                 jobs[index].updatedAt = Date()
+                queuedCount += 1
+                changed = true
             } else {
                 jobs.append(
                     PhotoBackupJob(
@@ -147,10 +220,18 @@ final class PhotoBackupCoordinator: ObservableObject {
                         updatedAt: Date()
                     )
                 )
+                queuedCount += 1
+                changed = true
             }
         }
-        headline = "已加入 \(assets.count) 项媒体"
-        persist()
+        if queuedCount > 0 {
+            headline = queuedCount == 1
+                ? "发现 1 个新项目，等待备份"
+                : "发现 \(queuedCount) 个新项目，等待备份"
+        }
+        if changed {
+            persist()
+        }
     }
 
     private func run(
@@ -167,11 +248,12 @@ final class PhotoBackupCoordinator: ObservableObject {
                 self.isRunning = false
                 self.runTask = nil
                 self.refreshHeadline(accountID: account.accountID)
+                self.startAutomaticBackupIfNeeded(accountID: account.accountID)
             }
 
             let jobIDs = self.jobs.filter {
                 $0.accountID == account.accountID
-                    && $0.status != .completed
+                    && $0.status == .waiting
                     && assetsByID[$0.localIdentifier] != nil
             }.map(\.id)
 
@@ -189,6 +271,27 @@ final class PhotoBackupCoordinator: ObservableObject {
                 )
             }
         }
+    }
+
+    private func startAutomaticBackupIfNeeded(accountID: String) {
+        guard !isRunning,
+              let request = automaticBackupRequests[accountID],
+              !request.account.isLocalOnly,
+              request.account.selectedVolumeID != nil else {
+            return
+        }
+        let availableIdentifiers = Set(request.assets.map(\.localIdentifier))
+        let hasWaitingJob = jobs.contains {
+            $0.accountID == accountID
+                && $0.status == .waiting
+                && availableIdentifiers.contains($0.localIdentifier)
+        }
+        guard hasWaitingJob else { return }
+        run(
+            account: request.account,
+            assets: request.assets,
+            client: request.client
+        )
     }
 
     private func process(
