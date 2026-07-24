@@ -9,11 +9,12 @@ import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/500.css';
 import '@fontsource/jetbrains-mono/600.css';
 import '@fontsource/jetbrains-mono/700.css';
-import { API, ApiError, api, bytesPerSecond, displayedUploadBytes, fmt, parent, Item, PairedNode, MyNASNode, parsePairedNode, loadNodes, rememberNode, removeNode, activateNode, normalizeNodeUrl, proxyBypassGuide } from './api';
+import { QRCodeSVG } from 'qrcode.react';
+import { API, ApiError, api, bytesPerSecond, displayedUploadBytes, fmt, formatTemperature, parent, Item, PairedNode, MyNASNode, PhotosPairingPayload, photosPairingPayloadText, parsePairedNode, loadNodes, rememberNode, removeNode, activateNode, normalizeNodeUrl, proxyBypassGuide } from './api';
 import './style.css';
 
 type Page = 'home' | 'files' | 'transfers' | 'trash' | 'settings';
-type Health = { ok: boolean; user: { login: string; name: string; avatar: string }; protocol: string; storage?: { status: 'online' | 'offline'; mount: string; device: string; filesystem: string; uuid: string; message: string } };
+type Health = { ok: boolean; version: string; user: { login: string; name: string; avatar: string }; protocol: string; storage?: { status: 'online' | 'offline'; mount: string; device: string; filesystem: string; uuid: string; message: string }; system?: { temperatureC?: number } };
 type Volume = { id: string; name: string; uuid: string; device: string; filesystem: string; mount: string; status: 'online' | 'offline'; total: number; free: number; used: number; readBytes: number; writeBytes: number; protocol: string; smart: string };
 type VolumeCandidate = { device: string; uuid: string; label: string; model: string; serial: string; filesystem: string; mount: string; size: number; removable: boolean; supported: boolean; registered: boolean; reason?: string };
 type TrashRow = { id: string; volumeId: string; volumeName: string; original: string };
@@ -163,7 +164,7 @@ function App() {
   }, []);
   useEffect(() => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; saveSetting('theme',dark ? 'dark' : 'light'); }, [dark]);
   useEffect(() => { check(); }, [check]);
-  useEffect(() => { const timer=globalThis.setInterval(()=>void check(),10000); return()=>globalThis.clearInterval(timer); }, [check]);
+  useEffect(() => { const timer=globalThis.setInterval(()=>void check(),5000); return()=>globalThis.clearInterval(timer); }, [check]);
   useEffect(() => { const online=()=>void check(); addEventListener('online',online); return()=>removeEventListener('online',online); }, [check]);
   useEffect(() => {
     const interrupted = readActiveUploads();
@@ -183,12 +184,12 @@ function App() {
   if(onboardingPreview)return <Connect checking={false} retry={check} previewGuide/>;
   if(offlinePreview)return <Connect checking={false} error={new ApiError('无法连接树莓派的 MyNAS 服务，请检查设备电源、网络、Tailscale 或代理设置。',0,'network')} retry={check} pairedNode={{apiUrl:'https://rsp.tail681937.ts.net',host:'rsp.tail681937.ts.net',user:'已授权用户',verifiedAt:new Date().toISOString()}}/>;
   if (!health) return <Connect checking={connection==='checking'} error={connectionError} retry={check} pairedNode={pairedNode} />;
-  const PageView = page === 'home' ? Home : page === 'files' ? Files : page === 'transfers' ? Transfers : page === 'trash' ? Trash : Settings;
+  const pageView = page === 'home' ? <Home health={health}/> : page === 'files' ? <Files/> : page === 'transfers' ? <Transfers/> : page === 'trash' ? <Trash/> : <Settings health={health}/>;
   const storageOffline = health.storage?.status === 'offline';
   return <main className="app">
     <aside>
       <div className="brand"><span className="brand-mark"><I.HardDrive /></span><span><b>MyNAS</b><small>PRIVATE STORAGE</small></span></div>
-      <button className="node-switcher" onClick={()=>setNodeManager(true)} aria-label={t('管理 MyNAS 设备','Manage MyNAS devices')}><i /><span><b>{connectedNodeName()}</b><small>{t('已连接 · 管理设备','Connected · Manage')}</small></span><I.ChevronDown /></button>
+      <button className="node-switcher" onClick={()=>setNodeManager(true)} aria-label={t('管理 MyNAS 设备','Manage MyNAS devices')}><i /><span><b>{connectedNodeName()}</b><small>{t('已连接','Connected')} · {formatTemperature(health.system?.temperatureC)}</small></span><I.ChevronDown /></button>
       <div className="nav-label">MENU</div>
       <nav aria-label={t('主导航','Main navigation')}>{nav.map(([key, zh, en, Icon]) => <button className={page === key ? 'active' : ''} onClick={() => setPage(key)} key={key}><Icon />{locale==='en'?en:zh}</button>)}</nav>
       <button className="language-toggle" onClick={()=>setLocale(locale==='zh'?'en':'zh')} aria-label={t('切换到英文','Switch to Chinese')}><I.Languages/><span>{locale==='zh'?'中文':'English'}</span><b>{locale==='zh'?'EN':'中'}</b></button>
@@ -196,7 +197,7 @@ function App() {
       <div className="secure-note"><I.ShieldCheck /><span>TAILSCALE LINK<small>{t('端到端私有通道','End-to-end private link')}</small></span></div>
       <div className="profile">{health.user.avatar ? <img src={health.user.avatar} alt="" /> : <I.UserRound />}<span><b>{health.user.name || health.user.login}</b><small>{health.user.login}</small></span></div>
     </aside>
-    <section className="content">{storageOffline && <div className="notice storage-alert" role="status"><I.HardDrive /><span><b>{t('数据硬盘未挂载','NAS data drive is not mounted')}</b><small>{health.storage?.message || t('文件操作已暂停，系统会自动重试挂载。','File operations are paused while the system retries the mount.')}</small></span><button onClick={() => void check()}><I.RefreshCw />{t('重新检测','Check again')}</button></div>}<PageBoundary key={page}><PageView /></PageBoundary></section>{nodeManager&&<NodeManager close={()=>setNodeManager(false)}/>}
+    <section className="content">{storageOffline && <div className="notice storage-alert" role="status"><I.HardDrive /><span><b>{t('数据硬盘未挂载','NAS data drive is not mounted')}</b><small>{health.storage?.message || t('文件操作已暂停，系统会自动重试挂载。','File operations are paused while the system retries the mount.')}</small></span><button onClick={() => void check()}><I.RefreshCw />{t('重新检测','Check again')}</button></div>}<PageBoundary key={page}>{pageView}</PageBoundary></section>{nodeManager&&<NodeManager close={()=>setNodeManager(false)}/>}
   </main>;
 }
 
@@ -220,7 +221,7 @@ const driveDemoVolumes=():Volume[]=>{
   ];
 };
 
-function Home() {
+function Home({health}:{health:Health}) {
   const {t}=useLocale();
   const demo=typeof location!=='undefined'&&['localhost','127.0.0.1'].includes(location.hostname)&&new URLSearchParams(location.search).get('demo')==='drives';
   const [sample, setSample] = useState<{volumes:Volume[];sampledAt:number;previous:Record<string,Volume>;elapsedMs:number}>(()=>({volumes:demo?driveDemoVolumes():[],sampledAt:0,previous:{},elapsedMs:0}));
@@ -239,7 +240,7 @@ function Home() {
   const rateOf=(now:number,old?:number)=>old===undefined?0:bytesPerSecond(now,old,elapsedMs);
   const readRate=volumes.reduce((sum,volume)=>sum+rateOf(volume.readBytes,previous[volume.id]?.readBytes),0);
   const writeRate=volumes.reduce((sum,volume)=>sum+rateOf(volume.writeBytes,previous[volume.id]?.writeBytes),0);
-  return <><header className="home-header"><div><span className="eyebrow">STORAGE OVERVIEW / {t(demo?'多硬盘演示':'实时状态',demo?'DRIVE DEMO':'LIVE STATUS')}</span><h1>{t('你的私有存储空间','Your private storage')}</h1><p><b>{volumes.length}</b> {t('块硬盘','drives')} · {t('总容量','total')} <b>{fmt(totalBytes)}</b> · {t('所有数据仅经由 Tailscale 加密通道传输','All data travels only through the encrypted Tailscale link')}</p></div><div className="home-actions"><span className="live-stamp"><i />{demo?'DEMO':'LIVE'}<small>{demo?t('模拟数据','SAMPLE DATA'):t('每 2 秒更新','EVERY 2S')}</small></span><button className="primary" onClick={() => setWizard(true)}><I.Plus />{t('接入新硬盘','Add a drive')}</button></div></header>
+  return <><header className="home-header"><div><span className="eyebrow">STORAGE OVERVIEW / {t(demo?'多硬盘演示':'实时状态',demo?'DRIVE DEMO':'LIVE STATUS')}</span><h1>{t('你的私有存储空间','Your private storage')}</h1><p><b>{volumes.length}</b> {t('块硬盘','drives')} · {t('总容量','total')} <b>{fmt(totalBytes)}</b> · {t('所有数据仅经由 Tailscale 加密通道传输','All data travels only through the encrypted Tailscale link')}</p></div><div className="home-actions"><span className="temperature-chip" title={t('树莓派实时温度','Live Raspberry Pi temperature')}><I.Thermometer/>{formatTemperature(health.system?.temperatureC)}</span><span className="live-stamp"><i />{demo?'DEMO':'LIVE'}<small>{demo?t('模拟数据','SAMPLE DATA'):t('设备状态每 5 秒更新','DEVICE EVERY 5S')}</small></span><button className="primary" onClick={() => setWizard(true)}><I.Plus />{t('接入新硬盘','Add a drive')}</button></div></header>
     {volumes.length ? <>
     <div className="stats" aria-label={t('存储统计','Storage statistics')}>
       <div className="stat"><label>{t('总容量 / Total','Total capacity')}</label><strong>{fmt(totalBytes)}</strong><em>{t(`${volumes.length} 块已注册硬盘`,`${volumes.length} registered drives`)}</em></div>
@@ -405,7 +406,18 @@ function NodeManager({close}:{close:()=>void}) {
   return <div className="preview" role="dialog" aria-modal="true" aria-labelledby="node-manager-title"><div className="preview-card node-manager"><button className="close" onClick={close} aria-label={t('关闭设备管理','Close Device Manager')}><I.X/></button><span className="eyebrow">MYNAS NODES / {t('多设备','MULTI-DEVICE')}</span><h2 id="node-manager-title">{t('管理 MyNAS 设备','Manage MyNAS devices')}</h2><p className="guide-lead">{t('这里只显示通过 MyNAS 健康接口验证的设备；同一 Tailscale 网络中的普通服务器不会加入列表。','Only devices verified by the MyNAS health endpoint are shown. Other servers on the same tailnet are not added.')}</p><div className="node-registry">{nodes.map(node=>{const current=node.apiUrl===API;return <article className={current?'current':''} key={node.apiUrl}><div className="node-icon"><I.Server/><i/></div><span><b>{node.name}</b><small>{node.host}</small><em>{current?t('当前设备 · 在线','Current device · Online'):t(`已验证 · ${new Date(node.verifiedAt).toLocaleDateString()}`,`Verified · ${new Date(node.verifiedAt).toLocaleDateString()}`)}</em></span><div><button className={current?'node-current':'primary'} disabled={current} onClick={()=>connect(node)}>{current?<><I.Check/>{t('正在使用','In use')}</>:<><I.ArrowRightLeft/>{t('连接','Connect')}</>}</button><button onClick={()=>startRename(node)} aria-label={t(`重命名 ${node.name}`,`Rename ${node.name}`)}><I.Pencil/></button><button className="danger" disabled={current} onClick={()=>forget(node)} aria-label={t(`移除 ${node.name}`,`Remove ${node.name}`)}><I.Trash2/></button></div></article>})}{!nodes.length&&<div className="empty compact-empty">{t('还没有保存任何 MyNAS 设备','No MyNAS device has been saved yet')}</div>}</div><form className="node-add" onSubmit={add}><div className="node-add-intro"><span className="eyebrow">ADD DEVICE / {t('添加设备','NEW DEVICE')}</span><h3>{t('连接另一台 MyNAS','Connect another MyNAS')}</h3><p>{t('新树莓派可以复用首次注册流程；已经安装完成的设备可以直接填写地址。','A new Raspberry Pi can use the initial setup flow; enter the address directly for an already configured device.')}</p><div className="node-path-actions"><button type="button" onClick={()=>setNewGuide(true)}><I.Sparkles/>{t('配置新的 MyNAS','Set up a new MyNAS')}</button><button type="button" className="text-link" onClick={()=>setAddressGuide(true)}>{t('已经配置好 MyNAS？','MyNAS already configured?')}</button></div></div><label>{t('设备名称','Device name')}<input value={name} onChange={event=>setName(event.target.value)} placeholder={t('例如：书房 NAS','For example: Study NAS')} maxLength={40} required/></label><label>MyNAS {t('地址','address')} <button type="button" className="field-help" onClick={()=>setAddressGuide(true)}>{t('这是什么？','What is this?')}</button><input value={address} onChange={event=>setAddress(event.target.value)} placeholder="https://mynas-2.tailxxxx.ts.net" required/></label>{error&&<p className="connection-error">{error}</p>}<button className="primary" disabled={checking} type="submit">{checking?<I.LoaderCircle className="spin"/>:<I.Plus/>}{checking?t('正在验证设备','Verifying device'):t('验证并添加','Verify and add')}</button></form></div>{newGuide&&<FirstConnectionGuide another initialName={name} onNameChange={setName} close={()=>setNewGuide(false)}/>} {addressGuide&&<ExistingNodeGuide close={()=>setAddressGuide(false)}/>} {renaming&&<RenameNodeDialog node={renaming} close={()=>setRenaming(undefined)} save={rename}/>}</div>;
 }
 
-function Settings() { const {t}=useLocale(); const [manager,setManager]=useState(false); return <><header><h1>{t('设置','Settings')}</h1></header><div className="setting"><I.Server/><div><h2>{t('多 MyNAS 设备','Multiple MyNAS devices')}</h2><p>{t('添加和切换多台树莓派 MyNAS；每台设备可以继续管理自己的多块硬盘。','Add and switch between Raspberry Pi MyNAS devices. Each one can manage its own drives.')}</p><button onClick={()=>setManager(true)}><I.Settings2/>{t('管理设备','Manage devices')}</button></div></div>{manager&&<NodeManager close={()=>setManager(false)}/>}</>; }
+function PhotosPairingCard(){
+  const {t}=useLocale();
+  const [pairing,setPairing]=useState<PhotosPairingPayload>();
+  const [error,setError]=useState('');
+  const [copied,setCopied]=useState(false);
+  const load=useCallback(()=>{setError('');api<PhotosPairingPayload>('/photos/pairing').then(value=>{photosPairingPayloadText(value);setPairing(value)}).catch(reason=>setError(errorText(reason)))},[]);
+  useEffect(()=>{load()},[load]);
+  const copy=async()=>{if(!pairing)return;try{await navigator.clipboard.writeText(pairing.serverURL);setCopied(true);globalThis.setTimeout(()=>setCopied(false),1800)}catch{setError(t('无法复制，请手动选择地址','Could not copy. Select the address manually.'))}};
+  return <div className="setting pairing-setting"><I.ScanQrCode/><div className="pairing-copy"><h2>{t('连接 MyNAS Photos','Connect MyNAS Photos')}</h2><p>{t('在 iPhone 的连接向导第 3 步扫描此二维码。二维码只包含这台设备的私有 Tailscale 地址和服务器 ID，不包含密码。','Scan this QR code in step 3 of the iPhone connection guide. It contains only this device’s private Tailscale address and server ID—no password.')}</p>{pairing&&<><code>{pairing.serverURL}</code><button onClick={()=>void copy()}><I.Copy/>{copied?t('已复制','Copied'):t('复制地址','Copy address')}</button></>}{error&&<><p className="connection-error">{error}</p><button onClick={load}><I.RefreshCw/>{t('重新生成','Try again')}</button></>}</div><div className="pairing-qr" aria-live="polite">{pairing?<QRCodeSVG value={photosPairingPayloadText(pairing)} size={208} level="M" marginSize={4} title={t('MyNAS Photos 配对二维码','MyNAS Photos pairing QR code')}/>:!error&&<I.LoaderCircle className="spin"/>}</div></div>;
+}
+
+function Settings({health}:{health:Health}) { const {t}=useLocale(); const [manager,setManager]=useState(false); return <><header><h1>{t('设置','Settings')}</h1></header><div className="settings-stack"><div className="setting device-health-setting"><I.Cpu/><div><h2>{t('当前树莓派','Current Raspberry Pi')}</h2><p>{connectedNodeName()} · MyNAS {health.version}</p><span className="device-health-reading"><I.Thermometer/>{formatTemperature(health.system?.temperatureC)}<small>{t('实时温度 · 每 5 秒更新','Live temperature · updates every 5 seconds')}</small></span></div></div><PhotosPairingCard/><div className="setting"><I.Server/><div><h2>{t('多 MyNAS 设备','Multiple MyNAS devices')}</h2><p>{t('添加和切换多台树莓派 MyNAS；每台设备可以继续管理自己的多块硬盘。','Add and switch between Raspberry Pi MyNAS devices. Each one can manage its own drives.')}</p><button onClick={()=>setManager(true)}><I.Settings2/>{t('管理设备','Manage devices')}</button></div></div></div>{manager&&<NodeManager close={()=>setManager(false)}/>}</>; }
 
 const root=document.getElementById('root');
 if(root)createRoot(root).render(<LocaleProvider><PageBoundary full><App /></PageBoundary></LocaleProvider>);

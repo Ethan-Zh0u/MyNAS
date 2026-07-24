@@ -45,6 +45,13 @@ export async function api<T>(path:string, init:RequestInit={}, timeoutMs=8000) :
 export type Item={name:string,path:string,volumeId:string,type:string,size:number,modified:string,thumbnail:boolean};
 export type PairedNode={apiUrl:string;host:string;user:string;verifiedAt:string};
 export type MyNASNode={apiUrl:string;name:string;host:string;user:string;verifiedAt:string};
+export type PhotosPairingPayload={format:'mynas-photos-pairing';version:1;serverURL:string;serverID:string};
+export function photosPairingPayloadText(value:PhotosPairingPayload){
+  const serverURL=normalizeNodeUrl(value.serverURL);
+  const host=new URL(serverURL).hostname.toLowerCase();
+  if(value.format!=='mynas-photos-pairing'||value.version!==1||!host.endsWith('.ts.net')||host==='ts.net'||!value.serverID.trim())throw new Error('MyNAS Photos 配对信息无效');
+  return JSON.stringify({format:value.format,version:value.version,serverURL,serverID:value.serverID});
+}
 export const parsePairedNode=(raw:string,apiUrl:string):PairedNode|undefined=>{try{const value=JSON.parse(raw) as PairedNode;return value?.apiUrl===apiUrl&&typeof value.host==='string'&&value.host&&typeof value.verifiedAt==='string'?value:undefined}catch{return undefined}};
 export const normalizeNodeUrl=(value:string)=>{const candidate=/^https?:\/\//i.test(value.trim())?value.trim():`https://${value.trim()}`;const url=new URL(candidate);if(url.protocol!=='https:'&&!['localhost','127.0.0.1'].includes(url.hostname))throw new Error('MyNAS 设备必须使用 HTTPS 地址');return url.origin};
 export const parseNodeRegistry=(raw:string):MyNASNode[]=>{try{const rows=JSON.parse(raw) as MyNASNode[];return Array.isArray(rows)?rows.filter(row=>typeof row?.apiUrl==='string'&&typeof row?.name==='string'&&typeof row?.host==='string'):[]}catch{return []}};
@@ -53,6 +60,7 @@ export const rememberNode=(node:MyNASNode)=>{const next=[node,...loadNodes().fil
 export const removeNode=(apiUrl:string)=>{const next=loadNodes().filter(row=>row.apiUrl!==apiUrl);storageSet(nodeRegistryKey,JSON.stringify(next));if(storageGet(activeNodeKey)===apiUrl)storageSet(activeNodeKey,'');return next};
 export const activateNode=(apiUrl:string)=>storageSet(activeNodeKey,apiUrl);
 export const fmt=(n:number)=>n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:n<1073741824?`${(n/1048576).toFixed(1)} MB`:n<1099511627776?`${(n/1073741824).toFixed(2)} GB`:`${(n/1099511627776).toFixed(2)} TB`;
+export const formatTemperature=(value:number|undefined)=>typeof value==='number'&&Number.isFinite(value)?`${value.toFixed(1)} °C`:'—';
 export const bytesPerSecond=(current:number,previous:number,elapsedMs:number)=>elapsedMs>0?Math.max(0,current-previous)*1000/elapsedMs:0;
 export const displayedUploadBytes=(confirmed:number,inFlight:number|undefined,total:number)=>Math.min(total,Math.max(confirmed,inFlight??0));
 export const parent=(p:string)=>p.split('/').slice(0,-1).join('/');

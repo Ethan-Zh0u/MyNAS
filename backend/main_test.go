@@ -76,6 +76,41 @@ func TestHealthIncludesStorageState(t *testing.T) {
 	}
 }
 
+func TestHealthIncludesRaspberryPiTemperature(t *testing.T) {
+	thermalPath := filepath.Join(t.TempDir(), "temp")
+	if err := os.WriteFile(thermalPath, []byte("43875\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{c: Config{Root: t.TempDir(), ThermalPath: thermalPath}}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	w := httptest.NewRecorder()
+	a.health(w, r)
+	var body struct {
+		System SystemHealth `json:"system"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.System.TemperatureC == nil || *body.System.TemperatureC != 43.875 {
+		t.Fatalf("health system=%+v body=%s", body.System, w.Body.String())
+	}
+}
+
+func TestReadTemperatureRejectsMissingAndInvalidValues(t *testing.T) {
+	if got := readTemperatureC(filepath.Join(t.TempDir(), "missing")); got != nil {
+		t.Fatalf("missing temperature=%v", *got)
+	}
+	path := filepath.Join(t.TempDir(), "temp")
+	for _, value := range []string{"not-a-number", "200000", "NaN"} {
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if got := readTemperatureC(path); got != nil {
+			t.Fatalf("value %q temperature=%v", value, *got)
+		}
+	}
+}
+
 func TestPrivateNetworkPreflight(t *testing.T) {
 	a := &App{c: Config{Origin: "https://mynas.pages.dev"}}
 	h := a.middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))

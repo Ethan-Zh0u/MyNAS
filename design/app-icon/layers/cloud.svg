@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Layer 3: Cloud — solid filled overlapping shapes, soft white glass (Default/Dark) -->
+  <defs>
+    <linearGradient id="cloudGrad" x1="512" y1="315" x2="512" y2="680" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DFEBFF"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#cloudGrad)" opacity="0.96">
+    <circle cx="350" cy="555" r="100"/>
+    <circle cx="512" cy="465" r="150"/>
+    <circle cx="670" cy="550" r="105"/>
+    <rect x="300" y="525" width="424" height="155" rx="77"/>
+  </g>
+</svg>

@@ -15,3 +15,7 @@ dev-data/
 *-netlog.json
 .edge-test-*/
 .chrome-test-*/
+.DS_Store
+xcuserdata/
+*.xcuserstate
+ios/MyPhotos/AGENTS.md

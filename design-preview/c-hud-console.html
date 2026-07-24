@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MyNAS · 方向 C — 深空 HUD 控制台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#05080f; --panel:rgba(11,17,31,.78); --panel-solid:#0b111f;
+    --border:rgba(148,163,184,.14); --border-amber:rgba(255,180,84,.30);
+    --text:#dbe4f0; --muted:#7d8aa0; --faint:#4c5a70;
+    --amber:#ffb454; --amber-dim:rgba(255,180,84,.10);
+    --ok:#3ddc97; --danger:#ff6b6b; --cyan:#38e1ff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg);color:var(--text);
+    font:12px/1.6 "JetBrains Mono","PingFang SC","Microsoft YaHei",monospace;
+    -webkit-font-smoothing:antialiased;
+    background-image:
+      radial-gradient(1200px 500px at 70% -10%,rgba(56,120,255,.08),transparent 60%),
+      linear-gradient(rgba(148,163,184,.05) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(148,163,184,.05) 1px,transparent 1px);
+    background-size:100% 100%,44px 44px,44px 44px;
+  }
+  body:after{content:"";position:fixed;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(255,255,255,.014) 0 1px,transparent 1px 3px)}
+  .app{display:grid;grid-template-columns:256px 1fr;min-height:100vh}
+  .ic{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+  .up{text-transform:uppercase;letter-spacing:.16em}
+
+  /* ── sidebar ─────────────────────────────── */
+  aside{background:rgba(7,11,21,.88);border-right:1px solid var(--border);padding:22px 16px;display:flex;flex-direction:column;position:relative}
+  .brand{display:flex;align-items:center;gap:12px;padding:0 6px 22px}
+  .brand-mark{width:34px;height:34px;border:1px solid var(--border-amber);display:grid;place-items:center;color:var(--amber);position:relative;background:var(--amber-dim)}
+  .brand-mark:before{content:"";position:absolute;inset:3px;border:1px dashed rgba(255,180,84,.35)}
+  .brand b{font-size:16px;font-weight:700;letter-spacing:.22em;display:block}
+  .brand b i{color:var(--amber);font-style:normal}
+  .brand small{display:block;font-size:8.5px;letter-spacing:.26em;color:var(--faint);margin-top:3px}
+  .node{margin:0 4px 22px;padding:11px 12px;border:1px solid rgba(61,220,151,.30);background:rgba(61,220,151,.05);position:relative}
+  .node:before,.node:after{content:"";position:absolute;width:7px;height:7px;border:1px solid var(--ok)}
+  .node:before{left:-1px;top:-1px;border-width:1px 0 0 1px}
+  .node:after{right:-1px;bottom:-1px;border-width:0 1px 1px 0}
+  .node-head{display:flex;align-items:center;gap:8px}
+  .led{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 9px var(--ok);animation:blink 1.6s infinite}
+  .node-head b{font-size:12.5px;letter-spacing:.08em}
+  .node-head em{margin-left:auto;font-style:normal;font-size:9px;color:var(--ok);letter-spacing:.18em}
+  .node small{display:block;margin-top:6px;font-size:9.5px;color:var(--muted);letter-spacing:.06em}
+  .nav-label{font-size:9px;letter-spacing:.26em;color:var(--faint);padding:0 8px 9px}
+  .nav-label:before{content:"// "}
+  nav{display:grid;gap:3px}
+  nav a{position:relative;display:grid;grid-template-columns:24px 16px 1fr auto;align-items:center;gap:8px;padding:9px 10px;color:var(--muted);text-decoration:none;font-size:11.5px;letter-spacing:.12em;border-left:2px solid transparent}
+  nav a .idx{font-size:9px;color:var(--faint)}
+  nav a:hover{color:var(--text);background:rgba(148,163,184,.05)}
+  nav a.active{color:var(--amber);background:linear-gradient(90deg,rgba(255,180,84,.09),transparent 75%);border-left-color:var(--amber)}
+  nav a.active .idx{color:var(--amber)}
+  nav a .badge{font-size:9px;color:var(--amber);border:1px solid var(--border-amber);padding:0 6px;background:var(--amber-dim)}
+  .side-foot{margin-top:auto}
+  .secure{display:flex;gap:9px;align-items:center;padding:14px 8px;border-top:1px solid var(--border);color:var(--muted);font-size:9.5px;letter-spacing:.14em}
+  .secure .ic{color:var(--ok);width:14px;height:14px}
+  .profile{display:flex;gap:10px;align-items:center;padding:13px 8px 0;border-top:1px solid var(--border)}
+  .avatar{width:28px;height:28px;border:1px solid var(--border-amber);display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--amber);background:var(--amber-dim)}
+  .profile b{font-size:11px;display:block;letter-spacing:.08em}
+  .profile small{font-size:9px;color:var(--faint)}
+
+  /* ── main ────────────────────────────────── */
+  main{padding:36px 44px 34px;max-width:1240px;position:relative}
+  header{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:24px}
+  .term{font-size:10.5px;color:var(--faint);margin-bottom:12px;letter-spacing:.05em}
+  .term b{color:var(--ok);font-weight:500}
+  .term .cursor{display:inline-block;width:7px;height:12px;background:var(--amber);vertical-align:-2px;margin-left:2px;animation:blink 1s steps(1) infinite}
+  h1{font-size:24px;font-weight:700;letter-spacing:.06em;margin:0 0 8px}
+  h1 .sq{color:var(--amber)}
+  .sub{color:var(--muted);font-size:11px;letter-spacing:.06em}
+  .sub b{color:var(--amber);font-weight:600}
+  .actions{display:flex;align-items:center;gap:10px;padding-top:4px}
+  .btn-hud{position:relative;display:inline-flex;align-items:center;gap:8px;background:var(--amber-dim);color:var(--amber);border:1px solid var(--border-amber);font:600 11px "JetBrains Mono",monospace;letter-spacing:.14em;padding:10px 16px;clip-path:polygon(0 0,calc(100% - 10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100% - 10px))}
+  .btn-hud .ic{width:13px;height:13px}
+  .live{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);padding:9px 13px;font-size:9.5px;letter-spacing:.16em;color:var(--muted)}
+  .live i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 7px var(--ok);animation:blink 1.6s infinite}
+
+  /* ── stats strip ─────────────────────────── */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-bottom:24px;border:1px solid var(--border);background:var(--panel)}
+  .stat{padding:14px 18px;border-right:1px solid var(--border);position:relative}
+  .stat:last-child{border-right:0}
+  .stat label{display:block;font-size:8.5px;letter-spacing:.22em;color:var(--faint);text-transform:uppercase;margin-bottom:7px}
+  .stat label:before{content:"▸ ";color:var(--amber)}
+  .stat strong{font-size:19px;font-weight:700;letter-spacing:.02em;font-variant-numeric:tabular-nums}
+  .stat span{font-size:10px;color:var(--muted);margin-left:5px}
+  .stat em{display:block;font-style:normal;font-size:9px;color:var(--faint);margin-top:3px;letter-spacing:.08em}
+  .stat em b{color:var(--ok);font-weight:500}
+
+  /* ── volume cards ────────────────────────── */
+  .volumes{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .vol{position:relative;background:var(--panel);border:1px solid var(--border);padding:18px 20px 16px;backdrop-filter:blur(4px)}
+  .vol:before,.vol:after{content:"";position:absolute;width:10px;height:10px;border-color:var(--amber);border-style:solid;opacity:.7}
+  .vol:before{left:-1px;top:-1px;border-width:2px 0 0 2px}
+  .vol:after{right:-1px;bottom:-1px;border-width:0 2px 2px 0}
+  .vol-head{display:grid;grid-template-columns:1fr auto;align-items:start;margin-bottom:6px}
+  .vol-idx{font-size:9px;letter-spacing:.2em;color:var(--faint);margin-bottom:7px}
+  .vol-idx b{color:var(--amber);font-weight:500}
+  .vol-name b{font-size:15px;font-weight:700;letter-spacing:.06em;display:block}
+  .vol-name small{font-size:9.5px;color:var(--muted);letter-spacing:.08em}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:9px;letter-spacing:.2em;padding:4px 10px;border:1px solid}
+  .pill i{width:5px;height:5px;border-radius:50%}
+  .pill.on{color:var(--ok);border-color:rgba(61,220,151,.35);background:rgba(61,220,151,.06)}
+  .pill.on i{background:var(--ok);box-shadow:0 0 6px var(--ok);animation:blink 1.6s infinite}
+  .pill.off{color:var(--muted);border-color:var(--border)}
+  .pill.off i{background:var(--faint)}
+  .vol-body{display:flex;align-items:flex-end;justify-content:space-between;margin:10px 0 13px}
+  .pct{font-size:46px;font-weight:700;line-height:.9;color:var(--amber);text-shadow:0 0 22px rgba(255,180,84,.35);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .pct small{font-size:14px;color:var(--faint);text-shadow:none;margin-left:3px}
+  .pct-label{font-size:9.5px;color:var(--muted);margin-top:8px;letter-spacing:.06em}
+  .vol-total{text-align:right}
+  .vol-total label{display:block;font-size:8.5px;letter-spacing:.22em;color:var(--faint);margin-bottom:5px}
+  .vol-total strong{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+  .seg{height:9px;margin-bottom:12px;background:repeating-linear-gradient(90deg,rgba(148,163,184,.13) 0 7px,transparent 7px 10px);position:relative}
+  .seg i{position:absolute;left:0;top:0;bottom:0;background:repeating-linear-gradient(90deg,var(--amber) 0 7px,transparent 7px 10px);filter:drop-shadow(0 0 5px rgba(255,180,84,.45))}
+  .vol-meta{display:flex;justify-content:space-between;font-size:9.5px;color:var(--muted);letter-spacing:.08em;font-variant-numeric:tabular-nums;border-top:1px dashed var(--border);padding-top:10px}
+  .vol-meta .rw b{font-weight:500;color:var(--text)}
+  .vol-meta .rw .d{color:var(--cyan)}
+  .vol-meta .rw .u{color:var(--amber)}
+  .vol.offline{opacity:.5}
+  .vol.offline .pct{color:var(--faint);text-shadow:none}
+  .vol.offline .seg i{display:none}
+
+  .sysline{margin-top:22px;display:flex;gap:26px;border:1px solid var(--border);background:var(--panel);padding:10px 18px;font-size:9px;letter-spacing:.18em;color:var(--faint)}
+  .sysline b{color:var(--ok);font-weight:500}
+  .sysline .amb{color:var(--amber)}
+
+  @keyframes blink{50%{opacity:.3}}
+</style>
+</head>
+<body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-drive" viewBox="0 0 24 24"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-transfer" viewBox="0 0 24 24"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+</svg>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <span class="brand-mark"><svg class="ic"><use href="#i-drive"/></svg></span>
+      <span><b>MY<i>NAS</i></b><small>PRIVATE STORAGE · V0.3.2</small></span>
+    </div>
+    <div class="node">
+      <div class="node-head"><span class="led"></span><b>RSP</b><em>LINKED</em></div>
+      <small>rsp.tail681937.ts.net — TAILNET OK</small>
+    </div>
+    <div class="nav-label">NAVIGATION</div>
+    <nav>
+      <a class="active" href="#"><span class="idx">01</span><svg class="ic"><use href="#i-home"/></svg>主页 HOME</a>
+      <a href="#"><span class="idx">02</span><svg class="ic"><use href="#i-folder"/></svg>文件 FILES</a>
+      <a href="#"><span class="idx">03</span><svg class="ic"><use href="#i-transfer"/></svg>传输 XFER<span class="badge">2</span></a>
+      <a href="#"><span class="idx">04</span><svg class="ic"><use href="#i-trash"/></svg>回收站 TRASH</a>
+      <a href="#"><span class="idx">05</span><svg class="ic"><use href="#i-settings"/></svg>设置 CONFIG</a>
+    </nav>
+    <div class="side-foot">
+      <div class="secure"><svg class="ic"><use href="#i-shield"/></svg>TAILSCALE E2E ENCRYPTED</div>
+      <div class="profile"><span class="avatar">E</span><span><b>ETHAN</b><small>ethanzhou@tailnet</small></span></div>
+    </div>
+  </aside>
+  <main>
+    <header>
+      <div>
+        <div class="term"><b>mynas@rsp</b>:~$ status --all --live<span class="cursor"></span></div>
+        <h1><span class="sq">■</span> 你的私有存储空间</h1>
+        <p class="sub">[ <b>4</b> 块硬盘 ] · [ 总容量 <b>14.5 TB</b> ] · [ 数据仅经 TAILSCALE 加密通道 ]</p>
+      </div>
+      <div class="actions">
+        <span class="live"><i></i>LIVE / 2S</span>
+        <button class="btn-hud"><svg class="ic"><use href="#i-plus"/></svg>接入新硬盘</button>
+      </div>
+    </header>
+    <div class="stats">
+      <div class="stat"><label>Total Capacity</label><strong>14.5<span>TB</span></strong><em>4 VOLUMES REGISTERED</em></div>
+      <div class="stat"><label>Used</label><strong>5.99<span>TB</span></strong><em><b>41%</b> · FREE 8.5 TB</em></div>
+      <div class="stat"><label>Drives Online</label><strong>3<span>/4</span></strong><em>1 OFFLINE · VOL-04</em></div>
+      <div class="stat"><label>Throughput</label><strong style="font-size:15px">↓98.6 ↑44.1<span>MB/S</span></strong><em>SAMPLE EVERY 2S</em></div>
+    </div>
+    <div class="volumes">
+      <div class="vol">
+        <div class="vol-head">
+          <span class="vol-name"><span class="vol-idx"><b>VOL-01</b> // NVME · EXT4</span><b>系统与应用</b><small>/dev/nvme0n1p2</small></span>
+          <span class="pill on"><i></i>ONLINE</span>
+        </div>
+        <div class="vol-body">
+          <div><div class="pct">36<small>%</small></div><div class="pct-label">USED 186 GB · FREE 326 GB</div></div>
+          <div class="vol-total"><label>TOTAL</label><strong>512 GB</strong></div>
+        </div>
+        <div class="seg"><i style="width:36%"></i></div>
+        <div class="vol-meta"><span>SMART: OK</span><span class="rw"><b class="d">RD</b> <b>012.4</b> · <b class="u">WR</b> <b>003.1</b> MB/S</span></div>
+      </div>
+      <div class="vol">
+        <div class="vol-head">
+          <span class="vol-name"><span class="vol-idx"><b>VOL-02</b> // SATA · EXFAT</span><b>影音资料库</b><small>/dev/sda1</small></span>
+          <span class="pill on"><i></i>ONLINE</span>
+        </div>
+        <div class="vol-body">
+          <div><div class="pct">78<small>%</small></div><div class="pct-label">USED 3.12 TB · FREE 0.88 TB</div></div>
+          <div class="vol-total"><label>TOTAL</label><strong>4 TB</strong></div>
+        </div>
+        <div class="seg"><i style="width:78%"></i></div>
+        <div class="vol-meta"><span>SMART: OK</span><span class="rw"><b class="d">RD</b> <b>086.2</b> · <b class="u">WR</b> <b>041.0</b> MB/S</span></div>
+      </div>
+      <div class="vol">
+        <div class="vol-head">
+          <span class="vol-name"><span class="vol-idx"><b>VOL-03</b> // SATA · EXT4</span><b>家庭备份</b><small>/dev/sdb1</small></span>
+          <span class="pill on"><i></i>ONLINE</span>
+        </div>
+        <div class="vol-body">
+          <div><div class="pct">34<small>%</small></div><div class="pct-label">USED 2.71 TB · FREE 5.29 TB</div></div>
+          <div class="vol-total"><label>TOTAL</label><strong>8 TB</strong></div>
+        </div>
+        <div class="seg"><i style="width:34%"></i></div>
+        <div class="vol-meta"><span>SMART: OK</span><span class="rw"><b class="d">RD</b> <b>000.0</b> · <b class="u">WR</b> <b>001.2</b> MB/S</span></div>
+      </div>
+      <div class="vol offline">
+        <div class="vol-head">
+          <span class="vol-name"><span class="vol-idx"><b>VOL-04</b> // SATA · NTFS</span><b>离线归档盘</b><small>/dev/sdc1</small></span>
+          <span class="pill off"><i></i>OFFLINE</span>
+        </div>
+        <div class="vol-body">
+          <div><div class="pct">—</div><div class="pct-label">USED 0.91 TB · FREE 1.09 TB</div></div>
+          <div class="vol-total"><label>TOTAL</label><strong>2 TB</strong></div>
+        </div>
+        <div class="seg"><i style="width:45%"></i></div>
+        <div class="vol-meta"><span>LINK LOST</span><span>RETRYING…</span></div>
+      </div>
+    </div>
+    <div class="sysline"><span>SYS <b>OK</b></span><span>TAILNET <b>CONNECTED</b></span><span>DRIVES <b>3/4</b> ONLINE</span><span>AUDIT <b>ON</b></span><span>LATENCY <span class="amb">12MS</span></span><span>UPTIME <span class="amb">36D 04H</span></span></div>
+  </main>
+</div>
+</body>
+</html>
