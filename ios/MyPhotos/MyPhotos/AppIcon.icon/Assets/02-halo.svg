@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Layer 2: Halo — soft translucent glass disc behind the cloud for depth -->
+  <defs>
+    <filter id="softHalo" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+  </defs>
+  <circle cx="512" cy="520" r="330" fill="#FFFFFF" opacity="0.15" filter="url(#softHalo)"/>
+</svg>

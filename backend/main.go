@@ -25,8 +25,8 @@ import (
 )
 
 type Config struct {
-	Root, DataDir, Listen, Origin, PrivateOrigin string
-	DevIdentity                                  bool
+	Root, DataDir, Listen, Origin, PrivateOrigin, ThermalPath string
+	DevIdentity                                               bool
 }
 type StorageHealth struct {
 	Status     string `json:"status"`
@@ -36,15 +36,21 @@ type StorageHealth struct {
 	UUID       string `json:"uuid"`
 	Message    string `json:"message"`
 }
+type SystemHealth struct {
+	TemperatureC *float64 `json:"temperatureC,omitempty"`
+}
 type App struct {
-	c             Config
-	db            *sql.DB
-	hub           *Hub
-	uploadMu      sync.Mutex
-	activeUploads map[string]bool
-	transferMu    sync.Mutex
-	volumeReads   map[string]uint64
-	volumeWrites  map[string]uint64
+	c                   Config
+	db                  *sql.DB
+	serverID            string
+	hub                 *Hub
+	uploadMu            sync.Mutex
+	activeUploads       map[string]bool
+	transferMu          sync.Mutex
+	volumeReads         map[string]uint64
+	volumeWrites        map[string]uint64
+	derivativeProcessor photosDerivativeProcessor
+	derivativeWake      chan struct{}
 }
 type Hub struct {
 	mu   sync.Mutex
@@ -78,7 +84,7 @@ type upload struct {
 }
 
 func main() {
-	c := Config{Root: env("MYNAS_ROOT", "/mnt/nas"), DataDir: env("MYNAS_DATA_DIR", filepath.Join(os.Getenv("HOME"), ".local/share/mynas")), Listen: env("MYNAS_LISTEN", "127.0.0.1:8080"), Origin: env("MYNAS_ALLOWED_ORIGIN", ""), PrivateOrigin: env("MYNAS_PRIVATE_ORIGIN", ""), DevIdentity: os.Getenv("MYNAS_ENV") == "development" && os.Getenv("MYNAS_DEV_IDENTITY") == "1"}
+	c := Config{Root: env("MYNAS_ROOT", "/mnt/nas"), DataDir: env("MYNAS_DATA_DIR", filepath.Join(os.Getenv("HOME"), ".local/share/mynas")), Listen: env("MYNAS_LISTEN", "127.0.0.1:8080"), Origin: env("MYNAS_ALLOWED_ORIGIN", ""), PrivateOrigin: env("MYNAS_PRIVATE_ORIGIN", ""), ThermalPath: env("MYNAS_THERMAL_PATH", "/sys/class/thermal/thermal_zone0/temp"), DevIdentity: os.Getenv("MYNAS_ENV") == "development" && os.Getenv("MYNAS_DEV_IDENTITY") == "1"}
 	if os.Getenv("MYNAS_ENV") == "production" {
 		c.DevIdentity = false
 	}
@@ -103,6 +109,9 @@ func main() {
 	if err = a.migrate(); err != nil {
 		log.Fatal(err)
 	}
+	if err = a.ensureServerID(); err != nil {
+		log.Fatal(err)
+	}
 	if err = a.seedPrimaryVolume(); err != nil {
 		log.Fatal(err)
 	}
@@ -110,6 +119,9 @@ func main() {
 		log.Fatal(err)
 	}
 	if err = a.ensureRegisteredVolumeDirs(); err != nil {
+		log.Fatal(err)
+	}
+	if err = a.startPhotoDerivativeWorker(); err != nil {
 		log.Fatal(err)
 	}
 	mux := http.NewServeMux()
@@ -125,6 +137,12 @@ func main() {
 	mux.HandleFunc("/api/v1/disk", a.disk)
 	mux.HandleFunc("/api/v1/volumes", a.volumes)
 	mux.HandleFunc("/api/v1/volumes/candidates", a.volumeCandidates)
+	mux.HandleFunc("/api/v1/photos/capabilities", a.photosCapabilities)
+	mux.HandleFunc("/api/v1/photos/pairing", a.photosPairing)
+	mux.HandleFunc("/api/v1/photos/me", a.photosMe)
+	mux.HandleFunc("/api/v1/photos/volumes", a.photosVolumes)
+	mux.HandleFunc("/api/v1/photos/upload-sessions", a.photosUploadSessions)
+	mux.HandleFunc("/api/v1/photos/upload-sessions/", a.photosUploadSessionByPath)
 	if web := os.Getenv("MYNAS_WEB_DIR"); web != "" {
 		mux.Handle("/", spa(web))
 	}
@@ -144,11 +162,188 @@ func env(k, d string) string {
 	return d
 }
 func (a *App) migrate() error {
-	_, e := a.db.Exec(`CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,target TEXT,stage TEXT,name TEXT,status TEXT,size INTEGER,received INTEGER,updated TEXT);CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,at TEXT,user_login TEXT,action TEXT,path TEXT,detail TEXT);CREATE TABLE IF NOT EXISTS volumes(id TEXT PRIMARY KEY,name TEXT NOT NULL,uuid TEXT UNIQUE,device TEXT NOT NULL,filesystem TEXT NOT NULL,mount TEXT NOT NULL UNIQUE,enabled INTEGER NOT NULL DEFAULT 1,created TEXT NOT NULL);`)
+	_, e := a.db.Exec(`CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,target TEXT,stage TEXT,name TEXT,status TEXT,size INTEGER,received INTEGER,updated TEXT);
+CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,at TEXT,user_login TEXT,action TEXT,path TEXT,detail TEXT);
+CREATE TABLE IF NOT EXISTS volumes(id TEXT PRIMARY KEY,name TEXT NOT NULL,uuid TEXT UNIQUE,device TEXT NOT NULL,filesystem TEXT NOT NULL,mount TEXT NOT NULL UNIQUE,enabled INTEGER NOT NULL DEFAULT 1,created TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS photo_users(id TEXT PRIMARY KEY,authentication_identity TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL,avatar_version TEXT,created TEXT NOT NULL,updated TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS photo_assets(
+	id TEXT PRIMARY KEY,
+	owner_user_id TEXT NOT NULL,
+	volume_id TEXT NOT NULL,
+	content_fingerprint TEXT NOT NULL,
+	media_type TEXT NOT NULL,
+	capture_date TEXT,
+	modification_date TEXT,
+	pixel_width INTEGER NOT NULL DEFAULT 0,
+	pixel_height INTEGER NOT NULL DEFAULT 0,
+	duration REAL NOT NULL DEFAULT 0,
+	favorite INTEGER NOT NULL DEFAULT 0,
+	backup_state TEXT NOT NULL,
+	source_state TEXT NOT NULL DEFAULT 'sourceCommitted',
+	derivative_state TEXT NOT NULL DEFAULT 'pending',
+	derivative_recipe_version TEXT NOT NULL DEFAULT 'photos-browse-v1',
+	derivative_error TEXT,
+	derivative_updated TEXT,
+	created TEXT NOT NULL,
+	updated TEXT NOT NULL,
+	UNIQUE(owner_user_id,volume_id,content_fingerprint)
+);
+CREATE TABLE IF NOT EXISTS photo_resources(
+	id TEXT PRIMARY KEY,
+	asset_id TEXT NOT NULL,
+	owner_user_id TEXT NOT NULL,
+	volume_id TEXT NOT NULL,
+	resource_role TEXT NOT NULL,
+	original_filename TEXT NOT NULL,
+	content_type TEXT NOT NULL,
+	byte_size INTEGER NOT NULL,
+	sha256 TEXT NOT NULL,
+	storage_path TEXT NOT NULL,
+	created TEXT NOT NULL,
+	UNIQUE(asset_id,resource_role,sha256)
+);
+CREATE TABLE IF NOT EXISTS device_asset_mappings(
+	owner_user_id TEXT NOT NULL,
+	device_id TEXT NOT NULL,
+	local_identifier TEXT NOT NULL,
+	fingerprint TEXT NOT NULL,
+	asset_id TEXT NOT NULL,
+	updated TEXT NOT NULL,
+	PRIMARY KEY(owner_user_id,device_id,local_identifier)
+);
+CREATE TABLE IF NOT EXISTS photo_upload_sessions(
+	id TEXT PRIMARY KEY,
+	owner_user_id TEXT NOT NULL,
+	volume_id TEXT NOT NULL,
+	device_id TEXT NOT NULL,
+	local_identifier TEXT NOT NULL,
+	fingerprint TEXT NOT NULL,
+	asset_id TEXT NOT NULL,
+	media_type TEXT NOT NULL,
+	status TEXT NOT NULL,
+	capture_date TEXT,
+	modification_date TEXT,
+	pixel_width INTEGER NOT NULL DEFAULT 0,
+	pixel_height INTEGER NOT NULL DEFAULT 0,
+	duration REAL NOT NULL DEFAULT 0,
+	favorite INTEGER NOT NULL DEFAULT 0,
+	stage_dir TEXT NOT NULL,
+	created TEXT NOT NULL,
+	updated TEXT NOT NULL,
+	UNIQUE(owner_user_id,device_id,local_identifier,fingerprint)
+);
+CREATE TABLE IF NOT EXISTS photo_upload_resources(
+	id TEXT PRIMARY KEY,
+	upload_session_id TEXT NOT NULL,
+	client_resource_id TEXT NOT NULL,
+	resource_role TEXT NOT NULL,
+	original_filename TEXT NOT NULL,
+	content_type TEXT NOT NULL,
+	byte_size INTEGER NOT NULL,
+	sha256 TEXT NOT NULL,
+	stage_name TEXT NOT NULL,
+	received INTEGER NOT NULL DEFAULT 0,
+	chunk_size INTEGER NOT NULL,
+	status TEXT NOT NULL,
+	created TEXT NOT NULL,
+	updated TEXT NOT NULL,
+	UNIQUE(upload_session_id,client_resource_id)
+);
+CREATE TABLE IF NOT EXISTS photo_derivatives(
+	id TEXT PRIMARY KEY,
+	asset_id TEXT NOT NULL,
+	owner_user_id TEXT NOT NULL,
+	volume_id TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	recipe_id TEXT NOT NULL,
+	recipe_version TEXT NOT NULL,
+	status TEXT NOT NULL,
+	content_type TEXT,
+	pixel_width INTEGER,
+	pixel_height INTEGER,
+	byte_size INTEGER,
+	sha256 TEXT,
+	storage_path TEXT,
+	error TEXT,
+	created TEXT NOT NULL,
+	updated TEXT NOT NULL,
+	UNIQUE(asset_id,kind,recipe_version)
+);
+CREATE TABLE IF NOT EXISTS photo_derivative_jobs(
+	id TEXT PRIMARY KEY,
+	asset_id TEXT NOT NULL,
+	owner_user_id TEXT NOT NULL,
+	volume_id TEXT NOT NULL,
+	recipe_version TEXT NOT NULL,
+	status TEXT NOT NULL,
+	attempt_count INTEGER NOT NULL DEFAULT 0,
+	last_error TEXT,
+	next_attempt_at TEXT,
+	created TEXT NOT NULL,
+	updated TEXT NOT NULL,
+	UNIQUE(asset_id,recipe_version)
+);
+CREATE INDEX IF NOT EXISTS photo_assets_owner_capture ON photo_assets(owner_user_id,capture_date DESC,id);
+CREATE INDEX IF NOT EXISTS photo_upload_owner_status ON photo_upload_sessions(owner_user_id,status,updated);
+CREATE INDEX IF NOT EXISTS photo_upload_resources_session ON photo_upload_resources(upload_session_id);
+CREATE INDEX IF NOT EXISTS photo_derivative_jobs_status ON photo_derivative_jobs(status,next_attempt_at,updated);
+CREATE INDEX IF NOT EXISTS photo_derivatives_asset ON photo_derivatives(asset_id,kind);`)
 	if e != nil {
 		return e
 	}
 	if _, e = a.db.Exec("ALTER TABLE uploads ADD COLUMN volume_id TEXT NOT NULL DEFAULT 'primary'"); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
+		return e
+	}
+	for _, statement := range []string{
+		"ALTER TABLE photo_assets ADD COLUMN source_state TEXT NOT NULL DEFAULT 'sourceCommitted'",
+		"ALTER TABLE photo_assets ADD COLUMN derivative_state TEXT NOT NULL DEFAULT 'pending'",
+		"ALTER TABLE photo_assets ADD COLUMN derivative_recipe_version TEXT NOT NULL DEFAULT 'photos-browse-v1'",
+		"ALTER TABLE photo_assets ADD COLUMN derivative_error TEXT",
+		"ALTER TABLE photo_assets ADD COLUMN derivative_updated TEXT",
+	} {
+		if _, e = a.db.Exec(statement); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
+			return e
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, e = a.db.Exec(
+		`UPDATE photo_assets
+		 SET source_state=CASE
+		       WHEN source_state IS NULL OR source_state='' THEN ?
+		       ELSE source_state
+		     END,
+		     derivative_state=CASE
+		       WHEN derivative_state IS NULL OR derivative_state='' THEN ?
+		       ELSE derivative_state
+		     END,
+		     derivative_recipe_version=CASE
+		       WHEN derivative_recipe_version IS NULL OR derivative_recipe_version='' THEN ?
+		       ELSE derivative_recipe_version
+		     END,
+		     derivative_updated=COALESCE(derivative_updated,updated)
+		 WHERE backup_state='backedUp'`,
+		photosSourceStateCommitted,
+		photosDerivativeStatePending,
+		photosDerivativePolicyVersion,
+	); e != nil {
+		return e
+	}
+	if _, e = a.db.Exec(
+		`INSERT OR IGNORE INTO photo_derivative_jobs(
+			id,asset_id,owner_user_id,volume_id,recipe_version,status,
+			attempt_count,last_error,next_attempt_at,created,updated
+		)
+		SELECT 'pdj_' || id || '_' || ?,id,owner_user_id,volume_id,?, ?,0,NULL,NULL,created,?
+		FROM photo_assets
+		WHERE source_state=? AND derivative_state<>?`,
+		photosDerivativePolicyVersion,
+		photosDerivativePolicyVersion,
+		photosDerivativeJobPending,
+		now,
+		photosSourceStateCommitted,
+		photosDerivativeStateReady,
+	); e != nil {
 		return e
 	}
 	return nil
@@ -194,14 +389,26 @@ func (a *App) allowedOrigin(o string) bool {
 	return (a.c.Origin != "" && o == a.c.Origin) || (a.c.PrivateOrigin != "" && o == a.c.PrivateOrigin)
 }
 func (a *App) user(r *http.Request) (User, bool) {
-	l := r.Header.Get("Tailscale-User-Login")
+	l := decodeTailscaleHeader(r.Header.Get("Tailscale-User-Login"))
 	if l != "" {
-		return User{l, r.Header.Get("Tailscale-User-Name"), r.Header.Get("Tailscale-User-Profile-Pic"), "member"}, true
+		return User{
+			l,
+			decodeTailscaleHeader(r.Header.Get("Tailscale-User-Name")),
+			decodeTailscaleHeader(r.Header.Get("Tailscale-User-Profile-Pic")),
+			"member",
+		}, true
 	}
 	if a.c.DevIdentity {
 		return User{"developer@example.test", "开发身份", "", "member"}, true
 	}
 	return User{}, false
+}
+func decodeTailscaleHeader(value string) string {
+	decoded, err := new(mime.WordDecoder).DecodeHeader(value)
+	if err != nil {
+		return value
+	}
+	return decoded
 }
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -267,7 +474,14 @@ func (a *App) emit(v any) {
 }
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	u, _ := a.user(r)
-	writeJSON(w, map[string]any{"ok": true, "user": u, "protocol": "HTTPS over Tailscale Serve", "version": "0.4.0", "storage": a.storageHealth()})
+	writeJSON(w, map[string]any{
+		"ok":       true,
+		"user":     u,
+		"protocol": "HTTPS over Tailscale Serve",
+		"version":  photosServerVersion,
+		"storage":  a.storageHealth(),
+		"system":   a.systemHealth(),
+	})
 }
 
 func (a *App) storageHealth() StorageHealth {

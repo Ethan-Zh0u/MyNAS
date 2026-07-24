@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MyNAS · 方向 B — 浅色纯净科技</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f3f5f8; --panel:#ffffff;
+    --border:#e5e8ef; --border-strong:#d3d8e2;
+    --text:#0f1722; --muted:#667085; --faint:#98a2b3;
+    --accent:#2563eb; --accent-dim:#eef4ff;
+    --ok:#12b76a; --warn:#f79009; --danger:#f04438;
+    --shadow:0 1px 2px rgba(16,24,40,.05),0 10px 28px -12px rgba(16,24,40,.10);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:13px/1.55 "Inter","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+  .app{display:grid;grid-template-columns:252px 1fr;min-height:100vh}
+  .ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+  /* ── sidebar ─────────────────────────────── */
+  aside{background:var(--panel);border-right:1px solid var(--border);padding:22px 14px;display:flex;flex-direction:column}
+  .brand{display:flex;align-items:center;gap:11px;padding:2px 10px 22px}
+  .brand-mark{width:33px;height:33px;border-radius:10px;display:grid;place-items:center;color:#fff;background:linear-gradient(135deg,#2563eb,#4f8dff);box-shadow:0 4px 12px rgba(37,99,235,.35)}
+  .brand-mark .ic{width:17px;height:17px}
+  .brand b{font-size:15px;font-weight:700;letter-spacing:-.01em;display:block}
+  .brand small{display:block;font-family:"JetBrains Mono",monospace;font-size:8.5px;letter-spacing:.2em;color:var(--faint);margin-top:2px}
+  .node{display:grid;grid-template-columns:10px 1fr 14px;align-items:center;gap:10px;margin:0 6px 20px;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:#f8fafc}
+  .node i{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(18,183,106,.16)}
+  .node b{font-size:12.5px;font-weight:600;display:block}
+  .node small{font-size:10px;color:var(--faint);display:block;margin-top:1px}
+  .node .ic{width:13px;height:13px;color:var(--faint)}
+  .nav-label{font-family:"JetBrains Mono",monospace;font-size:9px;letter-spacing:.2em;color:var(--faint);padding:2px 12px 8px}
+  nav{display:grid;gap:2px}
+  nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;color:var(--muted);font-weight:500;text-decoration:none}
+  nav a:hover{background:#f4f6fa;color:var(--text)}
+  nav a.active{background:var(--accent-dim);color:var(--accent);font-weight:600}
+  nav a .badge{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--accent);background:#fff;border:1px solid #d6e4ff;border-radius:99px;padding:1px 7px}
+  .side-foot{margin-top:auto}
+  .secure{display:flex;gap:9px;align-items:center;padding:14px 10px;border-top:1px solid var(--border);color:var(--muted);font-size:11px}
+  .secure .ic{color:var(--ok);width:15px;height:15px}
+  .profile{display:flex;gap:10px;align-items:center;padding:12px 10px 0;border-top:1px solid var(--border)}
+  .avatar{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#7c3aed);display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff}
+  .profile b{font-size:12px;display:block}
+  .profile small{font-size:10px;color:var(--faint)}
+
+  /* ── main ────────────────────────────────── */
+  main{padding:38px 46px 40px;max-width:1240px}
+  header{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:26px}
+  .eyebrow{display:flex;align-items:center;gap:8px;font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.14em;color:var(--accent);text-transform:uppercase;font-weight:600}
+  .eyebrow i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(18,183,106,.15)}
+  h1{font-size:27px;font-weight:700;letter-spacing:-.02em;margin:10px 0 7px}
+  .sub{color:var(--muted);font-size:12.5px}
+  .sub b{color:var(--text);font-weight:600}
+  .actions{display:flex;align-items:center;gap:10px;padding-top:6px}
+  .btn-primary{display:inline-flex;align-items:center;gap:7px;background:var(--accent);color:#fff;font-weight:600;font-size:12.5px;padding:9px 15px;border-radius:10px;border:0;box-shadow:0 4px 14px rgba(37,99,235,.28)}
+  .btn-primary .ic{width:14px;height:14px;stroke-width:2.2}
+  .live{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:#fff;border-radius:99px;padding:8px 13px;font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.12em;color:var(--muted)}
+  .live i{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+
+  /* ── stats ───────────────────────────────── */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:26px}
+  .stat{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:15px 18px;box-shadow:var(--shadow)}
+  .stat label{display:block;font-family:"JetBrains Mono",monospace;font-size:9.5px;letter-spacing:.14em;color:var(--faint);text-transform:uppercase;margin-bottom:7px}
+  .stat strong{font-size:21px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .stat span{font-size:11px;color:var(--muted);margin-left:6px;font-weight:500}
+  .stat em{display:block;font-style:normal;font-size:10.5px;color:var(--faint);margin-top:3px}
+  .stat em b{color:var(--ok);font-weight:600}
+
+  /* ── volume cards ────────────────────────── */
+  .volumes{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .vol{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:21px 23px 19px;box-shadow:var(--shadow);transition:box-shadow .15s,border-color .15s}
+  .vol:hover{border-color:var(--border-strong)}
+  .vol-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:18px}
+  .vol-icon{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:var(--accent);background:var(--accent-dim)}
+  .vol-icon .ic{width:17px;height:17px}
+  .vol-name{flex:1;min-width:0}
+  .vol-name b{font-size:14px;font-weight:600;display:block}
+  .vol-name small{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--faint);letter-spacing:.03em}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:600;border-radius:99px;padding:3px 10px}
+  .pill i{width:5px;height:5px;border-radius:50%}
+  .pill.on{color:#067647;background:#ecfdf3;border:1px solid #a6f4c5}
+  .pill.on i{background:var(--ok)}
+  .pill.off{color:var(--muted);background:#f4f6fa;border:1px solid var(--border)}
+  .pill.off i{background:var(--faint)}
+  .vol-body{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:14px}
+  .pct{font-family:"JetBrains Mono",monospace;font-size:46px;font-weight:700;line-height:.9;letter-spacing:-.045em;font-variant-numeric:tabular-nums}
+  .pct small{font-size:15px;color:var(--faint);font-weight:500;letter-spacing:0;margin-left:3px}
+  .pct-label{font-size:10.5px;color:var(--faint);margin-top:7px}
+  .vol-total{text-align:right}
+  .vol-total label{display:block;font-family:"JetBrains Mono",monospace;font-size:9px;letter-spacing:.14em;color:var(--faint);text-transform:uppercase;margin-bottom:5px}
+  .vol-total strong{font-family:"JetBrains Mono",monospace;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+  .bar{height:6px;border-radius:99px;background:#eef1f6;overflow:hidden;margin-bottom:13px}
+  .bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#2563eb,#60a5fa)}
+  .bar.warn i{background:linear-gradient(90deg,#f79009,#fbbf24)}
+  .vol-meta{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .vol-meta .rw b{font-weight:600;color:var(--text)}
+  .vol-meta .rw .d{color:var(--accent)}
+  .vol-meta .rw .u{color:var(--warn)}
+  .vol.offline{background:#fafbfd;box-shadow:none}
+  .vol.offline .pct{color:var(--faint)}
+  .vol.offline .vol-icon{background:#f0f2f6;color:var(--faint)}
+  .vol.offline .bar i{display:none}
+
+  @keyframes pulse{50%{opacity:.35}}
+</style>
+</head>
+<body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-drive" viewBox="0 0 24 24"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-transfer" viewBox="0 0 24 24"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+</svg>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <span class="brand-mark"><svg class="ic"><use href="#i-drive"/></svg></span>
+      <span><b>MyNAS</b><small>PRIVATE STORAGE</small></span>
+    </div>
+    <div class="node"><i></i><span><b>rsp</b><small>已连接 · Tailscale</small></span><svg class="ic"><use href="#i-chevron"/></svg></div>
+    <div class="nav-label">MENU</div>
+    <nav>
+      <a class="active" href="#"><svg class="ic"><use href="#i-home"/></svg>主页</a>
+      <a href="#"><svg class="ic"><use href="#i-folder"/></svg>文件</a>
+      <a href="#"><svg class="ic"><use href="#i-transfer"/></svg>传输<span class="badge">2</span></a>
+      <a href="#"><svg class="ic"><use href="#i-trash"/></svg>回收站</a>
+      <a href="#"><svg class="ic"><use href="#i-settings"/></svg>设置</a>
+    </nav>
+    <div class="side-foot">
+      <div class="secure"><svg class="ic"><use href="#i-shield"/></svg>Tailscale 端到端加密通道</div>
+      <div class="profile"><span class="avatar">E</span><span><b>Ethan</b><small>ethanzhou@tailnet</small></span></div>
+    </div>
+  </aside>
+  <main>
+    <header>
+      <div>
+        <span class="eyebrow"><i></i>STORAGE OVERVIEW · 实时状态</span>
+        <h1>你的私有存储空间</h1>
+        <p class="sub"><b>4</b> 块硬盘 · 总容量 <b>14.5 TB</b> · 所有数据仅经由 Tailscale 加密通道传输</p>
+      </div>
+      <div class="actions">
+        <span class="live"><i></i>LIVE · 2S</span>
+        <button class="btn-primary"><svg class="ic"><use href="#i-plus"/></svg>接入新硬盘</button>
+      </div>
+    </header>
+    <div class="stats">
+      <div class="stat"><label>总容量 / Total</label><strong>14.5<span>TB</span></strong><em>4 块已注册硬盘</em></div>
+      <div class="stat"><label>已用 / Used</label><strong>5.99<span>TB</span></strong><em>占比 <b>41%</b> · 剩余 8.5 TB</em></div>
+      <div class="stat"><label>在线硬盘 / Online</label><strong>3<span>/ 4</span></strong><em>1 块离线 · 离线归档盘</em></div>
+      <div class="stat"><label>实时吞吐 / Throughput</label><strong style="font-size:17px">↓ 98.6 · ↑ 44.1<span>MB/s</span></strong><em>每 2 秒采样一次</em></div>
+    </div>
+    <div class="volumes">
+      <div class="vol">
+        <div class="vol-head">
+          <span class="vol-icon"><svg class="ic"><use href="#i-drive"/></svg></span>
+          <span class="vol-name"><b>系统与应用</b><small>/dev/nvme0n1p2 · EXT4</small></span>
+          <span class="pill on"><i></i>在线</span>
+        </div>
+        <div class="vol-body">
+          <div><div class="pct">36<small>%</small></div><div class="pct-label">已用 186 GB · 可用 326 GB</div></div>
+          <div class="vol-total"><label>总容量</label><strong>512 GB</strong></div>
+        </div>
+        <div class="bar"><i style="width:36%"></i></div>
+        <div class="vol-meta"><span>VOL-01 · NVME</span><span class="rw"><b class="d">↓</b> <b>12.4 MB/s</b> &nbsp;<b class="u">↑</b> <b>3.1 MB/s</b></span></div>
+      </div>
+      <div class="vol">
+        <div class="vol-head">
+          <span class="vol-icon"><svg class="ic"><use href="#i-drive"/></svg></span>
+          <span class="vol-name"><b>影音资料库</b><small>/dev/sda1 · EXFAT</small></span>
+          <span class="pill on"><i></i>在线</span>
+        </div>
+        <div class="vol-body">
+          <div><div class="pct">78<small>%</small></div><div class="pct-label">已用 3.12 TB · 可用 0.88 TB</div></div>
+          <div class="vol-total"><label>总容量</label><strong>4 TB</strong></div>
+        </div>
+        <div class="bar warn"><i style="width:78%"></i></div>
+        <div class="vol-meta"><span>VOL-02 · SATA</span><span class="rw"><b class="d">↓</b> <b>86.2 MB/s</b> &nbsp;<b class="u">↑</b> <b>41.0 MB/s</b></span></div>
+      </div>
+      <div class="vol">
+        <div class="vol-head">
+          <span class="vol-icon"><svg class="ic"><use href="#i-drive"/></svg></span>
+          <span class="vol-name"><b>家庭备份</b><small>/dev/sdb1 · EXT4</small></span>
+          <span class="pill on"><i></i>在线</span>
+        </div>
+        <div class="vol-body">
+          <div><div class="pct">34<small>%</small></div><div class="pct-label">已用 2.71 TB · 可用 5.29 TB</div></div>
+          <div class="vol-total"><label>总容量</label><strong>8 TB</strong></div>
+        </div>
+        <div class="bar"><i style="width:34%"></i></div>
+        <div class="vol-meta"><span>VOL-03 · SATA</span><span class="rw"><b class="d">↓</b> <b>0.0 MB/s</b> &nbsp;<b class="u">↑</b> <b>1.2 MB/s</b></span></div>
+      </div>
+      <div class="vol offline">
+        <div class="vol-head">
+          <span class="vol-icon"><svg class="ic"><use href="#i-drive"/></svg></span>
+          <span class="vol-name"><b>离线归档盘</b><small>/dev/sdc1 · NTFS</small></span>
+          <span class="pill off"><i></i>离线</span>
+        </div>
+        <div class="vol-body">
+          <div><div class="pct">—</div><div class="pct-label">已用 0.91 TB · 可用 1.09 TB</div></div>
+          <div class="vol-total"><label>总容量</label><strong>2 TB</strong></div>
+        </div>
+        <div class="bar"><i style="width:45%"></i></div>
+        <div class="vol-meta"><span>VOL-04 · SATA</span><span>设备未连接 · 等待重试</span></div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

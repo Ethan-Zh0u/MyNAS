@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- MyNAS Photos — App Icon · Default (Light) · Liquid Glass layered artwork -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5EA2F5"/>
+      <stop offset="1" stop-color="#806FF0"/>
+    </linearGradient>
+    <filter id="softGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="70"/>
+    </filter>
+    <filter id="softHalo" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+    <linearGradient id="cloudGrad" x1="512" y1="315" x2="512" y2="680" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DFEBFF"/>
+    </linearGradient>
+    <linearGradient id="brandGrad" x1="356" y1="690" x2="668" y2="490" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <linearGradient id="sparkGrad" x1="730" y1="195" x2="730" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#CDE4FF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Layer 1: Background -->
+  <g id="background">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <ellipse cx="320" cy="210" rx="430" ry="370" fill="#FFFFFF" opacity="0.30" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- Layer 2: Halo -->
+  <g id="halo">
+    <circle cx="512" cy="520" r="330" fill="#FFFFFF" opacity="0.15" filter="url(#softHalo)"/>
+  </g>
+
+  <!-- Layer 3: Cloud -->
+  <g id="cloud" fill="url(#cloudGrad)" opacity="0.96">
+    <circle cx="350" cy="555" r="100"/>
+    <circle cx="512" cy="465" r="150"/>
+    <circle cx="670" cy="550" r="105"/>
+    <rect x="300" y="525" width="424" height="155" rx="77"/>
+  </g>
+
+  <!-- Layer 4: Peak / photo mark -->
+  <g id="peak">
+    <path d="M356 660 L512 500 L668 660" fill="none" stroke="url(#brandGrad)"
+          stroke-width="60" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Layer 5: AI sparkles -->
+  <g id="sparkles" fill="url(#sparkGrad)">
+    <path d="M730 220 C738 268 752 282 800 290 C752 298 738 312 730 360 C722 312 708 298 660 290 C708 282 722 268 730 220 Z"/>
+    <path d="M630 195 C633 213 637 217 655 220 C637 223 633 227 630 245 C627 227 623 223 605 220 C623 217 627 213 630 195 Z"/>
+  </g>
+</svg>
