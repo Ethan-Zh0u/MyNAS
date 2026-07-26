@@ -44,23 +44,27 @@ type photosAssetDerivativeResponse struct {
 }
 
 type photosAssetResponse struct {
-	ID                      string                          `json:"id"`
-	VolumeID                string                          `json:"volumeID"`
-	MediaType               string                          `json:"mediaType"`
-	CaptureDate             *string                         `json:"captureDate"`
-	ModificationDate        *string                         `json:"modificationDate"`
-	PixelWidth              int                             `json:"pixelWidth"`
-	PixelHeight             int                             `json:"pixelHeight"`
-	Duration                float64                         `json:"duration"`
-	Favorite                bool                            `json:"favorite"`
-	SourceState             string                          `json:"sourceState"`
-	DerivativeState         string                          `json:"derivativeState"`
-	DerivativeRecipeVersion string                          `json:"derivativeRecipeVersion"`
-	DerivativeError         *string                         `json:"derivativeError,omitempty"`
-	BrowseReady             bool                            `json:"browseReady"`
-	Version                 string                          `json:"version"`
-	Resources               []photosAssetResourceResponse   `json:"resources"`
-	Derivatives             []photosAssetDerivativeResponse `json:"derivatives"`
+	ID                       string                          `json:"id"`
+	VolumeID                 string                          `json:"volumeID"`
+	MediaType                string                          `json:"mediaType"`
+	CaptureDate              *string                         `json:"captureDate"`
+	ModificationDate         *string                         `json:"modificationDate"`
+	PixelWidth               int                             `json:"pixelWidth"`
+	PixelHeight              int                             `json:"pixelHeight"`
+	Duration                 float64                         `json:"duration"`
+	Favorite                 bool                            `json:"favorite"`
+	SourceState              string                          `json:"sourceState"`
+	DerivativeState          string                          `json:"derivativeState"`
+	DerivativeRecipeVersion  string                          `json:"derivativeRecipeVersion"`
+	DerivativeError          *string                         `json:"derivativeError,omitempty"`
+	BrowseReady              bool                            `json:"browseReady"`
+	ExactContentDeviceCount  int                             `json:"exactContentDeviceCount"`
+	ExactContentMappingCount int                             `json:"exactContentMappingCount"`
+	PreviousVersionCount     int                             `json:"previousVersionCount"`
+	NextVersionCount         int                             `json:"nextVersionCount"`
+	Version                  string                          `json:"version"`
+	Resources                []photosAssetResourceResponse   `json:"resources"`
+	Derivatives              []photosAssetDerivativeResponse `json:"derivatives"`
 }
 
 type photosAssetPageResponse struct {
@@ -124,6 +128,10 @@ type photosStoredFile struct {
 }
 
 func (a *App) photosAssets(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		a.photosTrashAssets(w, r)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
@@ -143,19 +151,31 @@ func (a *App) photosAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := `SELECT id,volume_id,media_type,capture_date,modification_date,
-		pixel_width,pixel_height,duration,favorite,source_state,derivative_state,
-		derivative_recipe_version,derivative_error,updated,
-		COALESCE(capture_date,created) AS sort_time
-		FROM photo_assets
-		WHERE owner_user_id=? AND source_state=?`
+	query := `SELECT a.id,a.volume_id,a.media_type,a.capture_date,a.modification_date,
+		a.pixel_width,a.pixel_height,a.duration,a.favorite,a.source_state,a.derivative_state,
+		a.derivative_recipe_version,a.derivative_error,a.updated,
+		COALESCE((SELECT COUNT(DISTINCT m.device_id)
+			FROM device_asset_mappings m
+			WHERE m.owner_user_id=a.owner_user_id AND m.asset_id=a.id),0),
+		COALESCE((SELECT COUNT(1)
+			FROM device_asset_mappings m
+			WHERE m.owner_user_id=a.owner_user_id AND m.asset_id=a.id),0),
+		COALESCE((SELECT COUNT(1)
+			FROM photo_asset_version_transitions t
+			WHERE t.owner_user_id=a.owner_user_id AND t.to_asset_id=a.id),0),
+		COALESCE((SELECT COUNT(1)
+			FROM photo_asset_version_transitions t
+			WHERE t.owner_user_id=a.owner_user_id AND t.from_asset_id=a.id),0),
+		COALESCE(a.capture_date,a.created) AS sort_time
+		FROM photo_assets a
+		WHERE a.owner_user_id=? AND a.source_state=?`
 	arguments := []any{owner.UserID, photosSourceStateCommitted}
 	if cursor != nil {
-		query += ` AND (COALESCE(capture_date,created) < ?
-			OR (COALESCE(capture_date,created)=? AND id < ?))`
+		query += ` AND (COALESCE(a.capture_date,a.created) < ?
+			OR (COALESCE(a.capture_date,a.created)=? AND a.id < ?))`
 		arguments = append(arguments, cursor.SortTime, cursor.SortTime, cursor.AssetID)
 	}
-	query += ` ORDER BY sort_time DESC,id DESC LIMIT ?`
+	query += ` ORDER BY sort_time DESC,a.id DESC LIMIT ?`
 	arguments = append(arguments, limit+1)
 
 	rows, err := a.db.Query(query, arguments...)
@@ -301,6 +321,21 @@ func (a *App) photosDeviceAssetMappings(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *App) photosAssetByPath(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/photos/assets/"), "/")
+	parts := strings.Split(path, "/")
+	if path == "" || len(parts) > 2 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	assetID := parts[0]
+	if r.Method == http.MethodPost && len(parts) == 1 && assetID == "restore" {
+		a.photosRestoreAssetsFromRequest(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "restore" {
+		a.photosRestoreAssets(w, r, []string{assetID})
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
@@ -309,13 +344,6 @@ func (a *App) photosAssetByPath(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/photos/assets/"), "/")
-	parts := strings.Split(path, "/")
-	if path == "" || len(parts) > 2 || parts[0] == "" {
-		http.NotFound(w, r)
-		return
-	}
-	assetID := parts[0]
 	if len(parts) == 1 {
 		asset, err := a.photoAsset(owner.UserID, assetID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -426,7 +454,10 @@ func scanPhotosAsset(scanner interface{ Scan(...any) error }) (photosAssetRespon
 		&asset.ID, &asset.VolumeID, &asset.MediaType, &captureDate, &modificationDate,
 		&asset.PixelWidth, &asset.PixelHeight, &asset.Duration, &favorite,
 		&asset.SourceState, &asset.DerivativeState, &asset.DerivativeRecipeVersion,
-		&derivativeError, &asset.Version, &sortTime,
+		&derivativeError, &asset.Version,
+		&asset.ExactContentDeviceCount, &asset.ExactContentMappingCount,
+		&asset.PreviousVersionCount, &asset.NextVersionCount,
+		&sortTime,
 	)
 	if err != nil {
 		return photosAssetResponse{}, "", err
@@ -444,11 +475,23 @@ func scanPhotosAsset(scanner interface{ Scan(...any) error }) (photosAssetRespon
 
 func (a *App) photoAsset(ownerUserID, assetID string) (photosAssetResponse, error) {
 	row := a.db.QueryRow(
-		`SELECT id,volume_id,media_type,capture_date,modification_date,
-		 pixel_width,pixel_height,duration,favorite,source_state,derivative_state,
-		 derivative_recipe_version,derivative_error,updated,
-		 COALESCE(capture_date,created)
-		 FROM photo_assets WHERE owner_user_id=? AND id=? AND source_state=?`,
+		`SELECT a.id,a.volume_id,a.media_type,a.capture_date,a.modification_date,
+		 a.pixel_width,a.pixel_height,a.duration,a.favorite,a.source_state,a.derivative_state,
+		 a.derivative_recipe_version,a.derivative_error,a.updated,
+		 COALESCE((SELECT COUNT(DISTINCT m.device_id)
+			FROM device_asset_mappings m
+			WHERE m.owner_user_id=a.owner_user_id AND m.asset_id=a.id),0),
+		 COALESCE((SELECT COUNT(1)
+			FROM device_asset_mappings m
+			WHERE m.owner_user_id=a.owner_user_id AND m.asset_id=a.id),0),
+		 COALESCE((SELECT COUNT(1)
+			FROM photo_asset_version_transitions t
+			WHERE t.owner_user_id=a.owner_user_id AND t.to_asset_id=a.id),0),
+		 COALESCE((SELECT COUNT(1)
+			FROM photo_asset_version_transitions t
+			WHERE t.owner_user_id=a.owner_user_id AND t.from_asset_id=a.id),0),
+		 COALESCE(a.capture_date,a.created)
+		 FROM photo_assets a WHERE a.owner_user_id=? AND a.id=? AND a.source_state=?`,
 		ownerUserID, assetID, photosSourceStateCommitted,
 	)
 	asset, _, err := scanPhotosAsset(row)
@@ -526,9 +569,9 @@ func (a *App) photoDerivativeFile(
 		`SELECT d.volume_id,d.storage_path,d.content_type,d.byte_size,d.sha256,d.updated
 		 FROM photo_derivatives d
 		 JOIN photo_assets a ON a.id=d.asset_id AND a.owner_user_id=d.owner_user_id
-		 WHERE d.owner_user_id=? AND d.asset_id=? AND d.kind=? AND d.status=?
-		   AND d.recipe_version=a.derivative_recipe_version`,
-		ownerUserID, assetID, kind, photosDerivativeStateReady,
+		WHERE d.owner_user_id=? AND d.asset_id=? AND d.kind=? AND d.status=?
+		   AND d.recipe_version=a.derivative_recipe_version AND a.source_state=?`,
+		ownerUserID, assetID, kind, photosDerivativeStateReady, photosSourceStateCommitted,
 	).Scan(
 		&stored.VolumeID, &stored.StoragePath, &stored.ContentType,
 		&stored.ByteSize, &stored.SHA256, &stored.Updated,

@@ -93,6 +93,15 @@ nonisolated struct ServerPhotoAsset: Identifiable, Codable, Hashable, Sendable {
     let derivativeError: String?
     let browseReady: Bool
     let version: String
+    /// Owner-scoped, anonymous aggregate counts for the exact resource-group
+    /// match. They intentionally omit device IDs, local identifiers, and the
+    /// content fingerprint itself.
+    let exactContentDeviceCount: Int?
+    let exactContentMappingCount: Int?
+    /// Owner-scoped transition counts recorded after the same device's stable
+    /// PhotoKit local identifier moved to a new complete resource group.
+    let previousVersionCount: Int?
+    let nextVersionCount: Int?
     let resources: [ServerPhotoResource]
     let derivatives: [ServerPhotoDerivative]
 
@@ -121,6 +130,47 @@ nonisolated struct ServerPhotoAsset: Identifiable, Codable, Hashable, Sendable {
 
     var pairedVideoResource: ServerPhotoResource? {
         resources.first { $0.resourceRole == "pairedVideo" || $0.resourceRole == "fullSizePairedVideo" }
+    }
+
+    var hasExactContentRelationship: Bool {
+        (exactContentMappingCount ?? 1) > 1
+    }
+
+    /// This represents verified backup records pointing to one complete
+    /// resource group on MyNAS; it does not mean the app has merged or hidden
+    /// the source records on any device.
+    var exactContentRelationshipDescription: String? {
+        guard let mappingCount = exactContentMappingCount, mappingCount > 1 else {
+            return nil
+        }
+
+        let deviceCount = max(1, exactContentDeviceCount ?? 1)
+        if deviceCount > 1 {
+            return "相同完整资源已关联 \(deviceCount) 台设备的 \(mappingCount) 条备份记录"
+        }
+        return "相同完整资源已关联 \(mappingCount) 条备份记录"
+    }
+
+    var hasVersionTransitionRelationship: Bool {
+        (previousVersionCount ?? 0) > 0 || (nextVersionCount ?? 0) > 0
+    }
+
+    /// A version relation is written only after one device has committed a new
+    /// complete PhotoKit resource group for the same stable local identifier.
+    /// It is not inferred from dates, filenames, or visual similarity.
+    var versionTransitionRelationshipDescription: String? {
+        let previous = max(0, previousVersionCount ?? 0)
+        let next = max(0, nextVersionCount ?? 0)
+        switch (previous, next) {
+        case (0, 0):
+            return nil
+        case (let previous, 0):
+            return "已记录 \(previous) 条前序版本关系"
+        case (0, let next):
+            return "已记录 \(next) 条后续版本关系"
+        case (let previous, let next):
+            return "已记录 \(previous) 条前序、\(next) 条后续版本关系"
+        }
     }
 }
 
@@ -186,4 +236,23 @@ nonisolated struct RemotePhotoChangeSyncResult: Sendable {
     let changedAssetIDs: Set<String>
     let isInitialSync: Bool
     let resetRequired: Bool
+}
+
+nonisolated struct RemotePhotoTrashResult: Codable, Hashable, Sendable {
+    let items: [Item]
+
+    nonisolated struct Item: Codable, Hashable, Sendable {
+        let assetID: String
+        let trashID: String
+        let trashedAt: String
+    }
+}
+
+nonisolated struct RemotePhotoRestoreResult: Codable, Hashable, Sendable {
+    let items: [Item]
+
+    nonisolated struct Item: Codable, Hashable, Sendable {
+        let assetID: String
+        let restoredAt: String
+    }
 }

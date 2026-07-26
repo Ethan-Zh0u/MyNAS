@@ -216,6 +216,28 @@ CREATE TABLE IF NOT EXISTS device_asset_mappings(
 	updated TEXT NOT NULL,
 	PRIMARY KEY(owner_user_id,device_id,local_identifier)
 );
+CREATE TABLE IF NOT EXISTS photo_asset_version_transitions(
+	owner_user_id TEXT NOT NULL,
+	device_id TEXT NOT NULL,
+	local_identifier TEXT NOT NULL,
+	from_asset_id TEXT NOT NULL,
+	to_asset_id TEXT NOT NULL,
+	from_fingerprint TEXT NOT NULL,
+	to_fingerprint TEXT NOT NULL,
+	created TEXT NOT NULL,
+	PRIMARY KEY(owner_user_id,device_id,local_identifier,from_asset_id,to_asset_id,from_fingerprint,to_fingerprint)
+);
+CREATE TABLE IF NOT EXISTS photo_trash_entries(
+	id TEXT PRIMARY KEY,
+	owner_user_id TEXT NOT NULL,
+	asset_id TEXT NOT NULL,
+	volume_id TEXT NOT NULL,
+	original_content_fingerprint TEXT NOT NULL,
+	original_storage_path TEXT NOT NULL,
+	derivative_storage_path TEXT,
+	trashed_at TEXT NOT NULL,
+	restored_at TEXT
+);
 CREATE TABLE IF NOT EXISTS photo_upload_sessions(
 	id TEXT PRIMARY KEY,
 	owner_user_id TEXT NOT NULL,
@@ -300,6 +322,10 @@ CREATE TABLE IF NOT EXISTS photo_changes(
 CREATE INDEX IF NOT EXISTS photo_assets_owner_capture ON photo_assets(owner_user_id,capture_date DESC,id);
 CREATE INDEX IF NOT EXISTS photo_upload_owner_status ON photo_upload_sessions(owner_user_id,status,updated);
 CREATE INDEX IF NOT EXISTS photo_upload_resources_session ON photo_upload_resources(upload_session_id);
+CREATE INDEX IF NOT EXISTS device_asset_mappings_owner_asset ON device_asset_mappings(owner_user_id,asset_id);
+CREATE INDEX IF NOT EXISTS photo_asset_version_transitions_owner_to ON photo_asset_version_transitions(owner_user_id,to_asset_id);
+CREATE INDEX IF NOT EXISTS photo_asset_version_transitions_owner_from ON photo_asset_version_transitions(owner_user_id,from_asset_id);
+CREATE INDEX IF NOT EXISTS photo_trash_entries_owner_asset ON photo_trash_entries(owner_user_id,asset_id,restored_at);
 CREATE INDEX IF NOT EXISTS photo_derivative_jobs_status ON photo_derivative_jobs(status,next_attempt_at,updated);
 CREATE INDEX IF NOT EXISTS photo_derivatives_asset ON photo_derivatives(asset_id,kind);
 CREATE INDEX IF NOT EXISTS photo_changes_owner_sequence ON photo_changes(owner_user_id,sequence);`)

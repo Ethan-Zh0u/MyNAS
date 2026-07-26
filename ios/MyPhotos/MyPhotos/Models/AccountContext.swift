@@ -51,6 +51,9 @@ nonisolated struct ServerCapabilities: Codable, Hashable, Sendable {
     var supportsChangeFeed: Bool?
     /// Optional keeps accounts saved by older app versions decodable and safe.
     var supportsDeviceAssetMappingRecovery: Bool?
+    /// A destructive-adjacent capability is opt-in: a missing value from an
+    /// older MyNAS must never enable the paired recycle-bin control.
+    var supportsPhotoTrash: Bool?
     var backupStateModelVersion: Int?
     var derivativePolicyVersion: String?
     var availableDerivativeRecipes: [String]?
@@ -63,6 +66,7 @@ nonisolated struct ServerCapabilities: Codable, Hashable, Sendable {
         supportsRemoteBrowsing: false,
         supportsChangeFeed: false,
         supportsDeviceAssetMappingRecovery: false,
+        supportsPhotoTrash: false,
         backupStateModelVersion: nil,
         derivativePolicyVersion: nil,
         availableDerivativeRecipes: nil

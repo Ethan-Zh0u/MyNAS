@@ -140,6 +140,178 @@ func TestPhotosDeviceAssetMappingsAreOwnerAndDeviceScoped(t *testing.T) {
 	}
 }
 
+func TestPhotosAssetsExposeExactContentAggregatesWithoutDeviceIdentity(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	payload := []byte("shared-exact-content")
+	firstInput := testPhotoUploadInput(payload, nil)
+	firstInput.LocalIdentifier = "first-local-id"
+	firstInput.DeviceID = "ios-first"
+	first := createTestPhotoUploadSession(t, app, firstInput)
+	putTestPhotoPart(t, app, first.ID, first.Resources[0], 0, payload)
+	completion := httptest.NewRecorder()
+	app.photosUploadSessionByPath(
+		completion,
+		tailscaleRequest(http.MethodPost, "/api/v1/photos/upload-sessions/"+first.ID+"/complete"),
+	)
+	if completion.Code != http.StatusOK {
+		t.Fatalf("first completion status=%d body=%s", completion.Code, completion.Body.String())
+	}
+
+	secondInput := testPhotoUploadInput(payload, nil)
+	secondInput.LocalIdentifier = "second-local-id"
+	secondInput.DeviceID = "ios-second"
+	second := createTestPhotoUploadSession(t, app, secondInput)
+	if second.Status != "duplicate" || second.AssetID != first.AssetID {
+		t.Fatalf("exact content was not deduplicated: first=%#v second=%#v", first, second)
+	}
+
+	recorder := httptest.NewRecorder()
+	app.photosAssets(recorder, tailscaleRequest(http.MethodGet, "/api/v1/photos/assets"))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("assets status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "fingerprint") || strings.Contains(body, "ios-first") ||
+		strings.Contains(body, "ios-second") || strings.Contains(body, "device_id") {
+		t.Fatalf("asset aggregate leaked device or fingerprint data: %s", body)
+	}
+	var page photosAssetPageResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Assets) != 1 || page.Assets[0].ID != first.AssetID ||
+		page.Assets[0].ExactContentDeviceCount != 2 ||
+		page.Assets[0].ExactContentMappingCount != 2 {
+		t.Fatalf("unexpected exact-content aggregate: %#v", page)
+	}
+
+	detailRecorder := httptest.NewRecorder()
+	app.photosAssetByPath(
+		detailRecorder,
+		tailscaleRequest(http.MethodGet, "/api/v1/photos/assets/"+first.AssetID),
+	)
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detailRecorder.Code, detailRecorder.Body.String())
+	}
+	var detail photosAssetResponse
+	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.ExactContentDeviceCount != 2 || detail.ExactContentMappingCount != 2 {
+		t.Fatalf("unexpected exact-content detail aggregate: %#v", detail)
+	}
+}
+
+func TestPhotosAssetsExposeSameDeviceVersionTransitionsWithoutMappingIdentity(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	firstStill := []byte("version-one-live-still")
+	firstMotion := []byte("version-one-live-motion")
+	firstInput := testPhotoUploadInput(firstStill, firstMotion)
+	firstInput.LocalIdentifier = "versioned-live-local-id"
+	firstInput.DeviceID = "ios-version-device"
+	first := completeTestPhotoUpload(
+		t, app, firstInput,
+		map[string][]byte{"photo-0": firstStill, "pairedVideo-1": firstMotion},
+	)
+
+	secondStill := []byte("version-two-live-still")
+	secondMotion := []byte("version-two-live-motion")
+	secondInput := testPhotoUploadInput(secondStill, secondMotion)
+	secondInput.LocalIdentifier = firstInput.LocalIdentifier
+	secondInput.DeviceID = firstInput.DeviceID
+	second := completeTestPhotoUpload(
+		t, app, secondInput,
+		map[string][]byte{"photo-0": secondStill, "pairedVideo-1": secondMotion},
+	)
+	if first.AssetID == second.AssetID {
+		t.Fatalf("changed complete resource group reused asset ID: %#v", second)
+	}
+
+	var transitionCount int
+	if err := app.db.QueryRow(
+		`SELECT COUNT(*) FROM photo_asset_version_transitions
+		 WHERE from_asset_id=? AND to_asset_id=?`,
+		first.AssetID, second.AssetID,
+	).Scan(&transitionCount); err != nil {
+		t.Fatal(err)
+	}
+	if transitionCount != 1 {
+		t.Fatalf("version transition count=%d, want 1", transitionCount)
+	}
+
+	recorder := httptest.NewRecorder()
+	app.photosAssets(recorder, tailscaleRequest(http.MethodGet, "/api/v1/photos/assets"))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("assets status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, firstInput.LocalIdentifier) ||
+		strings.Contains(body, firstInput.DeviceID) ||
+		strings.Contains(body, "from_fingerprint") || strings.Contains(body, "to_fingerprint") {
+		t.Fatalf("version aggregate leaked mapping identity: %s", body)
+	}
+	var page photosAssetPageResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	assets := map[string]photosAssetResponse{}
+	for _, asset := range page.Assets {
+		assets[asset.ID] = asset
+	}
+	if assets[first.AssetID].PreviousVersionCount != 0 ||
+		assets[first.AssetID].NextVersionCount != 1 ||
+		assets[second.AssetID].PreviousVersionCount != 1 ||
+		assets[second.AssetID].NextVersionCount != 0 {
+		t.Fatalf("unexpected version aggregates: %#v", assets)
+	}
+
+	detailRecorder := httptest.NewRecorder()
+	app.photosAssetByPath(
+		detailRecorder,
+		tailscaleRequest(http.MethodGet, "/api/v1/photos/assets/"+second.AssetID),
+	)
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detailRecorder.Code, detailRecorder.Body.String())
+	}
+	var detail photosAssetResponse
+	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.PreviousVersionCount != 1 || detail.NextVersionCount != 0 {
+		t.Fatalf("unexpected version detail aggregate: %#v", detail)
+	}
+}
+
+func completeTestPhotoUpload(
+	t *testing.T,
+	app *App,
+	input photosUploadSessionInput,
+	payloads map[string][]byte,
+) photosUploadSessionResponse {
+	t.Helper()
+	created := createTestPhotoUploadSession(t, app, input)
+	for _, resource := range created.Resources {
+		payload, ok := payloads[resource.ClientResourceID]
+		if !ok {
+			t.Fatalf("missing payload for resource=%#v", resource)
+		}
+		putTestPhotoPart(t, app, created.ID, resource, 0, payload)
+	}
+	recorder := httptest.NewRecorder()
+	app.photosUploadSessionByPath(
+		recorder,
+		tailscaleRequest(http.MethodPost, "/api/v1/photos/upload-sessions/"+created.ID+"/complete"),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("complete status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var completed photosUploadSessionResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&completed); err != nil {
+		t.Fatal(err)
+	}
+	return completed
+}
+
 func uploadDeviceMappingTestPhoto(
 	t *testing.T,
 	app *App,
@@ -284,10 +456,10 @@ func TestPhotosChangesReportSourceAndDerivativeUpdates(t *testing.T) {
 func TestPhotosHTTPContentTypeMapsPhotoKitUTIsForStreaming(t *testing.T) {
 	cases := map[string]string{
 		"com.apple.quicktime-movie": "video/quicktime",
-		"public.mpeg-4":              "video/mp4",
-		"public.heic":                "image/heic",
-		"image/jpeg":                 "image/jpeg",
-		"unrecognized.type":          "application/octet-stream",
+		"public.mpeg-4":             "video/mp4",
+		"public.heic":               "image/heic",
+		"image/jpeg":                "image/jpeg",
+		"unrecognized.type":         "application/octet-stream",
 	}
 	for input, want := range cases {
 		if got := photosHTTPContentType(input); got != want {

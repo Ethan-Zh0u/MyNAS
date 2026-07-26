@@ -55,7 +55,9 @@ struct UnifiedPhotoTimelineView: View {
                 PhotoDetailView(
                     asset: localAsset,
                     isBackedUp: item.availability.hasVerifiedOriginals,
-                    client: localClient
+                    client: localClient,
+                    contentRelationshipDescription: item.remoteAsset?.exactContentRelationshipDescription,
+                    versionRelationshipDescription: item.remoteAsset?.versionTransitionRelationshipDescription
                 )
             } label: {
                 UnifiedTimelineCell(
@@ -98,6 +100,28 @@ private struct UnifiedTimelineStatusCard: View {
     private var remoteOnlyCount: Int { items.filter { $0.localAsset == nil && $0.remoteAsset != nil }.count }
     private var browseReadyCount: Int {
         items.filter { $0.availability == .browseReady }.count
+    }
+    private var exactContentRelationCount: Int {
+        Set<String>(
+            items.compactMap { item in
+                guard let remoteAsset = item.remoteAsset,
+                      remoteAsset.hasExactContentRelationship else {
+                    return nil
+                }
+                return remoteAsset.id
+            }
+        ).count
+    }
+    private var versionTransitionRelationCount: Int {
+        Set<String>(
+            items.compactMap { item in
+                guard let remoteAsset = item.remoteAsset,
+                      remoteAsset.hasVersionTransitionRelationship else {
+                    return nil
+                }
+                return remoteAsset.id
+            }
+        ).count
     }
 
     var body: some View {
@@ -147,6 +171,8 @@ private struct UnifiedTimelineStatusCard: View {
     private var summary: String {
         var parts = ["本机 \(localCount) 项", "可浏览备份 \(browseReadyCount) 项"]
         if remoteOnlyCount > 0 { parts.append("仅 MyNAS \(remoteOnlyCount) 项") }
+        if exactContentRelationCount > 0 { parts.append("跨设备关联 \(exactContentRelationCount) 项") }
+        if versionTransitionRelationCount > 0 { parts.append("版本关系 \(versionTransitionRelationCount) 项") }
         return parts.joined(separator: " · ")
     }
 }
@@ -182,7 +208,7 @@ private struct UnifiedTimelineCell: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(item.displayMediaName)，\(item.availability.title)")
+        .accessibilityLabel(accessibilityLabel)
     }
 
     /// A verified local item already has the green check owned by
@@ -197,6 +223,18 @@ private struct UnifiedTimelineCell: View {
         default:
             return true
         }
+    }
+
+    private var accessibilityLabel: String {
+        let relationshipDescriptions = [
+            item.remoteAsset?.exactContentRelationshipDescription,
+            item.remoteAsset?.versionTransitionRelationshipDescription,
+        ]
+        .compactMap { $0 }
+        let relationshipSuffix = relationshipDescriptions.isEmpty
+            ? ""
+            : "，" + relationshipDescriptions.joined(separator: "，")
+        return "\(item.displayMediaName)，\(item.availability.title)\(relationshipSuffix)"
     }
 }
 

@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- MyPhotos — App Icon · Liquid Glass master artwork · 1024×1024 full-bleed (no baked corners) -->
+  <defs>
+    <!-- Deep technology-blue background -->
+    <linearGradient id="bgGrad" x1="150" y1="60" x2="890" y2="980" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0D2150"/>
+      <stop offset="0.52" stop-color="#123C86"/>
+      <stop offset="1" stop-color="#1B5CC4"/>
+    </linearGradient>
+
+    <!-- Translucent white → pale-cyan cloud -->
+    <linearGradient id="cloudGrad" x1="512" y1="300" x2="512" y2="690" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D8EBFF"/>
+    </linearGradient>
+
+    <!-- Cyan → indigo → violet photo mark -->
+    <linearGradient id="markGrad" x1="360" y1="664" x2="676" y2="510" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3EC6F0"/>
+      <stop offset="0.55" stop-color="#5D6BEA"/>
+      <stop offset="1" stop-color="#8B5CF0"/>
+    </linearGradient>
+
+    <!-- Restrained sparkle -->
+    <linearGradient id="sparkGrad" x1="708" y1="172" x2="708" y2="356" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#CDE4FF"/>
+    </linearGradient>
+
+    <filter id="blur90" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="90"/></filter>
+    <filter id="blur40" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="40"/></filter>
+    <filter id="blur26" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="26"/></filter>
+    <filter id="blur20" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="20"/></filter>
+    <filter id="blur14" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="14"/></filter>
+
+    <!-- Cloud silhouette (shared by fill, clip and rim) -->
+    <g id="cloudShape">
+      <circle cx="352" cy="560" r="104"/>
+      <circle cx="512" cy="462" r="156"/>
+      <circle cx="672" cy="556" r="110"/>
+      <rect x="296" y="520" width="432" height="160" rx="80"/>
+    </g>
+    <clipPath id="cloudClip"><use href="#cloudShape"/></clipPath>
+  </defs>
+
+  <!-- Layer 1: Background — deep tech-blue gradient, calm ambient illumination -->
+  <g id="background">
+    <rect width="1024" height="1024" fill="url(#bgGrad)"/>
+    <ellipse cx="340" cy="230" rx="480" ry="380" fill="#6FA8FF" opacity="0.20" filter="url(#blur90)"/>
+    <ellipse cx="790" cy="870" rx="470" ry="390" fill="#05122E" opacity="0.30" filter="url(#blur90)"/>
+  </g>
+
+  <!-- Layer 2: Halo — soft cool-blue lift behind the symbol -->
+  <g id="halo">
+    <circle cx="512" cy="524" r="340" fill="#BFE0FF" opacity="0.14" filter="url(#blur40)"/>
+  </g>
+
+  <!-- Layer 3: Cloud — translucent glass, specular highlight, soft material depth -->
+  <g id="cloud">
+    <use href="#cloudShape" fill="url(#cloudGrad)" opacity="0.95"/>
+    <g clip-path="url(#cloudClip)">
+      <ellipse cx="438" cy="398" rx="190" ry="92" fill="#FFFFFF" opacity="0.50" filter="url(#blur26)"/>
+      <ellipse cx="640" cy="500" rx="90" ry="50" fill="#FFFFFF" opacity="0.32" filter="url(#blur20)"/>
+      <ellipse cx="512" cy="662" rx="240" ry="60" fill="#8FB8EC" opacity="0.30" filter="url(#blur26)"/>
+    </g>
+    <use href="#cloudShape" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="6"/>
+  </g>
+
+  <!-- Layer 4: Photo mark — minimal mountain peaks, cyan→indigo→violet, controlled glow -->
+  <g id="photo-mark" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M372 660 L502 506 L562 606 L626 546 L668 660" stroke="#67E8F9" stroke-opacity="0.30"
+          stroke-width="56" filter="url(#blur14)"/>
+    <path d="M372 660 L502 506 L562 606 L626 546 L668 660" stroke="url(#markGrad)" stroke-width="56"/>
+  </g>
+
+  <!-- Layer 5: Sparkle — one small restrained 4-point star -->
+  <g id="sparkle">
+    <circle cx="708" cy="264" r="72" fill="#BFE0FF" opacity="0.16" filter="url(#blur20)"/>
+    <path fill="url(#sparkGrad)" opacity="0.96"
+          d="M708 172 C718 244 736 256 800 264 C736 272 718 284 708 356 C698 284 680 272 616 264 C680 256 698 244 708 172 Z"/>
+  </g>
+</svg>

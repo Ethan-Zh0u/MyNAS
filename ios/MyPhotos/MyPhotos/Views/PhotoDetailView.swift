@@ -6,6 +6,22 @@ struct PhotoDetailView: View {
     let asset: LocalPhotoAsset
     let isBackedUp: Bool
     let client: PhotoLibraryClient
+    let contentRelationshipDescription: String?
+    let versionRelationshipDescription: String?
+
+    init(
+        asset: LocalPhotoAsset,
+        isBackedUp: Bool,
+        client: PhotoLibraryClient,
+        contentRelationshipDescription: String? = nil,
+        versionRelationshipDescription: String? = nil
+    ) {
+        self.asset = asset
+        self.isBackedUp = isBackedUp
+        self.client = client
+        self.contentRelationshipDescription = contentRelationshipDescription
+        self.versionRelationshipDescription = versionRelationshipDescription
+    }
 
     var body: some View {
         ScrollView {
@@ -32,6 +48,12 @@ struct PhotoDetailView: View {
                     if asset.isFavorite {
                         Label("已在系统照片中收藏", systemImage: "heart.fill")
                             .foregroundStyle(.pink)
+                    }
+                    if let contentRelationshipDescription {
+                        LabeledContent("内容关联", value: contentRelationshipDescription)
+                    }
+                    if let versionRelationshipDescription {
+                        LabeledContent("版本关系", value: versionRelationshipDescription)
                     }
                 }
                 .padding(.horizontal)

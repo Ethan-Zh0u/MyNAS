@@ -4,6 +4,23 @@ import PhotosUI
 import UIKit
 import Combine
 
+enum PhotoLibraryDeletionError: LocalizedError {
+    case permissionDenied
+    case assetsUnavailable
+    case systemRejected
+
+    var errorDescription: String? {
+        switch self {
+        case .permissionDenied:
+            "没有修改系统照片库的权限。请在系统设置中允许 MyNAS Photos 访问照片。"
+        case .assetsUnavailable:
+            "有照片已不在当前可访问的系统图库中，请刷新后重试。"
+        case .systemRejected:
+            "iPhone 没有确认这次删除。"
+        }
+    }
+}
+
 @MainActor
 final class PhotoLibraryClient: NSObject {
     private let imageManager = PHCachingImageManager()
@@ -51,6 +68,37 @@ final class PhotoLibraryClient: NSObject {
     func resetFetch() {
         fetchResult = nil
         imageManager.stopCachingImagesForAllAssets()
+    }
+
+    /// Requests one atomic Photos-library change for the selected assets. iOS
+    /// owns the user confirmation and its Recently Deleted retention; the app
+    /// never reaches into the Photos filesystem itself.
+    func deleteAssets(localIdentifiers: [String]) async throws {
+        guard authorizationState().canReadLibrary else {
+            throw PhotoLibraryDeletionError.permissionDenied
+        }
+        let identifiers = Array(Set(localIdentifiers)).filter { !$0.isEmpty }
+        guard !identifiers.isEmpty else { return }
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+        guard result.count == identifiers.count else {
+            throw PhotoLibraryDeletionError.assetsUnavailable
+        }
+        var assets: [PHAsset] = []
+        result.enumerateObjects { asset, _, _ in assets.append(asset) }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets as NSArray)
+            } completionHandler: { success, error in
+                if success {
+                    continuation.resume(returning: ())
+                } else if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(throwing: PhotoLibraryDeletionError.systemRejected)
+                }
+            }
+        }
     }
 
     func page(offset: Int, size: Int) -> (items: [LocalPhotoAsset], nextOffset: Int?) {

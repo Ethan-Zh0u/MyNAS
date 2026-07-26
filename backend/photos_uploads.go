@@ -150,7 +150,12 @@ func (a *App) photosUploadSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "photo deduplication unavailable", http.StatusInternalServerError)
 		return
 	} else if found {
-		_ = a.upsertDeviceAssetMapping(owner.UserID, input.DeviceID, input.LocalIdentifier, input.Fingerprint, assetID)
+		if err = a.upsertDeviceAssetMapping(
+			owner.UserID, input.DeviceID, input.LocalIdentifier, input.Fingerprint, assetID,
+		); err != nil {
+			http.Error(w, "photo mapping unavailable", http.StatusInternalServerError)
+			return
+		}
 		sourceState, derivativeState, stateErr := a.photoAssetStates(assetID, owner.UserID)
 		if stateErr != nil {
 			http.Error(w, "photo state unavailable", http.StatusInternalServerError)
@@ -527,12 +532,9 @@ func (a *App) completePhotoUploadSession(w http.ResponseWriter, ownerUserID stri
 		)
 	}
 	if err == nil {
-		_, err = transaction.Exec(
-			`INSERT INTO device_asset_mappings(owner_user_id,device_id,local_identifier,fingerprint,asset_id,updated)
-			 VALUES(?,?,?,?,?,?)
-			 ON CONFLICT(owner_user_id,device_id,local_identifier)
-			 DO UPDATE SET fingerprint=excluded.fingerprint,asset_id=excluded.asset_id,updated=excluded.updated`,
-			ownerUserID, session.DeviceID, session.LocalIdentifier, session.Fingerprint, session.AssetID, now,
+		_, err = a.upsertDeviceAssetMappingInTransaction(
+			transaction, ownerUserID, session.DeviceID, session.LocalIdentifier,
+			session.Fingerprint, session.AssetID, now,
 		)
 	}
 	if err == nil {
@@ -615,15 +617,111 @@ func (a *App) findBackedUpPhotoAsset(
 func (a *App) upsertDeviceAssetMapping(
 	ownerUserID, deviceID, localIdentifier, fingerprint, assetID string,
 ) error {
-	_, err := a.db.Exec(
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	transaction, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	_, err = a.upsertDeviceAssetMappingInTransaction(
+		transaction, ownerUserID, deviceID, localIdentifier, fingerprint, assetID, now,
+	)
+	if err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
+// A transition records a confirmed change to the same PhotoKit local identifier
+// on the same device. It preserves the previous resource group instead of
+// overwriting it. Device/local identifiers and fingerprints remain server-only;
+// browse responses expose only aggregate predecessor/successor counts.
+func (a *App) upsertDeviceAssetMappingInTransaction(
+	transaction *sql.Tx,
+	ownerUserID, deviceID, localIdentifier, fingerprint, assetID, now string,
+) (bool, error) {
+	var previousAssetID, previousFingerprint string
+	err := transaction.QueryRow(
+		`SELECT asset_id,fingerprint FROM device_asset_mappings
+		 WHERE owner_user_id=? AND device_id=? AND local_identifier=?`,
+		ownerUserID, deviceID, localIdentifier,
+	).Scan(&previousAssetID, &previousFingerprint)
+	hadPreviousMapping := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	result, err := transaction.Exec(
 		`INSERT INTO device_asset_mappings(owner_user_id,device_id,local_identifier,fingerprint,asset_id,updated)
 		 VALUES(?,?,?,?,?,?)
 		 ON CONFLICT(owner_user_id,device_id,local_identifier)
-		 DO UPDATE SET fingerprint=excluded.fingerprint,asset_id=excluded.asset_id,updated=excluded.updated`,
+		 DO UPDATE SET fingerprint=excluded.fingerprint,asset_id=excluded.asset_id,updated=excluded.updated
+		 WHERE device_asset_mappings.fingerprint IS NOT excluded.fingerprint
+		    OR device_asset_mappings.asset_id IS NOT excluded.asset_id`,
 		ownerUserID, deviceID, localIdentifier, fingerprint, assetID,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		now,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if changed == 0 {
+		return false, nil
+	}
+	if _, err = transaction.Exec(
+		`UPDATE photo_assets SET updated=?
+		 WHERE owner_user_id=? AND id=? AND source_state=?`,
+		now, ownerUserID, assetID, photosSourceStateCommitted,
+	); err != nil {
+		return false, err
+	}
+	if _, err = transaction.Exec(
+		`INSERT OR IGNORE INTO photo_changes(
+			owner_user_id,asset_id,change_type,asset_updated,created
+		 ) VALUES(?,?,'upsert',?,?)`,
+		ownerUserID, assetID, now, now,
+	); err != nil {
+		return false, err
+	}
+	if !hadPreviousMapping || previousAssetID == assetID || previousFingerprint == fingerprint {
+		return true, nil
+	}
+	transition, err := transaction.Exec(
+		`INSERT OR IGNORE INTO photo_asset_version_transitions(
+			owner_user_id,device_id,local_identifier,from_asset_id,to_asset_id,
+			from_fingerprint,to_fingerprint,created
+		 ) VALUES(?,?,?,?,?,?,?,?)`,
+		ownerUserID, deviceID, localIdentifier, previousAssetID, assetID,
+		previousFingerprint, fingerprint, now,
+	)
+	if err != nil {
+		return false, err
+	}
+	created, err := transition.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if created == 0 {
+		return true, nil
+	}
+	if _, err = transaction.Exec(
+		`UPDATE photo_assets SET updated=?
+		 WHERE owner_user_id=? AND id=? AND source_state=?`,
+		now, ownerUserID, previousAssetID, photosSourceStateCommitted,
+	); err != nil {
+		return false, err
+	}
+	if _, err = transaction.Exec(
+		`INSERT OR IGNORE INTO photo_changes(
+			owner_user_id,asset_id,change_type,asset_updated,created
+		 ) VALUES(?,?,'upsert',?,?)`,
+		ownerUserID, previousAssetID, now, now,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (a *App) photoUploadSessionResponse(sessionID, ownerUserID string) (photosUploadSessionResponse, error) {

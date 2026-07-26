@@ -233,6 +233,18 @@ struct PhotoBackupJob: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+/// A narrow proof that the current PhotoKit asset is backed by exactly the
+/// server asset named here. It deliberately contains no content fingerprint:
+/// the server validates that private value again before moving anything.
+struct PhotoBackupTrashCandidate: Identifiable, Hashable, Sendable {
+    let assetID: String
+    let deviceID: String
+    let localIdentifier: String
+    let sourceModificationDate: String
+
+    var id: String { assetID }
+}
+
 /// The backend stores a source version as the exact timestamp string sent at
 /// upload time. Comparing via this formatter avoids treating different
 /// sub-millisecond Date representations as the same source version.

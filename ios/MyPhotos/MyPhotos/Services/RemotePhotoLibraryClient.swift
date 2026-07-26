@@ -8,6 +8,7 @@ enum RemotePhotoLibraryError: LocalizedError, Sendable {
     case invalidResource
     case invalidResponse
     case unauthorized
+    case backupTrashRejected
     case serverRejected(Int)
     case corruptedDownload
 
@@ -25,6 +26,8 @@ enum RemotePhotoLibraryError: LocalizedError, Sendable {
             "MyNAS 返回了无法识别的图库数据。"
         case .unauthorized:
             "Tailscale 身份验证已失效，请确认 Tailscale 仍处于连接状态。"
+        case .backupTrashRejected:
+            "MyNAS 拒绝移动备份，以避免删除未完成、已变化或被其他设备共用的原件。"
         case .serverRejected(let status):
             "MyNAS 暂时无法读取图库（HTTP \(status)）。"
         case .corruptedDownload:
@@ -193,6 +196,69 @@ actor RemotePhotoLibraryClient {
         } while true
 
         return mappings
+    }
+
+    /// Moves only server-revalidated complete resource groups to the dedicated
+    /// MyNAS Photos trash. It is intentionally a batch request: the backend
+    /// validates every selected item before moving the first one.
+    func moveBackupsToTrash(
+        candidates: [PhotoBackupTrashCandidate],
+        account: AccountContext
+    ) async throws -> RemotePhotoTrashResult {
+        guard let baseURL = account.serverURL else {
+            throw RemotePhotoLibraryError.notConnected
+        }
+        guard !candidates.isEmpty, candidates.count <= 200 else {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        let requestURL = baseURL.appending(path: "api/v1/photos/assets")
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(TrashRequest(items: candidates.map(TrashRequest.Item.init)))
+
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try validatedHTTPResponse(response, data: data)
+        guard httpResponse.statusCode == 200 else {
+            throw error(for: httpResponse.statusCode)
+        }
+        do {
+            return try decoder.decode(RemotePhotoTrashResult.self, from: data)
+        } catch {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+    }
+
+    /// Used as compensation if iOS rejects its Photos-library deletion after
+    /// MyNAS has already accepted the paired move to its own recycle area.
+    func restoreBackups(
+        assetIDs: [String],
+        account: AccountContext
+    ) async throws -> RemotePhotoRestoreResult {
+        guard let baseURL = account.serverURL else {
+            throw RemotePhotoLibraryError.notConnected
+        }
+        guard !assetIDs.isEmpty, assetIDs.count <= 200 else {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        let requestURL = baseURL.appending(path: "api/v1/photos/assets/restore")
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(RestoreRequest(assetIDs: assetIDs))
+
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try validatedHTTPResponse(response, data: data)
+        guard httpResponse.statusCode == 200 else {
+            throw error(for: httpResponse.statusCode)
+        }
+        do {
+            return try decoder.decode(RemotePhotoRestoreResult.self, from: data)
+        } catch {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
     }
 
     func image(
@@ -535,7 +601,31 @@ actor RemotePhotoLibraryClient {
     }
 
     private func error(for statusCode: Int) -> RemotePhotoLibraryError {
-        statusCode == 401 ? .unauthorized : .serverRejected(statusCode)
+        if statusCode == 401 { return .unauthorized }
+        if statusCode == 409 { return .backupTrashRejected }
+        return .serverRejected(statusCode)
+    }
+
+    private nonisolated struct TrashRequest: Encodable, Sendable {
+        let items: [Item]
+
+        nonisolated struct Item: Encodable, Sendable {
+            let assetID: String
+            let deviceID: String
+            let localIdentifier: String
+            let sourceModificationDate: String
+
+            init(_ candidate: PhotoBackupTrashCandidate) {
+                assetID = candidate.assetID
+                deviceID = candidate.deviceID
+                localIdentifier = candidate.localIdentifier
+                sourceModificationDate = candidate.sourceModificationDate
+            }
+        }
+    }
+
+    private nonisolated struct RestoreRequest: Encodable, Sendable {
+        let assetIDs: [String]
     }
 
     private func metadataCacheURL(

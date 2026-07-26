@@ -128,6 +128,7 @@ struct MyNASConnectionService {
                 supportsRemoteBrowsing: capabilityEnvelope.features.remoteBrowsing,
                 supportsChangeFeed: capabilityEnvelope.features.changeFeed,
                 supportsDeviceAssetMappingRecovery: capabilityEnvelope.features.deviceAssetMappingRecovery,
+                supportsPhotoTrash: capabilityEnvelope.features.photoTrash,
                 backupStateModelVersion: capabilityEnvelope.backupStateModelVersion,
                 derivativePolicyVersion: capabilityEnvelope.derivativePolicyVersion,
                 availableDerivativeRecipes: capabilityEnvelope.derivativeRecipes
@@ -300,6 +301,7 @@ private struct FeatureEnvelope: Decodable {
     let remoteBrowsing: Bool?
     let changeFeed: Bool?
     let deviceAssetMappingRecovery: Bool?
+    let photoTrash: Bool?
 }
 
 private struct MeEnvelope: Decodable {

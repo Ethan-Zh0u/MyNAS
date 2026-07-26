@@ -113,6 +113,53 @@ final class PhotoBackupCoordinator: ObservableObject {
         }.count
     }
 
+    /// A green backup check is meaningful only for the current PhotoKit source
+    /// version and a server-confirmed, committed resource group. This is shared
+    /// by the grid and the deletion flow so an edited photo cannot inherit the
+    /// old version's backup state.
+    func hasCurrentVerifiedBackup(
+        for asset: LocalPhotoAsset,
+        accountID: String
+    ) -> Bool {
+        guard let job = jobs.first(where: {
+            $0.accountID == accountID && $0.localIdentifier == asset.localIdentifier
+        }) else {
+            return false
+        }
+        return job.status == .completed
+            && job.sourceState == .committed
+            && job.sourceModificationDate == asset.modificationDate
+            && job.assetID?.isEmpty == false
+    }
+
+    /// Produces deletion candidates only for current, integrity-verified
+    /// source versions. The MyNAS endpoint still repeats every check because
+    /// the local job store can be stale while the user is viewing the sheet.
+    func trashCandidates(
+        for assets: [LocalPhotoAsset],
+        accountID: String
+    ) -> [PhotoBackupTrashCandidate] {
+        assets.compactMap { asset in
+            guard let job = jobs.first(where: {
+                $0.accountID == accountID && $0.localIdentifier == asset.localIdentifier
+            }),
+            job.status == .completed,
+            job.sourceState == .committed,
+            job.sourceModificationDate == asset.modificationDate,
+            let assetID = job.assetID,
+            !assetID.isEmpty,
+            let modificationDate = asset.modificationDate else {
+                return nil
+            }
+            return PhotoBackupTrashCandidate(
+                assetID: assetID,
+                deviceID: deviceID,
+                localIdentifier: asset.localIdentifier,
+                sourceModificationDate: PhotoBackupSourceVersion.string(from: modificationDate)
+            )
+        }
+    }
+
     func synchronizeLibrary(
         assets: [LocalPhotoAsset],
         account: AccountContext,

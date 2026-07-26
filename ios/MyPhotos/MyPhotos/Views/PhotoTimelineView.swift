@@ -9,6 +9,9 @@ struct PhotoTimelineView: View {
     @StateObject private var unifiedTimeline = UnifiedPhotoTimelineViewModel()
     @State private var selectedIDs: Set<String> = []
     @State private var selectionMode = false
+    @State private var deletionRequest: PhotoDeletionRequest?
+    @State private var deletionErrorMessage: String?
+    @State private var isDeleting = false
     @AppStorage("photoTimelineShowsUnified") private var showsUnifiedTimeline = true
     @AppStorage("photoGridColumnCount") private var columnCount = 3
     @State private var pinchStartColumnCount: Int?
@@ -35,11 +38,12 @@ struct PhotoTimelineView: View {
 
     private var completedBackupIdentifiers: Set<String> {
         Set(
-            backupCoordinator.jobs
-                .lazy
+            viewModel.assets
                 .filter {
-                    $0.accountID == accountStore.current.accountID
-                        && $0.status == .completed
+                    backupCoordinator.hasCurrentVerifiedBackup(
+                        for: $0,
+                        accountID: accountStore.current.accountID
+                    )
                 }
                 .map(\.localIdentifier)
         )
@@ -68,7 +72,7 @@ struct PhotoTimelineView: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if viewModel.authorization.canReadLibrary && !usesUnifiedTimeline {
+                    if viewModel.authorization.canReadLibrary {
                         Button(selectionMode ? "取消" : "选择") {
                             withAnimation(.snappy) {
                                 selectionMode.toggle()
@@ -78,13 +82,45 @@ struct PhotoTimelineView: View {
                     }
                 }
 
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if selectionMode, !selectedIDs.isEmpty {
+                        Button(role: .destructive, action: requestDeletion) {
+                            Image(systemName: "trash")
+                        }
+                        .accessibilityLabel("删除所选照片")
+                    }
+
                     Button(action: showSearch) {
                         Image(systemName: "magnifyingglass")
                     }
                     .accessibilityLabel("搜索照片")
                 }
             }
+        }
+        .sheet(item: $deletionRequest) { request in
+            PhotoDeletionConfirmationSheet(
+                request: request,
+                isDeleting: isDeleting,
+                confirm: { alsoMoveMyNASBackups in
+                    Task {
+                        await delete(
+                            request: request,
+                            alsoMoveMyNASBackups: alsoMoveMyNASBackups
+                        )
+                    }
+                }
+            )
+        }
+        .alert(
+            "无法完成删除",
+            isPresented: Binding(
+                get: { deletionErrorMessage != nil },
+                set: { if !$0 { deletionErrorMessage = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(deletionErrorMessage ?? "")
         }
         .task(id: accountStore.current.accountID) {
             unifiedTimeline.synchronizeLocal(
@@ -289,6 +325,78 @@ struct PhotoTimelineView: View {
         }
     }
 
+    private func requestDeletion() {
+        let assets = viewModel.assets.filter { selectedIDs.contains($0.id) }
+        guard !assets.isEmpty else { return }
+        deletionRequest = PhotoDeletionRequest(
+            assets: assets,
+            backupCandidates: backupCoordinator.trashCandidates(
+                for: assets,
+                accountID: accountStore.current.accountID
+            ),
+            isConnectedToMyNAS: !accountStore.current.isLocalOnly,
+            isMyNASTrashAvailable: accountStore.current.serverCapabilities.supportsPhotoTrash == true
+        )
+    }
+
+    private func delete(
+        request: PhotoDeletionRequest,
+        alsoMoveMyNASBackups: Bool
+    ) async {
+        isDeleting = true
+        defer { isDeleting = false }
+        let localIdentifiers = request.assets.map(\.localIdentifier)
+        var movedBackups = false
+
+        do {
+            if alsoMoveMyNASBackups {
+                guard request.canAlsoMoveMyNASBackups else {
+                    throw PhotoDeletionFlowError.backupVerificationUnavailable
+                }
+                _ = try await unifiedTimeline.remoteClient.moveBackupsToTrash(
+                    candidates: request.backupCandidates,
+                    account: accountStore.current
+                )
+                movedBackups = true
+            }
+
+            do {
+                try await viewModel.imageClient.deleteAssets(localIdentifiers: localIdentifiers)
+            } catch {
+                if movedBackups {
+                    do {
+                        _ = try await unifiedTimeline.remoteClient.restoreBackups(
+                            assetIDs: request.backupCandidates.map(\.assetID),
+                            account: accountStore.current
+                        )
+                        throw PhotoDeletionFlowError.localDeletionRejectedAndMyNASRestored
+                    } catch let flowError as PhotoDeletionFlowError {
+                        throw flowError
+                    } catch {
+                        throw PhotoDeletionFlowError.localDeletionRejectedRecoveryNeeded
+                    }
+                }
+                throw error
+            }
+
+            selectedIDs.subtract(localIdentifiers)
+            selectionMode = false
+            deletionRequest = nil
+            await viewModel.refresh()
+            unifiedTimeline.synchronizeLocal(
+                assets: viewModel.assets,
+                jobs: backupCoordinator.jobs,
+                accountID: accountStore.current.accountID
+            )
+            if movedBackups {
+                await unifiedTimeline.refreshRemote(account: accountStore.current)
+            }
+        } catch {
+            deletionRequest = nil
+            deletionErrorMessage = error.localizedDescription
+        }
+    }
+
     private var gridMagnificationGesture: some Gesture {
         MagnifyGesture(minimumScaleDelta: 0.02)
             .onChanged { value in
@@ -334,6 +442,23 @@ struct PhotoTimelineView: View {
             assets: viewModel.assets,
             targetSize: thumbnailTargetSize
         )
+    }
+}
+
+private enum PhotoDeletionFlowError: LocalizedError {
+    case backupVerificationUnavailable
+    case localDeletionRejectedAndMyNASRestored
+    case localDeletionRejectedRecoveryNeeded
+
+    var errorDescription: String? {
+        switch self {
+        case .backupVerificationUnavailable:
+            "选择中的项目没有当前、完整且已验证的 MyNAS 备份，因此没有删除 MyNAS 数据。"
+        case .localDeletionRejectedAndMyNASRestored:
+            "iPhone 没有确认删除；刚才移入 MyNAS 回收站的备份已自动恢复。"
+        case .localDeletionRejectedRecoveryNeeded:
+            "iPhone 没有确认删除，且网络中断导致无法确认 MyNAS 回收站是否已恢复。本机照片仍保留；请先不要重试同步删除。"
+        }
     }
 }
 

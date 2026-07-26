@@ -5,6 +5,10 @@ const (
 	photosDerivativePolicyVersion = "photos-browse-v1"
 
 	photosSourceStateCommitted = "sourceCommitted"
+	// A trashed source keeps its complete original resource group on the same
+	// volume, but is deliberately excluded from browsing, streaming, mapping
+	// recovery, and derivative work until it is restored.
+	photosSourceStateTrashed = "trashed"
 
 	photosDerivativeStatePending    = "pending"
 	photosDerivativeStateProcessing = "processing"

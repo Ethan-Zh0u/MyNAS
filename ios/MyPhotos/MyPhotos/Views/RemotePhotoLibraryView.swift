@@ -405,6 +405,12 @@ struct RemotePhotoDetailView: View {
                         "MyNAS 状态",
                         value: asset.browseReady ? "可浏览" : "正在生成预览"
                     )
+                    if let contentRelationshipDescription = asset.exactContentRelationshipDescription {
+                        LabeledContent("内容关联", value: contentRelationshipDescription)
+                    }
+                    if let versionRelationshipDescription = asset.versionTransitionRelationshipDescription {
+                        LabeledContent("版本关系", value: versionRelationshipDescription)
+                    }
 
                     if let captureDate = asset.captureDate {
                         LabeledContent("拍摄时间", value: formattedDate(captureDate))
