@@ -128,10 +128,6 @@ type photosStoredFile struct {
 }
 
 func (a *App) photosAssets(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		a.photosTrashAssets(w, r)
-		return
-	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
@@ -328,12 +324,8 @@ func (a *App) photosAssetByPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	assetID := parts[0]
-	if r.Method == http.MethodPost && len(parts) == 1 && assetID == "restore" {
-		a.photosRestoreAssetsFromRequest(w, r)
-		return
-	}
-	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "restore" {
-		a.photosRestoreAssets(w, r, []string{assetID})
+	if r.Method == http.MethodPost && len(parts) == 1 && assetID == "delete" {
+		a.photosDeleteAssets(w, r)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

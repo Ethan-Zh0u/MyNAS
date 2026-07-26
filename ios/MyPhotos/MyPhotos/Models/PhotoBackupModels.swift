@@ -236,7 +236,7 @@ struct PhotoBackupJob: Identifiable, Codable, Equatable, Sendable {
 /// A narrow proof that the current PhotoKit asset is backed by exactly the
 /// server asset named here. It deliberately contains no content fingerprint:
 /// the server validates that private value again before moving anything.
-struct PhotoBackupTrashCandidate: Identifiable, Hashable, Sendable {
+struct PhotoBackupDeletionCandidate: Identifiable, Hashable, Sendable {
     let assetID: String
     let deviceID: String
     let localIdentifier: String

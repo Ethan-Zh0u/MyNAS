@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Layer 5: AI sparkles — 4-point stars -->
+  <defs>
+    <linearGradient id="sparkGrad" x1="730" y1="195" x2="730" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#CDE4FF"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#sparkGrad)">
+    <path d="M730 220 C738 268 752 282 800 290 C752 298 738 312 730 360 C722 312 708 298 660 290 C708 282 722 268 730 220 Z"/>
+    <path d="M630 195 C633 213 637 217 655 220 C637 223 633 227 630 245 C627 227 623 223 605 220 C623 217 627 213 630 195 Z"/>
+  </g>
+</svg>

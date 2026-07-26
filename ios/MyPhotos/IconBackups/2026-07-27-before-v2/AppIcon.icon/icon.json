@@ -1,0 +1,106 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "extended-gray:1.00000,1.00000",
+      "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode" : "overlay",
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.38403,0.64839,1.04685,1.00000",
+              "display-p3:0.94645,0.96783,0.94438,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 0
+              },
+              "stop" : {
+                "x" : 0.5,
+                "y" : 0.7
+              }
+            }
+          },
+          "hidden" : false,
+          "image-name" : "05-sparkle.svg",
+          "name" : "05-sparkle",
+          "position" : {
+            "scale" : 1.55,
+            "translation-in-points" : [
+              -84,
+              126
+            ]
+          }
+        },
+        {
+          "hidden" : true,
+          "image-name" : "04-photo-mark.svg",
+          "name" : "04-photo-mark",
+          "position" : {
+            "scale" : 1.05,
+            "translation-in-points" : [
+              8,
+              0
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.38403,0.64839,1.04685,1.00000",
+              "display-p3:0.94645,0.96783,0.94438,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 0
+              },
+              "stop" : {
+                "x" : 0.5,
+                "y" : 0.7
+              }
+            }
+          },
+          "image-name" : "03-cloud.svg",
+          "name" : "03-cloud",
+          "position" : {
+            "scale" : 1.2,
+            "translation-in-points" : [
+              -0.6000000000000227,
+              17.399999999999977
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

@@ -194,6 +194,34 @@ func (a *App) volumeByID(id string) (Volume, error) {
 	return a.measureVolume(v), nil
 }
 
+// volumeByIDInTransaction avoids opening a second connection while a caller
+// holds the only SQLite writer connection. It keeps the primary-volume fallback
+// identical to volumeByID so Photos mutations can safely validate a volume
+// inside their metadata transaction.
+func (a *App) volumeByIDInTransaction(transaction *sql.Tx, id string) (Volume, error) {
+	if id == "" {
+		id = "primary"
+	}
+	var volume Volume
+	err := transaction.QueryRow(
+		"SELECT id,name,uuid,device,filesystem,mount FROM volumes WHERE id=? AND enabled=1",
+		id,
+	).Scan(&volume.ID, &volume.Name, &volume.UUID, &volume.Device, &volume.Filesystem, &volume.Mount)
+	if errors.Is(err, sql.ErrNoRows) {
+		if id == "primary" && a.c.Root != "" {
+			return a.measureVolume(Volume{
+				ID: "primary", Name: "NAS 数据盘", Device: a.c.Root,
+				Filesystem: "unknown", Mount: a.c.Root,
+			}), nil
+		}
+		return Volume{}, errors.New("unknown volume")
+	}
+	if err != nil {
+		return Volume{}, err
+	}
+	return a.measureVolume(volume), nil
+}
+
 func (a *App) measureVolume(v Volume) Volume {
 	v.Status = "offline"
 	v.Protocol = "HTTPS over Tailscale Serve"

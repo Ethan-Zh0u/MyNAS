@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Layer 4: Peak / photo mark — brand gradient (Default) -->
+  <defs>
+    <linearGradient id="brandGrad" x1="356" y1="690" x2="668" y2="490" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+  </defs>
+  <path d="M356 660 L512 500 L668 660" fill="none" stroke="url(#brandGrad)"
+        stroke-width="60" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

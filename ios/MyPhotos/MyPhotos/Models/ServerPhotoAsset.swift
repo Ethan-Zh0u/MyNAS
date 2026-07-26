@@ -238,21 +238,11 @@ nonisolated struct RemotePhotoChangeSyncResult: Sendable {
     let resetRequired: Bool
 }
 
-nonisolated struct RemotePhotoTrashResult: Codable, Hashable, Sendable {
+nonisolated struct RemotePhotoDeletionResult: Codable, Hashable, Sendable {
     let items: [Item]
 
     nonisolated struct Item: Codable, Hashable, Sendable {
         let assetID: String
-        let trashID: String
-        let trashedAt: String
-    }
-}
-
-nonisolated struct RemotePhotoRestoreResult: Codable, Hashable, Sendable {
-    let items: [Item]
-
-    nonisolated struct Item: Codable, Hashable, Sendable {
-        let assetID: String
-        let restoredAt: String
+        let deletedAt: String
     }
 }

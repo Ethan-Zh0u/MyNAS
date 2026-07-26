@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- MyPhotos icon · Layer 1: Background — deep technology-blue, full-bleed, no baked corners -->
+  <defs>
+    <linearGradient id="bgGrad" x1="150" y1="60" x2="890" y2="980" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0D2150"/>
+      <stop offset="0.52" stop-color="#123C86"/>
+      <stop offset="1" stop-color="#1B5CC4"/>
+    </linearGradient>
+    <filter id="blur90" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="90"/></filter>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bgGrad)"/>
+  <ellipse cx="340" cy="230" rx="480" ry="380" fill="#6FA8FF" opacity="0.20" filter="url(#blur90)"/>
+  <ellipse cx="790" cy="870" rx="470" ry="390" fill="#05122E" opacity="0.30" filter="url(#blur90)"/>
+</svg>

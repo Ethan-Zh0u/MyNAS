@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- MyPhotos icon · Layer 3: Cloud — translucent white/pale-cyan glass, specular highlight, soft depth -->
+  <defs>
+    <linearGradient id="cloudGrad" x1="512" y1="300" x2="512" y2="690" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D8EBFF"/>
+    </linearGradient>
+    <filter id="blur26" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="26"/></filter>
+    <filter id="blur20" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="20"/></filter>
+    <g id="cloudShape">
+      <circle cx="352" cy="560" r="104"/>
+      <circle cx="512" cy="462" r="156"/>
+      <circle cx="672" cy="556" r="110"/>
+      <rect x="296" y="520" width="432" height="160" rx="80"/>
+    </g>
+    <clipPath id="cloudClip"><use href="#cloudShape"/></clipPath>
+  </defs>
+  <use href="#cloudShape" fill="url(#cloudGrad)" opacity="0.95"/>
+  <g clip-path="url(#cloudClip)">
+    <ellipse cx="438" cy="398" rx="190" ry="92" fill="#FFFFFF" opacity="0.50" filter="url(#blur26)"/>
+    <ellipse cx="640" cy="500" rx="90" ry="50" fill="#FFFFFF" opacity="0.32" filter="url(#blur20)"/>
+    <ellipse cx="512" cy="662" rx="240" ry="60" fill="#8FB8EC" opacity="0.30" filter="url(#blur26)"/>
+  </g>
+  <use href="#cloudShape" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="6"/>
+</svg>

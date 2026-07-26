@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- MyPhotos icon · Layer 2: Halo — soft cool-blue ambient lift behind the symbol -->
+  <defs>
+    <filter id="blur40" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="40"/></filter>
+  </defs>
+  <circle cx="512" cy="524" r="340" fill="#BFE0FF" opacity="0.14" filter="url(#blur40)"/>
+</svg>

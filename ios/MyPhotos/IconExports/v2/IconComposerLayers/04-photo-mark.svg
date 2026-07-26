@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- MyPhotos icon · Layer 4: Photo mark — minimal mountain peaks, cyan→indigo→violet, restrained refraction glow -->
+  <defs>
+    <linearGradient id="markGrad" x1="360" y1="664" x2="676" y2="510" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3EC6F0"/>
+      <stop offset="0.55" stop-color="#5D6BEA"/>
+      <stop offset="1" stop-color="#8B5CF0"/>
+    </linearGradient>
+    <filter id="blur14" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="14"/></filter>
+  </defs>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M372 660 L502 506 L562 606 L626 546 L668 660" stroke="#67E8F9" stroke-opacity="0.26"
+          stroke-width="56" filter="url(#blur14)"/>
+    <path d="M372 660 L502 506 L562 606 L626 546 L668 660" stroke="url(#markGrad)" stroke-width="56"/>
+  </g>
+</svg>

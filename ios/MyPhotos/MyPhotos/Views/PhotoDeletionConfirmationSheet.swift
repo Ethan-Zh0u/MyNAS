@@ -2,17 +2,17 @@ import SwiftUI
 
 struct PhotoDeletionRequest: Identifiable {
     let assets: [LocalPhotoAsset]
-    let backupCandidates: [PhotoBackupTrashCandidate]
+    let backupCandidates: [PhotoBackupDeletionCandidate]
     let isConnectedToMyNAS: Bool
-    let isMyNASTrashAvailable: Bool
+    let isMyNASDeletionAvailable: Bool
 
     var id: String {
         assets.map(\.localIdentifier).sorted().joined(separator: "|")
     }
 
-    var canAlsoMoveMyNASBackups: Bool {
+    var canAlsoDeleteMyNASBackups: Bool {
         isConnectedToMyNAS
-            && isMyNASTrashAvailable
+            && isMyNASDeletionAvailable
             && !assets.isEmpty
             && backupCandidates.count == assets.count
     }
@@ -21,8 +21,8 @@ struct PhotoDeletionRequest: Identifiable {
         if !isConnectedToMyNAS {
             return "未连接 MyNAS；本次只能移入 iPhone 的“最近删除”。"
         }
-        if !isMyNASTrashAvailable {
-            return "当前 MyNAS 尚未部署照片回收站；本次只能移入 iPhone 的“最近删除”。"
+        if !isMyNASDeletionAvailable {
+            return "当前 MyNAS 尚未支持永久删除照片备份；本次只能移入 iPhone 的“最近删除”。"
         }
         return "选择中含有未完成备份、旧版本或无法验证的照片；为保护原件，不能同步删除 MyNAS 备份。"
     }
@@ -31,9 +31,9 @@ struct PhotoDeletionRequest: Identifiable {
 struct PhotoDeletionConfirmationSheet: View {
     let request: PhotoDeletionRequest
     let isDeleting: Bool
-    let confirm: (_ alsoMoveMyNASBackups: Bool) -> Void
+    let confirm: (_ alsoDeleteMyNASBackups: Bool) -> Void
 
-    @State private var alsoMoveMyNASBackups = false
+    @State private var alsoDeleteMyNASBackups = false
 
     var body: some View {
         NavigationStack {
@@ -49,11 +49,11 @@ struct PhotoDeletionConfirmationSheet: View {
                     .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Toggle("同时移入 MyNAS 回收站", isOn: $alsoMoveMyNASBackups)
-                        .disabled(!request.canAlsoMoveMyNASBackups || isDeleting)
+                    Toggle("同时永久删除 MyNAS 备份", isOn: $alsoDeleteMyNASBackups)
+                        .disabled(!request.canAlsoDeleteMyNASBackups || isDeleting)
 
-                    if request.canAlsoMoveMyNASBackups {
-                        Text("默认关闭。开启后，MyNAS 会再次确认每一项仍是当前已验证的完整备份，且没有被其他设备共用；通过后才会移动整个资源组。")
+                    if request.canAlsoDeleteMyNASBackups {
+                        Text("默认关闭。开启后，MyNAS 会再次确认每一项仍是当前已验证的完整备份，且没有被其他设备共用；确认后将永久删除整个资源组。若想找回，请先在 iPhone“最近删除”中恢复，再重新备份。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     } else {
@@ -68,7 +68,7 @@ struct PhotoDeletionConfirmationSheet: View {
                 Spacer(minLength: 0)
 
                 Button(role: .destructive) {
-                    confirm(alsoMoveMyNASBackups && request.canAlsoMoveMyNASBackups)
+                    confirm(alsoDeleteMyNASBackups && request.canAlsoDeleteMyNASBackups)
                 } label: {
                     HStack {
                         Spacer()
@@ -76,8 +76,8 @@ struct PhotoDeletionConfirmationSheet: View {
                             ProgressView()
                                 .tint(.white)
                         } else {
-                            Text(alsoMoveMyNASBackups && request.canAlsoMoveMyNASBackups
-                                ? "移入两个回收站"
+                            Text(alsoDeleteMyNASBackups && request.canAlsoDeleteMyNASBackups
+                                ? "删除本机和 MyNAS 备份"
                                 : "移入最近删除")
                         }
                         Spacer()

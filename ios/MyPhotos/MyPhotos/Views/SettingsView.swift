@@ -12,6 +12,8 @@ struct SettingsView: View {
     @State private var isConnectionPresented = false
     @State private var serverTemperatureC: Double?
     @State private var isTemperatureLoading = false
+    @State private var isRefreshingConnection = false
+    @State private var connectionRefreshError: String?
 
     var body: some View {
         NavigationStack {
@@ -95,6 +97,24 @@ struct SettingsView: View {
                     }
                     LabeledContent("当前账号", value: accountStore.current.displayName)
                     LabeledContent("存储盘", value: selectedVolumeName)
+
+                    if !accountStore.current.isLocalOnly {
+                        Button {
+                            Task { await refreshConnection() }
+                        } label: {
+                            Label(
+                                isRefreshingConnection ? "正在刷新连接信息…" : "刷新连接信息",
+                                systemImage: "arrow.clockwise"
+                            )
+                        }
+                        .disabled(isRefreshingConnection)
+
+                        if let connectionRefreshError {
+                            Label(connectionRefreshError, systemImage: "exclamationmark.triangle.fill")
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
+                    }
 
                     Button {
                         isConnectionPresented = true
@@ -224,6 +244,25 @@ struct SettingsView: View {
             } catch {
                 return
             }
+        }
+    }
+
+    private func refreshConnection() async {
+        guard let serverURL = accountStore.current.serverURL else { return }
+
+        isRefreshingConnection = true
+        connectionRefreshError = nil
+        defer { isRefreshingConnection = false }
+
+        do {
+            let result = try await connectionService.connect(
+                address: serverURL.absoluteString,
+                expectedServerID: accountStore.current.serverID
+            )
+            accountStore.saveConnectedAccount(result.account)
+        } catch {
+            connectionRefreshError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
         }
     }
 }

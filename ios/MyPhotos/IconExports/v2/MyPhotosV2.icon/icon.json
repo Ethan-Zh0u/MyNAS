@@ -1,0 +1,45 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "01-background.svg",
+          "name" : "01-background"
+        },
+        {
+          "image-name" : "02-halo.svg",
+          "name" : "02-halo"
+        },
+        {
+          "image-name" : "03-cloud.svg",
+          "name" : "03-cloud"
+        },
+        {
+          "image-name" : "04-photo-mark.svg",
+          "name" : "04-photo-mark"
+        },
+        {
+          "image-name" : "05-sparkle.svg",
+          "name" : "05-sparkle"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

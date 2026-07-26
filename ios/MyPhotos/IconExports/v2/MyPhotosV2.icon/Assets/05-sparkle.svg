@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- MyPhotos icon · Layer 5: Sparkle — one small restrained 4-point star (intelligent organization) -->
+  <defs>
+    <linearGradient id="sparkGrad" x1="708" y1="172" x2="708" y2="356" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#CDE4FF"/>
+    </linearGradient>
+    <filter id="blur20" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="20"/></filter>
+  </defs>
+  <circle cx="708" cy="264" r="72" fill="#BFE0FF" opacity="0.16" filter="url(#blur20)"/>
+  <path fill="url(#sparkGrad)" opacity="0.96"
+        d="M708 172 C718 244 736 256 800 264 C736 272 718 284 708 356 C698 284 680 272 616 264 C680 256 698 244 708 172 Z"/>
+</svg>

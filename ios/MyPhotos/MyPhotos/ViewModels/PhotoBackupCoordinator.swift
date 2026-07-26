@@ -135,10 +135,10 @@ final class PhotoBackupCoordinator: ObservableObject {
     /// Produces deletion candidates only for current, integrity-verified
     /// source versions. The MyNAS endpoint still repeats every check because
     /// the local job store can be stale while the user is viewing the sheet.
-    func trashCandidates(
+    func deletionCandidates(
         for assets: [LocalPhotoAsset],
         accountID: String
-    ) -> [PhotoBackupTrashCandidate] {
+    ) -> [PhotoBackupDeletionCandidate] {
         assets.compactMap { asset in
             guard let job = jobs.first(where: {
                 $0.accountID == accountID && $0.localIdentifier == asset.localIdentifier
@@ -151,7 +151,7 @@ final class PhotoBackupCoordinator: ObservableObject {
             let modificationDate = asset.modificationDate else {
                 return nil
             }
-            return PhotoBackupTrashCandidate(
+            return PhotoBackupDeletionCandidate(
                 assetID: assetID,
                 deviceID: deviceID,
                 localIdentifier: asset.localIdentifier,

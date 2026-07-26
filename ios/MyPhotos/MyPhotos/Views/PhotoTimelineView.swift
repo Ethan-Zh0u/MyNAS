@@ -101,11 +101,11 @@ struct PhotoTimelineView: View {
             PhotoDeletionConfirmationSheet(
                 request: request,
                 isDeleting: isDeleting,
-                confirm: { alsoMoveMyNASBackups in
+                confirm: { alsoDeleteMyNASBackups in
                     Task {
                         await delete(
                             request: request,
-                            alsoMoveMyNASBackups: alsoMoveMyNASBackups
+                            alsoDeleteMyNASBackups: alsoDeleteMyNASBackups
                         )
                     }
                 }
@@ -330,54 +330,24 @@ struct PhotoTimelineView: View {
         guard !assets.isEmpty else { return }
         deletionRequest = PhotoDeletionRequest(
             assets: assets,
-            backupCandidates: backupCoordinator.trashCandidates(
+            backupCandidates: backupCoordinator.deletionCandidates(
                 for: assets,
                 accountID: accountStore.current.accountID
             ),
             isConnectedToMyNAS: !accountStore.current.isLocalOnly,
-            isMyNASTrashAvailable: accountStore.current.serverCapabilities.supportsPhotoTrash == true
+            isMyNASDeletionAvailable: accountStore.current.serverCapabilities.supportsPhotoDeletion == true
         )
     }
 
     private func delete(
         request: PhotoDeletionRequest,
-        alsoMoveMyNASBackups: Bool
+        alsoDeleteMyNASBackups: Bool
     ) async {
         isDeleting = true
         defer { isDeleting = false }
         let localIdentifiers = request.assets.map(\.localIdentifier)
-        var movedBackups = false
-
         do {
-            if alsoMoveMyNASBackups {
-                guard request.canAlsoMoveMyNASBackups else {
-                    throw PhotoDeletionFlowError.backupVerificationUnavailable
-                }
-                _ = try await unifiedTimeline.remoteClient.moveBackupsToTrash(
-                    candidates: request.backupCandidates,
-                    account: accountStore.current
-                )
-                movedBackups = true
-            }
-
-            do {
-                try await viewModel.imageClient.deleteAssets(localIdentifiers: localIdentifiers)
-            } catch {
-                if movedBackups {
-                    do {
-                        _ = try await unifiedTimeline.remoteClient.restoreBackups(
-                            assetIDs: request.backupCandidates.map(\.assetID),
-                            account: accountStore.current
-                        )
-                        throw PhotoDeletionFlowError.localDeletionRejectedAndMyNASRestored
-                    } catch let flowError as PhotoDeletionFlowError {
-                        throw flowError
-                    } catch {
-                        throw PhotoDeletionFlowError.localDeletionRejectedRecoveryNeeded
-                    }
-                }
-                throw error
-            }
+            try await viewModel.imageClient.deleteAssets(localIdentifiers: localIdentifiers)
 
             selectedIDs.subtract(localIdentifiers)
             selectionMode = false
@@ -388,8 +358,22 @@ struct PhotoTimelineView: View {
                 jobs: backupCoordinator.jobs,
                 accountID: accountStore.current.accountID
             )
-            if movedBackups {
+            guard alsoDeleteMyNASBackups else { return }
+            guard request.canAlsoDeleteMyNASBackups else {
+                deletionErrorMessage = PhotoDeletionFlowError.backupVerificationUnavailable.errorDescription
+                return
+            }
+
+            do {
+                _ = try await unifiedTimeline.remoteClient.deleteBackups(
+                    candidates: request.backupCandidates,
+                    account: accountStore.current
+                )
                 await unifiedTimeline.refreshRemote(account: accountStore.current)
+            } catch {
+                deletionErrorMessage = PhotoDeletionFlowError.localDeletionSucceededMyNASDeletionFailed(
+                    error.localizedDescription
+                ).errorDescription
             }
         } catch {
             deletionRequest = nil
@@ -447,17 +431,14 @@ struct PhotoTimelineView: View {
 
 private enum PhotoDeletionFlowError: LocalizedError {
     case backupVerificationUnavailable
-    case localDeletionRejectedAndMyNASRestored
-    case localDeletionRejectedRecoveryNeeded
+    case localDeletionSucceededMyNASDeletionFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .backupVerificationUnavailable:
             "选择中的项目没有当前、完整且已验证的 MyNAS 备份，因此没有删除 MyNAS 数据。"
-        case .localDeletionRejectedAndMyNASRestored:
-            "iPhone 没有确认删除；刚才移入 MyNAS 回收站的备份已自动恢复。"
-        case .localDeletionRejectedRecoveryNeeded:
-            "iPhone 没有确认删除，且网络中断导致无法确认 MyNAS 回收站是否已恢复。本机照片仍保留；请先不要重试同步删除。"
+        case .localDeletionSucceededMyNASDeletionFailed(let reason):
+            "本机项目已移入 iPhone“最近删除”，但 MyNAS 备份未删除：\(reason)"
         }
     }
 }
