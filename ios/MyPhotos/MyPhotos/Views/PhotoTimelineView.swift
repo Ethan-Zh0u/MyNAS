@@ -6,8 +6,10 @@ struct PhotoTimelineView: View {
     @ObservedObject var viewModel: LocalPhotoLibraryViewModel
     @ObservedObject var backupCoordinator: PhotoBackupCoordinator
     let showSearch: () -> Void
+    @StateObject private var unifiedTimeline = UnifiedPhotoTimelineViewModel()
     @State private var selectedIDs: Set<String> = []
     @State private var selectionMode = false
+    @AppStorage("photoTimelineShowsUnified") private var showsUnifiedTimeline = true
     @AppStorage("photoGridColumnCount") private var columnCount = 3
     @State private var pinchStartColumnCount: Int?
 
@@ -27,6 +29,10 @@ struct PhotoTimelineView: View {
         return CGSize(width: edge, height: edge)
     }
 
+    private var usesUnifiedTimeline: Bool {
+        !accountStore.current.isLocalOnly && showsUnifiedTimeline && !selectionMode
+    }
+
     private var completedBackupIdentifiers: Set<String> {
         Set(
             backupCoordinator.jobs
@@ -36,6 +42,13 @@ struct PhotoTimelineView: View {
                         && $0.status == .completed
                 }
                 .map(\.localIdentifier)
+        )
+    }
+
+    private var localTimelineSections: [PhotoTimelineYearSection<LocalPhotoAsset>] {
+        PhotoTimelineYearSection.make(
+            items: viewModel.assets,
+            date: { $0.creationDate }
         )
     }
 
@@ -55,7 +68,7 @@ struct PhotoTimelineView: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if viewModel.authorization.canReadLibrary {
+                    if viewModel.authorization.canReadLibrary && !usesUnifiedTimeline {
                         Button(selectionMode ? "取消" : "选择") {
                             withAnimation(.snappy) {
                                 selectionMode.toggle()
@@ -71,6 +84,42 @@ struct PhotoTimelineView: View {
                     }
                     .accessibilityLabel("搜索照片")
                 }
+            }
+        }
+        .task(id: accountStore.current.accountID) {
+            unifiedTimeline.synchronizeLocal(
+                assets: viewModel.assets,
+                jobs: backupCoordinator.jobs,
+                accountID: accountStore.current.accountID
+            )
+            guard usesUnifiedTimeline else { return }
+            await unifiedTimeline.refreshRemote(account: accountStore.current)
+        }
+        .onChange(of: viewModel.assets) { _, assets in
+            unifiedTimeline.synchronizeLocal(
+                assets: assets,
+                jobs: backupCoordinator.jobs,
+                accountID: accountStore.current.accountID
+            )
+        }
+        .onChange(of: backupCoordinator.jobs) { _, jobs in
+            unifiedTimeline.synchronizeLocal(
+                assets: viewModel.assets,
+                jobs: jobs,
+                accountID: accountStore.current.accountID
+            )
+        }
+        .onChange(of: showsUnifiedTimeline) { _, shouldShowUnified in
+            guard shouldShowUnified, !accountStore.current.isLocalOnly else { return }
+            selectionMode = false
+            selectedIDs.removeAll()
+            Task {
+                unifiedTimeline.synchronizeLocal(
+                    assets: viewModel.assets,
+                    jobs: backupCoordinator.jobs,
+                    accountID: accountStore.current.accountID
+                )
+                await unifiedTimeline.refreshRemote(account: accountStore.current)
             }
         }
     }
@@ -90,7 +139,7 @@ struct PhotoTimelineView: View {
             ContentUnavailableView("无法读取照片库", systemImage: "exclamationmark.triangle", description: Text(message))
         default:
             ScrollView {
-                LazyVStack(spacing: 12, pinnedViews: [.sectionHeaders]) {
+                LazyVStack(spacing: 12) {
                     NavigationLink {
                         PhotoBackupView(
                             coordinator: backupCoordinator,
@@ -112,6 +161,13 @@ struct PhotoTimelineView: View {
                     .padding(.top, 2)
 
                     if !accountStore.current.isLocalOnly {
+                        Picker("显示范围", selection: $showsUnifiedTimeline) {
+                            Text("全部").tag(true)
+                            Text("本机").tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal, 10)
+
                         NavigationLink {
                             RemotePhotoLibraryView(account: accountStore.current)
                         } label: {
@@ -128,27 +184,51 @@ struct PhotoTimelineView: View {
                             .padding(.horizontal)
                     }
 
-                    LazyVGrid(columns: columns, spacing: gridSpacing) {
-                        ForEach(viewModel.assets) { asset in
+                    if usesUnifiedTimeline {
+                        UnifiedPhotoTimelineView(
+                            viewModel: unifiedTimeline,
+                            account: accountStore.current,
+                            localClient: viewModel.imageClient,
+                            columns: columns,
+                            thumbnailTargetSize: thumbnailTargetSize
+                        )
+                    } else {
+                        PhotoTimelineYearGroupedGrid(
+                            sections: localTimelineSections,
+                            columns: columns,
+                            spacing: gridSpacing,
+                            date: { $0.creationDate },
+                            lastItemID: viewModel.assets.last?.id,
+                            onLastItemAppear: {
+                                Task { await viewModel.loadNextPage() }
+                            }
+                        ) { asset in
                             gridItem(for: asset)
-                                .onAppear {
-                                    if asset.id == viewModel.assets.last?.id {
-                                        Task { await viewModel.loadNextPage() }
-                                    }
-                                }
                         }
                     }
-                    .padding(.horizontal, gridSpacing)
 
-                    if viewModel.isLoadingNextPage {
+                    if !usesUnifiedTimeline && viewModel.isLoadingNextPage {
                         ProgressView()
                             .padding(.vertical, 20)
                     }
                 }
             }
-            .refreshable { await viewModel.refresh() }
+            .refreshable {
+                await viewModel.refresh()
+                unifiedTimeline.synchronizeLocal(
+                    assets: viewModel.assets,
+                    jobs: backupCoordinator.jobs,
+                    accountID: accountStore.current.accountID
+                )
+                if usesUnifiedTimeline {
+                    await unifiedTimeline.refreshRemote(account: accountStore.current)
+                }
+            }
             .simultaneousGesture(gridMagnificationGesture, including: .gesture)
             .sensoryFeedback(.selection, trigger: columnCount)
+            .overlayPreferenceValue(PhotoTimelineDateAnchorPreferenceKey.self) { anchors in
+                PhotoTimelineVisibleDateOverlay(anchors: anchors)
+            }
             .onChange(of: viewModel.assets.map(\.id)) { _, _ in
                 prefetchVisibleDensity()
             }
@@ -269,7 +349,7 @@ private struct RemoteLibraryEntryRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("浏览 MyNAS 图库")
                     .font(.subheadline.weight(.semibold))
-                Text("\(serverName) · 独立远端视图，不与本地照片混合")
+                Text("\(serverName) · 查看 MyNAS 的原始远端视图与媒体资源")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -415,7 +495,7 @@ private extension View {
     }
 }
 
-private struct PhotoGridCell: View {
+struct PhotoGridCell: View {
     let asset: LocalPhotoAsset
     let isBackedUp: Bool
     let isSelected: Bool

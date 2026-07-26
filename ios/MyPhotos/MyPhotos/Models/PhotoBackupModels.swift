@@ -203,7 +203,7 @@ enum PhotoDerivativeState: String, Codable, Sendable {
     case failed
 }
 
-struct PhotoBackupJob: Identifiable, Codable, Sendable {
+struct PhotoBackupJob: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     let accountID: String
     let localIdentifier: String
@@ -230,6 +230,22 @@ struct PhotoBackupJob: Identifiable, Codable, Sendable {
             return status == .completed ? 1 : 0
         }
         return min(1, max(0, Double(uploadedBytes) / Double(totalBytes)))
+    }
+}
+
+/// The backend stores a source version as the exact timestamp string sent at
+/// upload time. Comparing via this formatter avoids treating different
+/// sub-millisecond Date representations as the same source version.
+nonisolated enum PhotoBackupSourceVersion {
+    static func string(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    static func matches(serverValue: String?, localDate: Date?) -> Bool {
+        guard let serverValue, let localDate else { return false }
+        return serverValue == string(from: localDate)
     }
 }
 

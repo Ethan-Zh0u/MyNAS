@@ -136,6 +136,65 @@ actor RemotePhotoLibraryClient {
         }
     }
 
+    /// Fetches only server-confirmed mappings for this account and this iPhone.
+    /// It never infers relationships from filenames, capture dates, thumbnails,
+    /// or fingerprints.
+    func fetchDeviceAssetMappings(
+        account: AccountContext,
+        deviceID: String
+    ) async throws -> [ServerDeviceAssetMapping] {
+        guard let baseURL = account.serverURL else {
+            throw RemotePhotoLibraryError.notConnected
+        }
+        // Older persisted accounts do not have this capability field. Probe
+        // them once as well: a 404 safely falls back to normal backup, while a
+        // newly upgraded MyNAS works without requiring the user to reconnect.
+        guard account.serverCapabilities.supportsDeviceAssetMappingRecovery != false else {
+            throw RemotePhotoLibraryError.featureUnavailable
+        }
+        let normalizedDeviceID = deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedDeviceID.isEmpty, normalizedDeviceID.count <= 200 else {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+
+        var mappings: [ServerDeviceAssetMapping] = []
+        var cursor: String?
+        var seenCursors = Set<String>()
+        repeat {
+            let requestURL = try deviceAssetMappingPageURL(
+                baseURL: baseURL,
+                deviceID: normalizedDeviceID,
+                cursor: cursor,
+                limit: 200
+            )
+            var request = URLRequest(url: requestURL)
+            request.httpMethod = "GET"
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+            let (data, response) = try await session.data(for: request)
+            let httpResponse = try validatedHTTPResponse(response, data: data)
+            guard httpResponse.statusCode == 200 else {
+                throw error(for: httpResponse.statusCode)
+            }
+            let page: ServerDeviceAssetMappingPage
+            do {
+                page = try decoder.decode(ServerDeviceAssetMappingPage.self, from: data)
+            } catch {
+                throw RemotePhotoLibraryError.invalidResponse
+            }
+            mappings.append(contentsOf: page.mappings)
+            guard page.hasMore else { break }
+            guard let nextCursor = page.nextCursor,
+                  !nextCursor.isEmpty,
+                  seenCursors.insert(nextCursor).inserted else {
+                throw RemotePhotoLibraryError.invalidResponse
+            }
+            cursor = nextCursor
+        } while true
+
+        return mappings
+    }
+
     func image(
         for asset: ServerPhotoAsset,
         kind: String,
@@ -236,6 +295,45 @@ actor RemotePhotoLibraryClient {
                 : RemotePhotoLibraryError.invalidResource
         }
         return try resolvedDownloadURL(resource.downloadURL, relativeTo: baseURL)
+    }
+
+    /// Reads only the byte range requested by AVFoundation. Keeping this inside
+    /// the actor makes video playback use the same Tailscale-safe URLSession as
+    /// the metadata and derivative clients.
+    func streamingData(
+        for resource: ServerPhotoResource,
+        in asset: ServerPhotoAsset,
+        account: AccountContext,
+        offset: Int64,
+        length: Int64
+    ) async throws -> RemotePhotoStreamResult {
+        let downloadURL = try streamingURL(
+            for: resource,
+            in: asset,
+            account: account
+        )
+        let safeOffset = max(offset, 0)
+        let safeLength = max(length, 1)
+        var request = URLRequest(url: downloadURL)
+        request.httpMethod = "GET"
+        request.setValue("video/*", forHTTPHeaderField: "Accept")
+        request.setValue(
+            "bytes=\(safeOffset)-\(safeOffset + safeLength - 1)",
+            forHTTPHeaderField: "Range"
+        )
+
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try validatedHTTPResponse(response, data: data)
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw error(for: httpResponse.statusCode)
+        }
+        return RemotePhotoStreamResult(
+            data: data,
+            contentType: httpResponse.value(forHTTPHeaderField: "Content-Type"),
+            contentLength: Self.contentLength(from: httpResponse, fallback: data.count),
+            supportsByteRanges: httpResponse.statusCode == 206
+                || httpResponse.value(forHTTPHeaderField: "Accept-Ranges")?.lowercased() == "bytes"
+        )
     }
 
     /// Advances the account-isolated `/changes` cursor. On first use it drains
@@ -342,6 +440,30 @@ actor RemotePhotoLibraryClient {
             throw RemotePhotoLibraryError.invalidServerURL
         }
         var queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        if let cursor, !cursor.isEmpty {
+            queryItems.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        components.queryItems = queryItems
+        guard let url = components.url else {
+            throw RemotePhotoLibraryError.invalidServerURL
+        }
+        return url
+    }
+
+    private func deviceAssetMappingPageURL(
+        baseURL: URL,
+        deviceID: String,
+        cursor: String?,
+        limit: Int
+    ) throws -> URL {
+        let endpoint = baseURL.appending(path: "api/v1/photos/device-asset-mappings")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw RemotePhotoLibraryError.invalidServerURL
+        }
+        var queryItems = [
+            URLQueryItem(name: "deviceID", value: deviceID),
+            URLQueryItem(name: "limit", value: String(limit))
+        ]
         if let cursor, !cursor.isEmpty {
             queryItems.append(URLQueryItem(name: "cursor", value: cursor))
         }
@@ -467,6 +589,21 @@ actor RemotePhotoLibraryClient {
 
     private static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func contentLength(
+        from response: HTTPURLResponse,
+        fallback: Int
+    ) -> Int64 {
+        if let contentRange = response.value(forHTTPHeaderField: "Content-Range"),
+           let total = contentRange.split(separator: "/").last,
+           let byteCount = Int64(total) {
+            return byteCount
+        }
+        if response.expectedContentLength > 0 {
+            return response.expectedContentLength
+        }
+        return Int64(fallback)
     }
 
     private static func canUseOfflineCache(after error: Error) -> Bool {

@@ -49,6 +49,8 @@ nonisolated struct ServerCapabilities: Codable, Hashable, Sendable {
     /// Optional so accounts persisted by MyNAS Photos 1.0 remain decodable.
     var supportsRemoteBrowsing: Bool?
     var supportsChangeFeed: Bool?
+    /// Optional keeps accounts saved by older app versions decodable and safe.
+    var supportsDeviceAssetMappingRecovery: Bool?
     var backupStateModelVersion: Int?
     var derivativePolicyVersion: String?
     var availableDerivativeRecipes: [String]?
@@ -60,6 +62,7 @@ nonisolated struct ServerCapabilities: Codable, Hashable, Sendable {
         supportsLivePhotos: false,
         supportsRemoteBrowsing: false,
         supportsChangeFeed: false,
+        supportsDeviceAssetMappingRecovery: false,
         backupStateModelVersion: nil,
         derivativePolicyVersion: nil,
         availableDerivativeRecipes: nil

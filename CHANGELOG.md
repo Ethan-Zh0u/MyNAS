@@ -4,6 +4,22 @@
 
 ## 未发布
 
+## [0.8.2] - 2026-07-27
+
+### 新增
+
+- MyNAS Photos 新增受 owner 与 device ID 双重隔离的已验证 asset 映射读取接口。iOS 在普通卸载重装后可用持久设备标识恢复本机 PhotoKit 项目的备份关联，不必重新上传原件。
+
+### 安全
+
+- 映射接口仅返回恢复所需的 local identifier、asset ID、源版本和已确认状态；不返回内容 fingerprint、媒体路径或其他设备、账号的记录。iOS 仅在本地 PhotoKit 源版本严格匹配服务器记录时恢复完成状态，其余项目继续走正常备份队列。
+
+### 验证
+
+- 发布前创建 `pre-f2-mapping-20260727T012037Z` SQLite 一致性快照，`PRAGMA integrity_check` 为 `ok`；SHA-256 清单记录 48 个原始资源和 141 个衍生文件。
+- 标准发布门禁通过：前端 23/23 测试、TypeScript/生产构建、后端 `go test ./...` 与 `go vet ./...`；ARM64 版本已原子切换至 `0.8.2`。
+- 已部署服务的 capabilities 返回 `deviceAssetMappingRecovery=true`；以独立部署检查身份查询不存在的设备 ID 返回空分页结果，服务保持 active。
+
 ## [0.8.1] - 2026-07-24
 
 ### 修复

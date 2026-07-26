@@ -6,11 +6,11 @@
 
 | 项目 | 已核查事实 | 证据 |
 | --- | --- | --- |
-| 版本 | E3 ProRAW fallback 修正版的 MyNAS 后端声明和仓库 `VERSION` 均为 `0.8.1`；iOS target 的 `MARKETING_VERSION` 为 `1.0`。 | `backend/photos_phase2.go`、`VERSION`、`ios/MyPhotos/MyPhotos.xcodeproj/project.pbxproj` |
+| 版本 | F2 同设备映射恢复版的 MyNAS 后端声明和仓库 `VERSION` 均为 `0.8.2`；iOS target 的 `MARKETING_VERSION` 为 `1.0`。 | `backend/photos_phase2.go`、`VERSION`、`ios/MyPhotos/MyPhotos.xcodeproj/project.pbxproj` |
 | 代码状态 | E3/ProRAW、既有 iOS 功能和文档改动仍在工作区；LaunchScreen 资源另有用户已暂存改动。不得覆盖或擅自提交这些改动。 | `git status --short` |
 | 后端测试 | 除握手、上传和 E1/E2 worker 测试外，E3 已覆盖 owner 隔离、分页、changes、ETag/304、Range/206、路径不泄露和正确的 CORS 分片 hash header；`go test -race ./...`、`go vet ./...` 通过。 | `backend/photos_browse_test.go` 及既有 Photos 测试；本轮命令记录 |
-| iOS 验证 | 项目没有可发现的 iOS 单元测试 target；E4 首个只读远端图库切片已使用 Xcode 27 beta 对 iPhone 17 Pro 模拟器构建、安装并连接真实 MyNAS，读取 45 项远端资产、45 张网格图及详情 preview。另有 iPhone 16 Pro 人工验证及真实端到端上传与大视频续传记录。 | Xcode 工程、本轮构建/模拟器验收、账号隔离缓存及用户提供的部署/验收记录 |
-| 已部署能力 | 树莓派 MyNAS `0.8.1` 已于 2026-07-24 部署；Tailscale HTTPS health 返回实时 CPU 温度，capabilities 返回状态模型 v1、`photos-browse-v1`、remote browsing/change feed 和三项 derivative recipe。45 个 asset、46 个原始资源和 135 个派生文件全部 ready。 | 真实部署健康检查、数据库状态、原件清单和 E3 验收脚本 |
+| iOS 验证 | 项目没有可发现的 iOS 单元测试 target；E4 首个只读远端图库切片已使用 Xcode 27 beta 对 iPhone 17 Pro 模拟器构建、安装并连接真实 MyNAS。2026-07-26 的真实增量回归从 45 项测试库连续备份到 47 项：本地与远端均显示 47 项，前台图库显示更新提示，后续重新加载才更新分页网格。另有 iPhone 16 Pro 人工验证及真实端到端上传与大视频续传记录。 | Xcode 工程、本轮构建/模拟器验收、账号隔离缓存及用户提供的部署/验收记录 |
+| 已部署能力 | 树莓派 MyNAS `0.8.2` 已于 2026-07-27 原子部署；Tailscale HTTPS health 返回实时 CPU 温度，capabilities 返回状态模型 v1、`photos-browse-v1`、remote browsing/change feed、device mapping recovery 和三项 derivative recipe。发布前快照的 SQLite 为 `ok`，且有 48 个原始资源、141 个派生文件 SHA-256 清单。 | 真实部署健康检查、数据库状态、F2 快照和 API 验收 |
 | E1–E3 状态 | 状态模型、持久化任务、FFmpeg/LibRaw 衍生 worker、owner-scoped assets/changes/detail、ETag/304、Range/206 和路径隔离已经部署。46/46 原件 SHA-256 与 pre-E3 快照清单一致；真实 Live Photo 保留 `photo + pairedVideo`，IMG_4074.DNG 原件 SHA-256 不变并成功生成 tiny/grid/preview。 | 后端 Photos 文件及测试、0.8.1 真实部署验收记录 |
 
 ### 术语与状态约束（先于所有阶段）
@@ -33,8 +33,8 @@
 | B | 本地图库与应用外壳 | 已完成 | 补足可访问性/真机回归自动化 |
 | C | 私有 MyNAS 连接、配对与账号隔离 | 已完成 | 持续在真实 tailnet 回归 |
 | D | 手动原始资源备份（安全入库） | 已完成（首版） | 做崩溃一致性硬化；不能视为可浏览备份 |
-| E | 衍生文件、远程图库与可浏览备份 | 进行中（E1–E4 首个 iOS 只读切片已验收） | 补齐远端视频/Live Photo 播放、原件读取与 changes 增量刷新 |
-| F | 本地/远程统一时间线与去重 | 未开始 | 依赖 E 的远端索引和版本模型 |
+| E | 衍生文件、远程图库与可浏览备份 | 已完成（E1–E4） | 在阶段 F 保持远端分页与资源组语义，不提前混入本地 `PHAsset` |
+| F | 本地/远程统一时间线与去重 | 进行中（F1：可信映射的只读统一网格） | 补足跨设备去重、映射恢复与版本关系 |
 | G | 后台自动备份 | 未开始 | 依赖 D 的稳定恢复语义及 iOS 后台策略 |
 | H | 恢复、导出、删除与缓存管理 | 未开始 | 依赖 E；删除还依赖完整可浏览备份 |
 | I | 端侧 AI 搜索、人物/物体分类 | 未开始 | 依赖受控本地索引和隐私设计 |
@@ -94,13 +94,13 @@
 
 - **阶段目标：** 为安全入库的原件生成受版本约束的 tiny/grid/preview，并提供 owner-scoped 远程列表、资源读取和变更同步。
 - **用户可见成果：** 用户能从 MyNAS 浏览照片、缩略图、预览、视频 Range 播放和 Live Photo；仅在所需衍生文件可用时，界面显示“完整可浏览备份”。
-- **iOS 端改动：** E4 已新增 `ServerPhotoAsset`、分页/ETag 客户端、SHA-256 校验的账号隔离 grid/preview 缓存、独立只读远端方形网格、捏合 2–10 列、Live Photo/RAW/视频标记、派生处理中 UI 和详情 preview；尚需补齐视频 Range/Live Photo 播放、原件读取及 changes 增量刷新。不把失败的 preview 伪装成原件或成功备份。
+- **iOS 端改动：** E4 已新增 `ServerPhotoAsset`、分页/ETag 客户端、SHA-256 校验的账号隔离 grid/preview 缓存、独立只读远端方形网格、捏合 2–10 列、Live Photo/RAW/视频标记、派生处理中 UI 和详情 preview；视频及 Live Photo paired video 使用 AVFoundation 按 Range 播放，`MyNASMediaResourceLoader` 经 `RemotePhotoLibraryClient` 的无代理会话读取私有 Tailscale 流；详情只读展示全部原件资源，前台 `/changes` cursor 建立基线并提示更新。原件导出/下载、缓存 LRU 和 Live Photo 真实媒体回归仍待完成；不把失败的 preview 伪装成原件或成功备份。
 - **MyNAS 后端改动：** E2 已部署 durable derivative queue、单线程幂等 worker、recipe/version、失败退避和重启恢复；普通媒体由 FFmpeg 处理，DNG/ProRAW 通过 `simple_dcraw` 提取内嵌全尺寸 JPEG 后再生成衍生文件；E3 已部署资源授权、`assets`/`changes`、ETag 和受控 Range 下载。
 - **数据模型/API 变化：** E1 已为 asset 加入 `source_state`、`derivative_state`、recipe/version/error/updated_at，并新增 `photo_derivatives` 与 `photo_derivative_jobs`；E3 新增 `photo_changes` 及 `GET /photos/assets`、`/changes`、`/assets/{id}`、`/{tiny|grid|preview|original}`。FFmpeg processor 可用时发布三项 recipe，工具缺失时仍保持空数组。
 - **前置依赖：** 阶段 D；明确每种媒体的 required derivative policy 和低资源树莓派转码预算。
 - **验收标准和测试方法：** 新上传及重启后重建任务；校验 owner 越权为 404/403、不泄露路径；ETag/条件请求、分页/cursor 过期、Range、Live Photo 配对展示；任何 required derivative 缺失时，状态必须不是“完整可浏览备份”。
 - **明确不包含：** 本地/远端合并时间线、后台自动扫描、删除工作流、AI。
-- **状态与证据：** **进行中。E1–E3 服务端已部署；E4 的只读远端网格、preview 和账号隔离缓存已完成首个 iOS 切片。** iPhone 17 Pro 模拟器通过真实 Tailscale/MyNAS 读取 45/45 browse-ready asset（含 1 个 Live Photo、1 个 DNG），缓存 45 张 grid 和 1 张 preview；元数据缓存保存服务器 ETag，目录为实际 server/user namespace。远端网格不显示重复的绿色“已备份”角标，仅非 ready 项显示处理中状态。尚未完成远端视频/Live Photo 播放、original 读取 UI 和 changes 增量刷新，因此阶段 E 仍未完成。0.8.1 数据库为 45/45 asset ready、46 个原始资源、135 个衍生文件、SQLite integrity `ok`；pre-E3 清单 46/46 SHA-256 通过。服务端真实验收覆盖 45 项/5 页、46 条 changes、ETag/304、Range/206、owner 隔离、路径不泄露、Live Photo 双资源，以及 91,483,916 字节 IMG_4074.DNG 的原件哈希和三档衍生图。自动化 `go test ./...`、`go test -race ./...`、`go vet ./...` 通过。
+- **状态与证据：** **已完成（E1–E4）。** iPhone 17 Pro 模拟器通过真实 Tailscale/MyNAS 读取初始 45/45 browse-ready asset（含 1 个 Live Photo、1 个 DNG），缓存 45 张 grid 和 1 张 preview；元数据缓存保存服务器 ETag，目录为实际 server/user namespace。远端网格不显示重复的绿色“已备份”角标，仅非 ready 项显示处理中状态。2026-07-25 部署前生成 `pre-e4-mime-20260725T155837Z` 快照（SQLite `ok`、46 原件、135 衍生清单），随后原子部署 0.8.1 热修复；相同 MOV 的 Range 响应为 `206 + video/quicktime`，iPhone 17 Pro 模拟器成功渲染 12.8 MB MOV 的真实首帧；真实 Live Photo 的 HEIC 预览与 paired MOV 均成功渲染。最终启动创建 cursor `91`，对 `/changes` 的同 ETag 条件请求返回 `304`，验证历史变更不会被首次基线误报。2026-07-26 在模拟器新增两张独立测试 PNG；前台自动备份后，本地与远端图库从 45 连续达到 47 项。第二次增量发生时远端列表保留既有分页、状态卡显示蓝色更新提示；随后重新加载后读取 47 项，证明更新不会令网格跳动。原件导出/下载与缓存 LRU 属于阶段 H。服务端真实验收覆盖 45 项/5 页、46 条 changes、ETag/304、Range/206、owner 隔离、路径不泄露、Live Photo 双资源，以及 91,483,916 字节 IMG_4074.DNG 的原件哈希和三档衍生图。自动化 `go test ./...`、`go test -race ./...`、`go vet ./...` 通过。
 
 ## 阶段 F — 本地与远程统一时间线及去重
 
@@ -112,7 +112,7 @@
 - **前置依赖：** 阶段 E 的远端索引、可读取的版本和明确的 merge policy。
 - **验收标准和测试方法：** 同设备重复、不同设备相同内容、相似时间但不同照片、编辑后版本和 Live Photo 组的测试；离线/分页/过期 cursor 回归。
 - **明确不包含：** 自动上传调度、删除、AI 自动聚类。
-- **状态与证据：** **未开始。** iOS 已有独立的 `LocalPhotoAsset` 本地时间线和 `ServerPhotoAsset` 远端时间线，但有意保持两套列表分离；尚无统一排序、跨端映射合并或冲突策略。
+- **状态与证据：** **进行中（F2）。** `UnifiedPhotoTimelineItem` 只在当前设备的持久化备份任务仍指向当前 `PHAsset` 源版本、且含服务器确认的 MyNAS asset ID 时合并本机与远端记录；绝不以拍摄时间、文件名或缩略图猜测为同一项目。`UnifiedPhotoTimelineViewModel` 以 120 项远端 cursor 页读取并在主照片页按拍摄时间排序，远端独有项目保留“仅 MyNAS”，本机项目明确显示等待、上传、失败、原件已安全入库或“已备份 · 可浏览”。F2 服务器在 0.8.2 新增 owner + device 双重隔离的映射分页接口；iOS 以 Keychain 保留随机设备 ID，仅在本地 `PHAsset` 的源版本与服务器 `sourceModificationDate` 严格相等、且 `sourceCommitted` 时恢复完成状态，不能匹配的项目仍走正常备份。已完成服务端 owner/device/分页/无 fingerprint 测试与真实 capabilities/空设备查询验收；iPhone 17 Pro 最新构建已通过，但此前模拟器 Photos 服务 `assetsd` 退出，待其恢复后仍需完成“普通卸载重装后恢复映射”的端到端回归。尚未完成跨设备内容指纹去重、编辑版本/Live Photo 组的跨端关系、基于统一 cursor 的整页稳定合并，以及专门的 F 自动化测试；删除与导出仍不在 F 范围。
 
 ## 阶段 G — 后台自动备份
 
@@ -162,10 +162,11 @@
 - **明确不包含：** 把本机和单块 NAS 宣称为唯一灾备；不承诺未演练的 RPO/RTO。
 - **状态与证据：** **部分完成。** 通用 MyNAS 已有健康检查、稳定卷 ID、离线状态和 SQLite 单连接以降低 `SQLITE_BUSY`；Photos 专用 migration version、灾备扫描、断电恢复和大规模基准尚未实现。
 
-## 下一步：E4 iOS 远端图库，并行补强大库弱网可恢复性
+## 下一步：完成 F1 的映射恢复与跨设备去重
 
-E3 的受控读取 API 已部署并通过真实树莓派验收。下一道门槛是 **让 iOS 以只读方式消费远端图库，同时先把大相册的失败恢复做成用户可理解、可重复执行的闭环**：
+阶段 E 已完成，F1 已提供不会误合并的只读时间线。下一道门槛是 **让可信映射在设备重装、跨设备备份和编辑版本出现时仍可解释、可恢复**：
 
-1. 在 iOS 增加 `ServerAsset`、远端分页客户端、账号隔离 metadata/thumbnail 缓存，以及 processing/failed/browse-ready 状态。
-2. 用数千项模拟数据和真实弱网继续测试 4 MiB offset 续传、App 重启、MyNAS 重启、网络切换及 Live Photo 多资源的部分失败；当前已完成失败分类和定向重试的 45 项功能验收，尚不能替代大规模压力测试。
-3. 远端网格验收稳定后，再进入阶段 F 的本地/远端统一时间线；后台自动备份仍留在阶段 G。
+1. 让 MyNAS 以 owner + device ID 受控返回当前设备的映射，供 iOS 在本地队列清空或 App 重装后恢复 `PHAsset` ↔ asset ID；不能泄露其他设备的 local identifier。
+2. 定义完整资源组内容指纹的查询/比对策略，先只提出“可能同内容”而非静默合并；同拍摄时间但不同照片必须继续分开。
+3. 为编辑版本和 Live Photo 静态图 + paired video 定义父子关系与冲突规则，统一页面必须显示关系而不能丢资源。
+4. 用本机独有、远端独有、同内容不同设备、相近时间不同内容、App 重装、编辑后版本及 Live Photo 组做真机/模拟器回归。删除、导出和后台自动备份仍分别留在 H、G 阶段。

@@ -223,7 +223,7 @@ private struct RemoteLibraryStatusCard: View {
     }
 }
 
-private struct RemotePhotoGridCell: View {
+struct RemotePhotoGridCell: View {
     let asset: ServerPhotoAsset
     let account: AccountContext
     let client: RemotePhotoLibraryClient
@@ -371,7 +371,7 @@ private struct RemotePhotoImageView: View {
     }
 }
 
-private struct RemotePhotoDetailView: View {
+struct RemotePhotoDetailView: View {
     let asset: ServerPhotoAsset
     let account: AccountContext
     let client: RemotePhotoLibraryClient
@@ -469,6 +469,7 @@ private struct RemoteVideoPreview: View {
     let account: AccountContext
     let client: RemotePhotoLibraryClient
     @State private var player: AVPlayer?
+    @State private var resourceLoader: MyNASMediaResourceLoader?
     @State private var didFail = false
 
     var body: some View {
@@ -497,13 +498,21 @@ private struct RemoteVideoPreview: View {
                     in: asset,
                     account: account
                 )
-                let urlAsset = AVURLAsset(url: url)
+                let loader = MyNASMediaResourceLoader(
+                    sourceURL: url,
+                    resource: resource,
+                    asset: asset,
+                    account: account,
+                    client: client
+                )
+                let urlAsset = try loader.makeAsset()
                 guard try await urlAsset.load(.isPlayable) else {
                     didFail = true
                     return
                 }
                 guard !Task.isCancelled else { return }
-                let newPlayer = AVPlayer(url: url)
+                resourceLoader = loader
+                let newPlayer = AVPlayer(playerItem: AVPlayerItem(asset: urlAsset))
                 player = newPlayer
                 newPlayer.play()
             } catch {
@@ -521,6 +530,7 @@ private struct RemoteLivePhotoPreview: View {
     let account: AccountContext
     let client: RemotePhotoLibraryClient
     @State private var player: AVPlayer?
+    @State private var resourceLoader: MyNASMediaResourceLoader?
     @State private var isPreparingPlayback = false
     @State private var didFail = false
 
@@ -574,12 +584,20 @@ private struct RemoteLivePhotoPreview: View {
                 in: asset,
                 account: account
             )
-            let urlAsset = AVURLAsset(url: url)
+            let loader = MyNASMediaResourceLoader(
+                sourceURL: url,
+                resource: resource,
+                asset: asset,
+                account: account,
+                client: client
+            )
+            let urlAsset = try loader.makeAsset()
             guard try await urlAsset.load(.isPlayable) else {
                 didFail = true
                 return
             }
-            let newPlayer = AVPlayer(url: url)
+            resourceLoader = loader
+            let newPlayer = AVPlayer(playerItem: AVPlayerItem(asset: urlAsset))
             player = newPlayer
             newPlayer.play()
         } catch {

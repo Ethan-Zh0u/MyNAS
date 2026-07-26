@@ -130,6 +130,26 @@ nonisolated struct ServerAssetPage: Codable, Hashable, Sendable {
     let hasMore: Bool
 }
 
+/// A narrow, owner- and device-scoped recovery record. It deliberately omits
+/// content fingerprints: it restores only the exact local identifier and
+/// source version MyNAS already verified for this device.
+nonisolated struct ServerDeviceAssetMapping: Codable, Hashable, Sendable {
+    let localIdentifier: String
+    let assetID: String
+    let sourceModificationDate: String?
+    let sourceState: String
+    let derivativeState: String
+    let resourceCount: Int
+    let sourceBytes: Int64
+    let updatedAt: String
+}
+
+nonisolated struct ServerDeviceAssetMappingPage: Codable, Hashable, Sendable {
+    let mappings: [ServerDeviceAssetMapping]
+    let nextCursor: String?
+    let hasMore: Bool
+}
+
 nonisolated struct RemotePhotoPageResult: Sendable {
     let page: ServerAssetPage
     let isUsingOfflineCache: Bool
@@ -138,6 +158,13 @@ nonisolated struct RemotePhotoPageResult: Sendable {
 nonisolated struct RemotePhotoImageResult: Sendable {
     let data: Data
     let isUsingOfflineCache: Bool
+}
+
+nonisolated struct RemotePhotoStreamResult: Sendable {
+    let data: Data
+    let contentType: String?
+    let contentLength: Int64
+    let supportsByteRanges: Bool
 }
 
 nonisolated struct ServerPhotoChange: Codable, Hashable, Sendable {

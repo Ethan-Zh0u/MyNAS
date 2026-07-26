@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Security
 
 @MainActor
 final class PhotoBackupCoordinator: ObservableObject {
@@ -8,10 +9,13 @@ final class PhotoBackupCoordinator: ObservableObject {
     @Published private(set) var headline = "尚未开始备份"
 
     private let uploader: PhotoBackupUploader
+    private let mappingClient: RemotePhotoLibraryClient
     private let persistence: PhotoBackupPersistenceStore
     private let deviceID: String
     private var runTask: Task<Void, Never>?
     private var automaticBackupRequests: [String: AutomaticBackupRequest] = [:]
+    private var mappingRecoveryTasks: [String: Task<Void, Never>] = [:]
+    private var recoveredMappingsByAccountID: [String: [ServerDeviceAssetMapping]] = [:]
 
     private struct AutomaticBackupRequest {
         let assets: [LocalPhotoAsset]
@@ -21,10 +25,12 @@ final class PhotoBackupCoordinator: ObservableObject {
 
     init(
         uploader: PhotoBackupUploader = PhotoBackupUploader(),
+        mappingClient: RemotePhotoLibraryClient = RemotePhotoLibraryClient(),
         persistence: PhotoBackupPersistenceStore = PhotoBackupPersistenceStore(),
         userDefaults: UserDefaults = .standard
     ) {
         self.uploader = uploader
+        self.mappingClient = mappingClient
         self.persistence = persistence
         self.deviceID = Self.persistentDeviceID(userDefaults: userDefaults)
         self.jobs = (try? persistence.load()) ?? []
@@ -33,6 +39,7 @@ final class PhotoBackupCoordinator: ObservableObject {
 
     deinit {
         runTask?.cancel()
+        mappingRecoveryTasks.values.forEach { $0.cancel() }
     }
 
     func jobs(for accountID: String) -> [PhotoBackupJob] {
@@ -117,11 +124,26 @@ final class PhotoBackupCoordinator: ObservableObject {
             account: account,
             client: client
         )
+        if shouldRecoverDeviceMappings(for: account) {
+            recoverDeviceMappingsIfNeeded(for: account)
+            return
+        }
+        let recoveredCount = restoreDeviceMappings(
+            for: assets,
+            account: account
+        )
         enqueue(
             assets: assets,
             accountID: account.accountID,
             retryFailed: false
         )
+        if recoveredCount > 0,
+           !jobs.contains(where: {
+               $0.accountID == account.accountID &&
+                   ($0.status == .waiting || $0.status == .preparing || $0.status == .uploading)
+           }) {
+            headline = "已从 MyNAS 验证记录恢复 \(recoveredCount) 项备份状态"
+        }
         startAutomaticBackupIfNeeded(accountID: account.accountID)
     }
 
@@ -131,6 +153,10 @@ final class PhotoBackupCoordinator: ObservableObject {
         client: PhotoLibraryClient
     ) {
         guard !isRunning else { return }
+        if mappingRecoveryTasks[account.accountID] != nil {
+            headline = "正在向 MyNAS 核验已有备份…"
+            return
+        }
         guard !account.isLocalOnly else {
             headline = "请先连接 MyNAS"
             return
@@ -153,7 +179,8 @@ final class PhotoBackupCoordinator: ObservableObject {
         client: PhotoLibraryClient
     ) {
         refreshHeadline(accountID: account.accountID)
-        guard !isRunning, !account.isLocalOnly else { return }
+        guard !isRunning, !account.isLocalOnly,
+              mappingRecoveryTasks[account.accountID] == nil else { return }
         let interrupted = jobs.contains {
             $0.accountID == account.accountID && ($0.status == .waiting || $0.status == .uploading || $0.status == .preparing)
         }
@@ -166,7 +193,7 @@ final class PhotoBackupCoordinator: ObservableObject {
         account: AccountContext,
         client: PhotoLibraryClient
     ) {
-        guard !isRunning else { return }
+        guard !isRunning, mappingRecoveryTasks[account.accountID] == nil else { return }
         let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) })
         var retryCount = 0
         for index in jobs.indices where
@@ -194,6 +221,142 @@ final class PhotoBackupCoordinator: ObservableObject {
         headline = "仅重试 \(retryCount) 个失败项目"
         persist()
         run(account: account, assets: assets, client: client)
+    }
+
+    private func shouldRecoverDeviceMappings(for account: AccountContext) -> Bool {
+        account.serverCapabilities.supportsDeviceAssetMappingRecovery != false &&
+            recoveredMappingsByAccountID[account.accountID] == nil &&
+            mappingRecoveryTasks[account.accountID] == nil
+    }
+
+    private func recoverDeviceMappingsIfNeeded(for account: AccountContext) {
+        guard mappingRecoveryTasks[account.accountID] == nil else { return }
+
+        let accountID = account.accountID
+        let client = mappingClient
+        let currentDeviceID = deviceID
+        mappingRecoveryTasks[accountID] = Task { [weak self, account, client, currentDeviceID] in
+            let mappings = (try? await client.fetchDeviceAssetMappings(
+                account: account,
+                deviceID: currentDeviceID
+            )) ?? []
+            guard !Task.isCancelled, let self else { return }
+            self.finishDeviceMappingRecovery(
+                mappings,
+                for: accountID
+            )
+        }
+    }
+
+    private func finishDeviceMappingRecovery(
+        _ mappings: [ServerDeviceAssetMapping],
+        for accountID: String
+    ) {
+        mappingRecoveryTasks[accountID] = nil
+        recoveredMappingsByAccountID[accountID] = mappings
+
+        guard let request = automaticBackupRequests[accountID] else { return }
+        let recoveredCount = restoreDeviceMappings(
+            for: request.assets,
+            account: request.account
+        )
+        enqueue(
+            assets: request.assets,
+            accountID: accountID,
+            retryFailed: false
+        )
+        if recoveredCount > 0,
+           !jobs.contains(where: {
+               $0.accountID == accountID &&
+                   ($0.status == .waiting || $0.status == .preparing || $0.status == .uploading)
+           }) {
+            headline = "已从 MyNAS 验证记录恢复 \(recoveredCount) 项备份状态"
+        }
+        startAutomaticBackupIfNeeded(accountID: accountID)
+    }
+
+    /// Marks an item completed only when MyNAS's mapping is for this device,
+    /// has a committed source, and its stored source-version string exactly
+    /// matches the current PhotoKit modification date. A date/name/thumbnail
+    /// coincidence can never reach this code path.
+    private func restoreDeviceMappings(
+        for assets: [LocalPhotoAsset],
+        account: AccountContext
+    ) -> Int {
+        guard let mappings = recoveredMappingsByAccountID[account.accountID],
+              !mappings.isEmpty else {
+            return 0
+        }
+        let assetsByIdentifier = Dictionary(
+            uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) }
+        )
+        var restoredCount = 0
+        var didChange = false
+
+        for mapping in mappings {
+            guard let asset = assetsByIdentifier[mapping.localIdentifier],
+                  mapping.sourceState == PhotoSourceState.committed.rawValue,
+                  PhotoBackupSourceVersion.matches(
+                    serverValue: mapping.sourceModificationDate,
+                    localDate: asset.modificationDate
+                  ) else {
+                continue
+            }
+            let derivativeState = PhotoDerivativeState(rawValue: mapping.derivativeState) ?? .pending
+            if let index = jobs.firstIndex(where: {
+                $0.accountID == account.accountID &&
+                    $0.localIdentifier == mapping.localIdentifier
+            }) {
+                let jobIsAlreadyRecovered = jobs[index].status == .completed &&
+                    jobs[index].sourceModificationDate == asset.modificationDate &&
+                    jobs[index].assetID == mapping.assetID &&
+                    jobs[index].sourceState == .committed &&
+                    jobs[index].derivativeState == derivativeState &&
+                    jobs[index].resourceCount == mapping.resourceCount &&
+                    jobs[index].totalBytes == max(0, mapping.sourceBytes)
+                guard !jobIsAlreadyRecovered else { continue }
+
+                jobs[index].sourceModificationDate = asset.modificationDate
+                jobs[index].status = .completed
+                jobs[index].totalBytes = max(0, mapping.sourceBytes)
+                jobs[index].uploadedBytes = max(0, mapping.sourceBytes)
+                jobs[index].resourceCount = max(0, mapping.resourceCount)
+                jobs[index].assetID = mapping.assetID
+                jobs[index].sourceState = .committed
+                jobs[index].derivativeState = derivativeState
+                jobs[index].message = "已从 MyNAS 验证记录恢复"
+                jobs[index].failure = nil
+                jobs[index].updatedAt = Date()
+            } else {
+                jobs.append(
+                    PhotoBackupJob(
+                        id: UUID(),
+                        accountID: account.accountID,
+                        localIdentifier: asset.localIdentifier,
+                        mediaKind: asset.mediaKind,
+                        creationDate: asset.creationDate,
+                        sourceModificationDate: asset.modificationDate,
+                        status: .completed,
+                        totalBytes: max(0, mapping.sourceBytes),
+                        uploadedBytes: max(0, mapping.sourceBytes),
+                        resourceCount: max(0, mapping.resourceCount),
+                        assetID: mapping.assetID,
+                        sourceState: .committed,
+                        derivativeState: derivativeState,
+                        message: "已从 MyNAS 验证记录恢复",
+                        failure: nil,
+                        updatedAt: Date()
+                    )
+                )
+            }
+            restoredCount += 1
+            didChange = true
+        }
+
+        if didChange {
+            persist()
+        }
+        return restoredCount
     }
 
     private func enqueue(
@@ -476,13 +639,7 @@ final class PhotoBackupCoordinator: ObservableObject {
     }
 
     private static func persistentDeviceID(userDefaults: UserDefaults) -> String {
-        let key = "photoBackupDeviceID"
-        if let existing = userDefaults.string(forKey: key), !existing.isEmpty {
-            return existing
-        }
-        let value = "ios-" + UUID().uuidString.lowercased()
-        userDefaults.set(value, forKey: key)
-        return value
+        PhotoBackupDeviceIdentityStore.loadOrCreate(userDefaults: userDefaults)
     }
 
     private static func failure(from error: Error) -> PhotoBackupFailure {
@@ -541,6 +698,68 @@ final class PhotoBackupCoordinator: ObservableObject {
         }
 
         return PhotoBackupFailure(kind: kind, detail: detail, occurredAt: Date())
+    }
+}
+
+/// `UserDefaults` is removed when an app is uninstalled, while the Keychain
+/// survives an ordinary reinstall. Persisting this opaque per-device ID there
+/// lets MyNAS return only this iPhone's mappings without using a hardware ID.
+private nonisolated enum PhotoBackupDeviceIdentityStore {
+    private static let service = "com.ethanzhou.MyPhotos.photoBackup"
+    private static let account = "device-id"
+    private static let legacyDefaultsKey = "photoBackupDeviceID"
+
+    static func loadOrCreate(userDefaults: UserDefaults) -> String {
+        if let existing = loadFromKeychain() {
+            userDefaults.set(existing, forKey: legacyDefaultsKey)
+            return existing
+        }
+
+        if let legacy = userDefaults.string(forKey: legacyDefaultsKey), !legacy.isEmpty {
+            _ = saveToKeychain(legacy)
+            return legacy
+        }
+
+        let value = "ios-" + UUID().uuidString.lowercased()
+        _ = saveToKeychain(value)
+        userDefaults.set(value, forKey: legacyDefaultsKey)
+        return value
+    }
+
+    private static func loadFromKeychain() -> String? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data,
+              let value = String(data: data, encoding: .utf8),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private static func saveToKeychain(_ value: String) -> Bool {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account
+        ]
+        let data = Data(value.utf8)
+        let update: [CFString: Any] = [kSecValueData: data]
+        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        guard updateStatus == errSecItemNotFound else { return false }
+        var insert = query
+        insert[kSecValueData] = data
+        return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
     }
 }
 

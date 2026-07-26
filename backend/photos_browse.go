@@ -69,6 +69,27 @@ type photosAssetPageResponse struct {
 	HasMore    bool                  `json:"hasMore"`
 }
 
+// A device mapping is intentionally narrower than an asset list. It is only
+// used to restore this device's verified PhotoKit localIdentifier ↔ MyNAS asset
+// relationship after the app's local job store is lost. The fingerprint never
+// leaves the server, and mappings are owner- and device-scoped.
+type photosDeviceAssetMappingResponse struct {
+	LocalIdentifier        string  `json:"localIdentifier"`
+	AssetID                string  `json:"assetID"`
+	SourceModificationDate *string `json:"sourceModificationDate"`
+	SourceState            string  `json:"sourceState"`
+	DerivativeState        string  `json:"derivativeState"`
+	ResourceCount          int     `json:"resourceCount"`
+	SourceBytes            int64   `json:"sourceBytes"`
+	UpdatedAt              string  `json:"updatedAt"`
+}
+
+type photosDeviceAssetMappingPageResponse struct {
+	Mappings   []photosDeviceAssetMappingResponse `json:"mappings"`
+	NextCursor *string                            `json:"nextCursor"`
+	HasMore    bool                               `json:"hasMore"`
+}
+
 type photosChangeResponse struct {
 	Sequence  int64  `json:"sequence"`
 	Type      string `json:"type"`
@@ -86,6 +107,11 @@ type photosChangePageResponse struct {
 type photosBrowseCursor struct {
 	SortTime string `json:"sortTime"`
 	AssetID  string `json:"assetID"`
+}
+
+type photosDeviceAssetMappingCursor struct {
+	UpdatedAt       string `json:"updatedAt"`
+	LocalIdentifier string `json:"localIdentifier"`
 }
 
 type photosStoredFile struct {
@@ -180,6 +206,97 @@ func (a *App) photosAssets(w http.ResponseWriter, r *http.Request) {
 	}
 	writePhotosJSONWithETag(
 		w, r, response, photosMetadataETag(owner.UserID, baseAssets, nextCursor),
+	)
+}
+
+func (a *App) photosDeviceAssetMappings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	owner, ok := a.photosRequestOwner(w, r)
+	if !ok {
+		return
+	}
+	deviceID := strings.TrimSpace(r.URL.Query().Get("deviceID"))
+	if deviceID == "" || len(deviceID) > 200 {
+		http.Error(w, "invalid device ID", http.StatusBadRequest)
+		return
+	}
+	limit, err := photosPageLimit(r.URL.Query().Get("limit"), photosDefaultPageSize)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cursor, err := decodePhotosDeviceAssetMappingCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		http.Error(w, "invalid cursor", http.StatusBadRequest)
+		return
+	}
+
+	query := `SELECT m.local_identifier,m.asset_id,a.modification_date,a.source_state,a.derivative_state,
+		COALESCE((SELECT COUNT(1) FROM photo_resources r
+			WHERE r.owner_user_id=m.owner_user_id AND r.asset_id=m.asset_id),0),
+		COALESCE((SELECT SUM(r.byte_size) FROM photo_resources r
+			WHERE r.owner_user_id=m.owner_user_id AND r.asset_id=m.asset_id),0),
+		m.updated
+		FROM device_asset_mappings m
+		JOIN photo_assets a ON a.id=m.asset_id AND a.owner_user_id=m.owner_user_id
+		WHERE m.owner_user_id=? AND m.device_id=? AND a.source_state=?`
+	arguments := []any{owner.UserID, deviceID, photosSourceStateCommitted}
+	if cursor != nil {
+		query += ` AND (m.updated < ? OR (m.updated=? AND m.local_identifier < ?))`
+		arguments = append(arguments, cursor.UpdatedAt, cursor.UpdatedAt, cursor.LocalIdentifier)
+	}
+	query += ` ORDER BY m.updated DESC,m.local_identifier DESC LIMIT ?`
+	arguments = append(arguments, limit+1)
+
+	rows, err := a.db.Query(query, arguments...)
+	if err != nil {
+		http.Error(w, "photo mapping unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	mappings := make([]photosDeviceAssetMappingResponse, 0, limit+1)
+	cursors := make([]photosDeviceAssetMappingCursor, 0, limit+1)
+	for rows.Next() {
+		var mapping photosDeviceAssetMappingResponse
+		var modificationDate sql.NullString
+		if err = rows.Scan(
+			&mapping.LocalIdentifier, &mapping.AssetID, &modificationDate,
+			&mapping.SourceState, &mapping.DerivativeState, &mapping.ResourceCount,
+			&mapping.SourceBytes, &mapping.UpdatedAt,
+		); err != nil {
+			http.Error(w, "photo mapping unavailable", http.StatusInternalServerError)
+			return
+		}
+		mapping.SourceModificationDate = nullablePhotosString(modificationDate)
+		mappings = append(mappings, mapping)
+		cursors = append(cursors, photosDeviceAssetMappingCursor{
+			UpdatedAt: mapping.UpdatedAt, LocalIdentifier: mapping.LocalIdentifier,
+		})
+	}
+	if err = rows.Err(); err != nil {
+		http.Error(w, "photo mapping unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	hasMore := len(mappings) > limit
+	if hasMore {
+		mappings = mappings[:limit]
+		cursors = cursors[:limit]
+	}
+	var nextCursor *string
+	if hasMore && len(cursors) > 0 {
+		encoded := encodePhotosDeviceAssetMappingCursor(cursors[len(cursors)-1])
+		nextCursor = &encoded
+	}
+	response := photosDeviceAssetMappingPageResponse{
+		Mappings: mappings, NextCursor: nextCursor, HasMore: hasMore,
+	}
+	writePhotosJSONWithETag(
+		w, r, response, photosDeviceAssetMappingETag(owner.UserID, deviceID, mappings, nextCursor),
 	)
 }
 
@@ -529,6 +646,27 @@ func decodePhotosBrowseCursor(raw string) (*photosBrowseCursor, error) {
 	return &cursor, nil
 }
 
+func encodePhotosDeviceAssetMappingCursor(cursor photosDeviceAssetMappingCursor) string {
+	data, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodePhotosDeviceAssetMappingCursor(raw string) (*photosDeviceAssetMappingCursor, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, err
+	}
+	var cursor photosDeviceAssetMappingCursor
+	if err = json.Unmarshal(data, &cursor); err != nil ||
+		cursor.UpdatedAt == "" || cursor.LocalIdentifier == "" {
+		return nil, errors.New("invalid cursor")
+	}
+	return &cursor, nil
+}
+
 func nullablePhotosString(value sql.NullString) *string {
 	if !value.Valid {
 		return nil
@@ -545,6 +683,28 @@ func photosMetadataETag(
 	seed := ownerUserID
 	for _, asset := range assets {
 		seed += ":" + asset.ID + ":" + asset.Version
+	}
+	if nextCursor != nil {
+		seed += ":" + *nextCursor
+	}
+	return quotedPhotosETag(seed)
+}
+
+func photosDeviceAssetMappingETag(
+	ownerUserID, deviceID string,
+	mappings []photosDeviceAssetMappingResponse,
+	nextCursor *string,
+) string {
+	seed := ownerUserID + ":device-mappings:" + deviceID
+	for _, mapping := range mappings {
+		modificationDate := ""
+		if mapping.SourceModificationDate != nil {
+			modificationDate = *mapping.SourceModificationDate
+		}
+		seed += ":" + mapping.LocalIdentifier + ":" + mapping.AssetID + ":" +
+			modificationDate + ":" + mapping.SourceState + ":" + mapping.DerivativeState +
+			":" + strconv.Itoa(mapping.ResourceCount) + ":" + strconv.FormatInt(mapping.SourceBytes, 10) +
+			":" + mapping.UpdatedAt
 	}
 	if nextCursor != nil {
 		seed += ":" + *nextCursor

@@ -65,6 +65,118 @@ func TestPhotosAssetsAreOwnerScopedPaginatedAndNeverLeakPaths(t *testing.T) {
 	}
 }
 
+func TestPhotosDeviceAssetMappingsAreOwnerAndDeviceScoped(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	deviceID := "ios-f2-recovery-device"
+	modificationDate := "2026-07-27T08:30:45.123Z"
+	_ = uploadDeviceMappingTestPhoto(t, app, "first-local-id", deviceID, modificationDate)
+	_ = uploadDeviceMappingTestPhoto(t, app, "second-local-id", deviceID, modificationDate)
+	_ = uploadDeviceMappingTestPhoto(t, app, "different-device-id", "another-ios-device", modificationDate)
+
+	request := tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/device-asset-mappings?deviceID="+url.QueryEscape(deviceID)+"&limit=1",
+	)
+	recorder := httptest.NewRecorder()
+	app.photosDeviceAssetMappings(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("first page status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("ETag") == "" || strings.Contains(recorder.Body.String(), "fingerprint") ||
+		strings.Contains(recorder.Body.String(), app.c.Root) {
+		t.Fatalf("mapping response leaked data or omitted ETag: headers=%v body=%s", recorder.Header(), recorder.Body.String())
+	}
+	var firstPage photosDeviceAssetMappingPageResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&firstPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage.Mappings) != 1 || !firstPage.HasMore || firstPage.NextCursor == nil {
+		t.Fatalf("first mapping page=%#v", firstPage)
+	}
+	assertDeviceMapping(t, firstPage.Mappings[0], modificationDate)
+
+	nextRequest := tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/device-asset-mappings?deviceID="+url.QueryEscape(deviceID)+"&limit=1&cursor="+url.QueryEscape(*firstPage.NextCursor),
+	)
+	nextRecorder := httptest.NewRecorder()
+	app.photosDeviceAssetMappings(nextRecorder, nextRequest)
+	var secondPage photosDeviceAssetMappingPageResponse
+	if err := json.NewDecoder(nextRecorder.Body).Decode(&secondPage); err != nil {
+		t.Fatal(err)
+	}
+	if nextRecorder.Code != http.StatusOK || len(secondPage.Mappings) != 1 || secondPage.HasMore || secondPage.NextCursor != nil {
+		t.Fatalf("second mapping page status=%d page=%#v", nextRecorder.Code, secondPage)
+	}
+	assertDeviceMapping(t, secondPage.Mappings[0], modificationDate)
+	seen := map[string]bool{firstPage.Mappings[0].LocalIdentifier: true, secondPage.Mappings[0].LocalIdentifier: true}
+	if !seen["first-local-id"] || !seen["second-local-id"] || seen["different-device-id"] {
+		t.Fatalf("device mappings=%v", seen)
+	}
+
+	otherDevice := httptest.NewRecorder()
+	app.photosDeviceAssetMappings(
+		otherDevice,
+		tailscaleRequest(http.MethodGet, "/api/v1/photos/device-asset-mappings?deviceID=another-ios-device"),
+	)
+	var otherDevicePage photosDeviceAssetMappingPageResponse
+	if err := json.NewDecoder(otherDevice.Body).Decode(&otherDevicePage); err != nil {
+		t.Fatal(err)
+	}
+	if len(otherDevicePage.Mappings) != 1 || otherDevicePage.Mappings[0].LocalIdentifier != "different-device-id" {
+		t.Fatalf("unexpected other-device mapping=%#v", otherDevicePage)
+	}
+
+	otherOwnerRequest := tailscaleRequest(http.MethodGet, "/api/v1/photos/device-asset-mappings?deviceID="+url.QueryEscape(deviceID))
+	otherOwnerRequest.Header.Set("Tailscale-User-Login", "other@example.com")
+	otherOwnerRecorder := httptest.NewRecorder()
+	app.photosDeviceAssetMappings(otherOwnerRecorder, otherOwnerRequest)
+	var otherOwnerPage photosDeviceAssetMappingPageResponse
+	if err := json.NewDecoder(otherOwnerRecorder.Body).Decode(&otherOwnerPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(otherOwnerPage.Mappings) != 0 {
+		t.Fatalf("other owner received mappings=%#v", otherOwnerPage.Mappings)
+	}
+}
+
+func uploadDeviceMappingTestPhoto(
+	t *testing.T,
+	app *App,
+	localIdentifier, deviceID, modificationDate string,
+) photosUploadSessionResponse {
+	t.Helper()
+	payload := []byte("device-mapping-" + localIdentifier)
+	input := testPhotoUploadInput(payload, nil)
+	input.LocalIdentifier = localIdentifier
+	input.DeviceID = deviceID
+	input.ModificationDate = &modificationDate
+	created := createTestPhotoUploadSession(t, app, input)
+	putTestPhotoPart(t, app, created.ID, created.Resources[0], 0, payload)
+	recorder := httptest.NewRecorder()
+	app.photosUploadSessionByPath(
+		recorder,
+		tailscaleRequest(http.MethodPost, "/api/v1/photos/upload-sessions/"+created.ID+"/complete"),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("complete mapping photo status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var completed photosUploadSessionResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&completed); err != nil {
+		t.Fatal(err)
+	}
+	return completed
+}
+
+func assertDeviceMapping(t *testing.T, mapping photosDeviceAssetMappingResponse, modificationDate string) {
+	t.Helper()
+	if mapping.AssetID == "" || mapping.SourceModificationDate == nil ||
+		*mapping.SourceModificationDate != modificationDate || mapping.SourceState != photosSourceStateCommitted ||
+		mapping.ResourceCount != 1 || mapping.SourceBytes <= 0 || mapping.UpdatedAt == "" {
+		t.Fatalf("invalid device mapping=%#v", mapping)
+	}
+}
+
 func TestPhotosBrowseSupportsETagRangeAndOwnerAuthorization(t *testing.T) {
 	app := newPhotosPhase2TestApp(t)
 	payload := []byte("0123456789-original-photo")

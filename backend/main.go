@@ -143,6 +143,7 @@ func main() {
 	mux.HandleFunc("/api/v1/photos/volumes", a.photosVolumes)
 	mux.HandleFunc("/api/v1/photos/assets", a.photosAssets)
 	mux.HandleFunc("/api/v1/photos/assets/", a.photosAssetByPath)
+	mux.HandleFunc("/api/v1/photos/device-asset-mappings", a.photosDeviceAssetMappings)
 	mux.HandleFunc("/api/v1/photos/changes", a.photosChanges)
 	mux.HandleFunc("/api/v1/photos/upload-sessions", a.photosUploadSessions)
 	mux.HandleFunc("/api/v1/photos/upload-sessions/", a.photosUploadSessionByPath)

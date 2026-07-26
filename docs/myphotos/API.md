@@ -1,6 +1,6 @@
 # MyNAS Photos — API 契约
 
-当前已部署 MyNAS `0.8.1` 使用 API version `v1`，包含 E1 状态字段、E2 服务端派生任务和 E3 受控远程读取接口。路由以 `/api/v1/photos` 为前缀，不改变 MyNAS 的通用 `health`、`files`、`uploads`、`trash` 等 API；后者不是 Photos 授权或完整性协议的替代品。通用 `GET /api/v1/health` 在 Linux thermal zone 可读时返回 `system.temperatureC`，不可读时省略该字段。
+当前已部署 MyNAS `0.8.2` 使用 API version `v1`，包含 E1 状态字段、E2 服务端派生任务、E3 受控远程读取接口和 F2 同设备映射恢复。路由以 `/api/v1/photos` 为前缀，不改变 MyNAS 的通用 `health`、`files`、`uploads`、`trash` 等 API；后者不是 Photos 授权或完整性协议的替代品。通用 `GET /api/v1/health` 在 Linux thermal zone 可读时返回 `system.temperatureC`，不可读时省略该字段。
 
 ## 共同安全规则
 
@@ -63,15 +63,16 @@ iOS 必须依序调用 capabilities → me → volumes，并验证 capabilities 
 | --- | --- | --- |
 | GET/HEAD | `/assets?cursor=&limit=` | owner-scoped，按捕获时间与 asset ID 稳定分页；`limit` 最大 200，返回 next cursor、资源与可用衍生文件。 |
 | GET/HEAD | `/changes?cursor=&limit=` | owner-scoped 连续 sequence 增量流，返回 next cursor、hasMore 和 resetRequired。 |
+| GET/HEAD | `/device-asset-mappings?deviceID=` | 仅返回当前 owner 且该持久设备 ID 的 `localIdentifier ↔ assetID` 已验证映射；按更新时间稳定分页，最大 200 项。响应不含 fingerprint、storage path 或其他设备记录。 |
 | GET/HEAD | `/assets/{id}` | 单 asset 的来源、状态、版本、资源、衍生文件和 `browseReady`。 |
 | GET/HEAD | `/assets/{id}/{tiny|grid|preview}` | 仅返回当前 recipe 的 ready 衍生文件；支持 ETag 与 `If-None-Match`。 |
 | GET/HEAD | `/assets/{id}/original?resourceID=` | 读取一个原始资源；多资源 Live Photo/调整资源通过 resource ID 选择，支持 ETag、Range/206。 |
 
-所有 metadata 与文件查询先用 Tailscale owner 过滤 asset；不匹配的账号得到 404/空列表。响应只包含服务器生成的下载 URL，不泄露 mount 或 `storage_path`。
+所有 metadata 与文件查询先用 Tailscale owner 过滤 asset；不匹配的账号得到 404/空列表。响应只包含服务器生成的下载 URL，不泄露 mount 或 `storage_path`。原件数据库保留 PhotoKit 报告的 UTI；文件响应会把已知视频 UTI 转为标准 HTTP MIME（`com.apple.quicktime-movie` → `video/quicktime`，`public.mpeg-4` → `video/mp4`），以便 AVFoundation 流式播放。
 
 ## 当前接口缺口与实现注意
 
 - 上传完成的正常路径使用同卷 rename 和 SQLite transaction；断电/进程崩溃恢复协议尚未定义，见阶段 D/J。
 - `changes.resetRequired` 与 cursor 保留/过期策略尚未启用；当前变更日志不裁剪。
 - `POST /assets/{id}/trash`、`/restore` 尚未实现，只能在阶段 H 的确认、恢复与审计策略完成后开放。
-- iOS 客户端尚未消费 E3 远程读取 API；当前上线的是服务端契约，不等于统一远程时间线已经交付。
+- iOS 已在独立只读 MyNAS 图库消费列表、衍生预览、视频 Range 流和前台 change cursor；这不等于本地/远程统一时间线，也不提供原件导出或删除。
