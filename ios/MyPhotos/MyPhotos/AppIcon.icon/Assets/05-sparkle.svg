@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- Layer 5: AI sparkles — 4-point stars -->
+  <!-- MyPhotos icon · Layer 5: Sparkle — one small restrained 4-point star (intelligent organization) -->
   <defs>
-    <linearGradient id="sparkGrad" x1="730" y1="195" x2="730" y2="392" gradientUnits="userSpaceOnUse">
+    <linearGradient id="sparkGrad" x1="708" y1="172" x2="708" y2="356" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFFFFF"/>
       <stop offset="1" stop-color="#CDE4FF"/>
     </linearGradient>
+    <filter id="blur20" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="20"/></filter>
   </defs>
-  <g fill="url(#sparkGrad)">
-    <path d="M730 220 C738 268 752 282 800 290 C752 298 738 312 730 360 C722 312 708 298 660 290 C708 282 722 268 730 220 Z"/>
-    <path d="M630 195 C633 213 637 217 655 220 C637 223 633 227 630 245 C627 227 623 223 605 220 C623 217 627 213 630 195 Z"/>
-  </g>
+  <circle cx="708" cy="264" r="72" fill="#BFE0FF" opacity="0.16" filter="url(#blur20)"/>
+  <path fill="url(#sparkGrad)" opacity="0.96"
+        d="M708 172 C718 244 736 256 800 264 C736 272 718 284 708 356 C698 284 680 272 616 264 C680 256 698 244 708 172 Z"/>
 </svg>

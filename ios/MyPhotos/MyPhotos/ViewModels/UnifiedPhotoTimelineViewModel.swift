@@ -22,6 +22,7 @@ final class UnifiedPhotoTimelineViewModel: ObservableObject {
     private var remoteAssets: [ServerPhotoAsset] = []
     private var nextRemoteCursor: String?
     private var remoteHasMore = false
+    private var isSynchronizingRemoteChanges = false
 
     init(client: RemotePhotoLibraryClient = RemotePhotoLibraryClient()) {
         self.client = client
@@ -115,6 +116,32 @@ final class UnifiedPhotoTimelineViewModel: ObservableObject {
                 (error as? LocalizedError)?.errorDescription
                     ?? "下一页 MyNAS 项目暂时无法读取。"
             )
+        }
+    }
+
+    /// While the unified "全部" timeline is visible, refresh its remote slice
+    /// after the server publishes a new derivative version. The image cache key
+    /// includes that derivative hash, so this naturally stops old previews from
+    /// being reused after a server-side rebuild.
+    func checkForRemoteChanges(account: AccountContext) async {
+        guard !account.isLocalOnly,
+              remoteState == .ready,
+              !isSynchronizingRemoteChanges else {
+            return
+        }
+        isSynchronizingRemoteChanges = true
+        defer { isSynchronizingRemoteChanges = false }
+        do {
+            let result = try await client.synchronizeChanges(account: account)
+            guard !Task.isCancelled,
+                  !result.isInitialSync,
+                  result.resetRequired || result.changeCount > 0 else {
+                return
+            }
+            await refreshRemote(account: account)
+        } catch {
+            // Keep the visible local/remote timeline usable. The next poll or
+            // pull-to-refresh retries instead of replacing it with an error.
         }
     }
 

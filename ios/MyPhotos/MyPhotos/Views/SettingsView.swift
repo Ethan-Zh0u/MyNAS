@@ -177,7 +177,7 @@ struct SettingsView: View {
 
                 Section("关于") {
                     LabeledContent("应用", value: "MyNAS Photos")
-                    LabeledContent("当前开发目标", value: "阶段 E · 可浏览备份")
+                    LabeledContent("当前开发目标", value: "阶段 F · 跨设备统一图库")
                 }
             }
             .navigationTitle("设置")

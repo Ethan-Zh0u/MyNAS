@@ -131,6 +131,14 @@ struct PhotoTimelineView: View {
             guard usesUnifiedTimeline else { return }
             await unifiedTimeline.refreshRemote(account: accountStore.current)
         }
+        .task(id: "\(accountStore.current.accountID)-\(usesUnifiedTimeline)") {
+            guard usesUnifiedTimeline else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { return }
+                await unifiedTimeline.checkForRemoteChanges(account: accountStore.current)
+            }
+        }
         .onChange(of: viewModel.assets) { _, assets in
             unifiedTimeline.synchronizeLocal(
                 assets: assets,

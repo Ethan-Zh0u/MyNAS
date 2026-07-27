@@ -6,26 +6,28 @@
     {
       "layers" : [
         {
-          "image-name" : "01-background.svg",
-          "name" : "01-background"
-        },
-        {
-          "image-name" : "02-halo.svg",
-          "name" : "02-halo"
-        },
-        {
-          "image-name" : "03-cloud.svg",
-          "name" : "03-cloud"
+          "image-name" : "05-sparkle.svg",
+          "name" : "05-sparkle"
         },
         {
           "image-name" : "04-photo-mark.svg",
           "name" : "04-photo-mark"
         },
         {
-          "image-name" : "05-sparkle.svg",
-          "name" : "05-sparkle"
+          "image-name" : "03-cloud.svg",
+          "name" : "03-cloud"
+        },
+        {
+          "image-name" : "02-halo.svg",
+          "name" : "02-halo"
+        },
+        {
+          "glass" : false,
+          "image-name" : "01-background.svg",
+          "name" : "01-background"
         }
       ],
+      "name" : "MyPhotos Liquid Glass",
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0.5

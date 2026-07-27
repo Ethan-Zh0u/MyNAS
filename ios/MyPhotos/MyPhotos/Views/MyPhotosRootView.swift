@@ -45,15 +45,13 @@ struct MyPhotosRootView: View {
         .onChange(of: library.assets) { _, assets in
             backupCoordinator.synchronizeLibrary(
                 assets: assets,
-                account: accountStore.current,
-                client: library.imageClient
+                account: accountStore.current
             )
         }
         .onChange(of: accountStore.current) { _, account in
             backupCoordinator.synchronizeLibrary(
                 assets: library.assets,
-                account: account,
-                client: library.imageClient
+                account: account
             )
         }
     }

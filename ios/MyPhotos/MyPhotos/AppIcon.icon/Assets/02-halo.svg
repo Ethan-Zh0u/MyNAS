@@ -1,9 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- Layer 2: Halo — soft translucent glass disc behind the cloud for depth -->
+  <!-- MyPhotos icon · Layer 2: Halo — soft cool-blue ambient lift behind the symbol -->
   <defs>
-    <filter id="softHalo" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="30"/>
-    </filter>
+    <filter id="blur40" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="40"/></filter>
   </defs>
-  <circle cx="512" cy="520" r="330" fill="#FFFFFF" opacity="0.15" filter="url(#softHalo)"/>
+  <circle cx="512" cy="524" r="340" fill="#BFE0FF" opacity="0.14" filter="url(#blur40)"/>
 </svg>

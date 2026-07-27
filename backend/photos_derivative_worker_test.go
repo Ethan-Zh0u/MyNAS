@@ -246,7 +246,7 @@ func TestPhotosCapabilitiesAdvertiseRecipesOnlyWithProcessor(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&capabilities); err != nil {
 		t.Fatal(err)
 	}
-	if len(capabilities.DerivativeRecipes) != len(photosBrowseRecipesV1) {
+	if len(capabilities.DerivativeRecipes) != len(photosBrowseRecipesV2) {
 		t.Fatalf("advertised recipes=%v", capabilities.DerivativeRecipes)
 	}
 }
@@ -322,6 +322,67 @@ func TestPhotosDerivativeProcessorExtractsLargestEmbeddedRAWPreview(t *testing.T
 		ContentType: "public.heic",
 	}) {
 		t.Fatal("HEIC source was classified as RAW")
+	}
+}
+
+func TestPhotosDerivativeProcessorExtractsHEIFPrimaryImage(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "IMG_3952.HEIC")
+	source, err := os.OpenFile(sourcePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	picture := image.NewRGBA(image.Rect(0, 0, 428, 571))
+	if err = jpeg.Encode(source, picture, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatal(err)
+	}
+	if err = source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	executable := filepath.Join(directory, "heif-convert")
+	if err = os.WriteFile(executable, []byte("#!/bin/sh\nset -eu\ncp \"$1\" \"$2\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	workDirectory := filepath.Join(directory, "work")
+	processor := &ffmpegPhotosDerivativeProcessor{heifConverterExecutable: executable}
+	primaryPath, err := processor.extractHEIFPrimary(
+		context.Background(),
+		photosDerivativeSource{Path: sourcePath, ContentType: "public.heic"},
+		workDirectory,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary, err := os.Open(primaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, decodeErr := jpeg.DecodeConfig(primary)
+	closeErr := primary.Close()
+	if decodeErr != nil || closeErr != nil || config.Width != 428 || config.Height != 571 {
+		t.Fatalf("primary config=%#v decode=%v close=%v", config, decodeErr, closeErr)
+	}
+	after, err := os.ReadFile(sourcePath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("HEIC source changed: err=%v", err)
+	}
+	if !isPhotosHEIFSource(photosDerivativeSource{Path: sourcePath, ContentType: "public.heic"}) {
+		t.Fatal("HEIC source was not classified as HEIF")
+	}
+	if isPhotosHEIFSource(photosDerivativeSource{Path: filepath.Join(directory, "photo.jpg"), ContentType: "image/jpeg"}) {
+		t.Fatal("JPEG source was classified as HEIF")
+	}
+	if _, err = (&ffmpegPhotosDerivativeProcessor{}).extractHEIFPrimary(
+		context.Background(),
+		photosDerivativeSource{Path: sourcePath, ContentType: "public.heic"},
+		workDirectory,
+	); err == nil {
+		t.Fatal("missing heif-convert succeeded")
 	}
 }
 

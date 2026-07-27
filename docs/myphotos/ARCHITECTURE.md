@@ -52,7 +52,7 @@ SwiftUI（本地时间线 / 设置 / 连接 / 手动备份）
 | Photos handshake | capabilities、pairing、稳定 server ID、photo user、可选卷 | `photoAssets: true` 表示可原始入库，不能推导出可浏览图库 |
 | 上传会话 | owner-scoped session、manifest、offset、4 MiB 分片 hash、完整文件 hash、去重 | 仅手动/前台客户端；没有 TTL 清理或并发/断电故障注入 |
 | 提交 | 同一卷内 stage directory rename 到 originals，再写 SQLite asset/resource/mapping transaction | 当前没有跨文件系统/SQLite 的 crash journal 或目录 fsync 恢复扫描 |
-| 衍生 worker | 单线程领取持久化 job；验证原件 hash；普通媒体由 FFmpeg 处理；DNG/ProRAW 先用 `simple_dcraw -E` 提取内嵌全尺寸 JPEG，再生成版本化衍生文件；复核 JPEG/hash 后提交 derivative rows 与 ready | 0.8.1 已部署；原始 DNG 在处理前后重新核对 SHA-256，缺少工具时明确失败而不替换原件 |
+| 衍生 worker | 单线程领取持久化 job；验证原件 hash；HEIC/HEIF 先由 `heif-convert` 解出主图，DNG/ProRAW 先由 `simple_dcraw -E` 提取内嵌全尺寸 JPEG，其余普通媒体由 FFmpeg 处理；再生成版本化衍生文件并复核 JPEG/hash 后提交 ready | 缺少必要解码器时明确失败而不替换原件；所有衍生文件都是可丢弃视图 |
 | 远程浏览 | owner-scoped assets/detail/changes、tiny/grid/preview/original；稳定分页、ETag/304、Range/206，并把 PhotoKit UTI 映射为标准 HTTP MIME | 0.8.1 热修复已部署并以 45 项真实资产验收；iOS 已完成独立只读网格、preview、账号隔离缓存、视频 Range 播放、资源清单和前台 changes 提示；原件导出、缓存管理及 Live Photo 真实设备回归仍待完成 |
 
 ## 当前与目标的状态机

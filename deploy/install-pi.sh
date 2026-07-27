@@ -12,6 +12,7 @@ test -f "$release_source/mynas-storage-recover.timer"
 test -f "$release_source/mynas.env"
 command -v ffmpeg >/dev/null
 command -v simple_dcraw >/dev/null
+command -v heif-convert >/dev/null
 findmnt -no TARGET /mnt/nas | grep -qx '/mnt/nas'
 df -h /mnt/nas
 

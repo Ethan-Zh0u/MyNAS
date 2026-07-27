@@ -186,7 +186,7 @@ CREATE TABLE IF NOT EXISTS photo_assets(
 	backup_state TEXT NOT NULL,
 	source_state TEXT NOT NULL DEFAULT 'sourceCommitted',
 	derivative_state TEXT NOT NULL DEFAULT 'pending',
-	derivative_recipe_version TEXT NOT NULL DEFAULT 'photos-browse-v1',
+	derivative_recipe_version TEXT NOT NULL DEFAULT 'photos-browse-v2',
 	derivative_error TEXT,
 	derivative_updated TEXT,
 	created TEXT NOT NULL,
@@ -326,7 +326,7 @@ CREATE INDEX IF NOT EXISTS photo_changes_owner_sequence ON photo_changes(owner_u
 	for _, statement := range []string{
 		"ALTER TABLE photo_assets ADD COLUMN source_state TEXT NOT NULL DEFAULT 'sourceCommitted'",
 		"ALTER TABLE photo_assets ADD COLUMN derivative_state TEXT NOT NULL DEFAULT 'pending'",
-		"ALTER TABLE photo_assets ADD COLUMN derivative_recipe_version TEXT NOT NULL DEFAULT 'photos-browse-v1'",
+		"ALTER TABLE photo_assets ADD COLUMN derivative_recipe_version TEXT NOT NULL DEFAULT 'photos-browse-v2'",
 		"ALTER TABLE photo_assets ADD COLUMN derivative_error TEXT",
 		"ALTER TABLE photo_assets ADD COLUMN derivative_updated TEXT",
 	} {
@@ -357,7 +357,33 @@ CREATE INDEX IF NOT EXISTS photo_changes_owner_sequence ON photo_changes(owner_u
 	); e != nil {
 		return e
 	}
-	if _, e = a.db.Exec(
+	return a.ensurePhotosDerivativeJobs(now)
+}
+
+// ensurePhotosDerivativeJobs advances old, disposable browse derivatives to
+// the current policy and creates every missing job in the same transaction.
+// Original resources and mappings are deliberately untouched.
+func (a *App) ensurePhotosDerivativeJobs(now string) error {
+	transaction, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if _, err = transaction.Exec(
+		`UPDATE photo_assets
+		 SET derivative_state=?,derivative_recipe_version=?,derivative_error=NULL,
+		     derivative_updated=?,updated=?
+		 WHERE source_state=? AND derivative_recipe_version<>?`,
+		photosDerivativeStatePending,
+		photosDerivativePolicyVersion,
+		now,
+		now,
+		photosSourceStateCommitted,
+		photosDerivativePolicyVersion,
+	); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(
 		`INSERT OR IGNORE INTO photo_derivative_jobs(
 			id,asset_id,owner_user_id,volume_id,recipe_version,status,
 			attempt_count,last_error,next_attempt_at,created,updated
@@ -371,10 +397,10 @@ CREATE INDEX IF NOT EXISTS photo_changes_owner_sequence ON photo_changes(owner_u
 		now,
 		photosSourceStateCommitted,
 		photosDerivativeStateReady,
-	); e != nil {
-		return e
+	); err != nil {
+		return err
 	}
-	if _, e = a.db.Exec(
+	if _, err = transaction.Exec(
 		`INSERT OR IGNORE INTO photo_changes(
 			owner_user_id,asset_id,change_type,asset_updated,created
 		 )
@@ -382,10 +408,10 @@ CREATE INDEX IF NOT EXISTS photo_changes_owner_sequence ON photo_changes(owner_u
 		 FROM photo_assets WHERE source_state=?`,
 		now,
 		photosSourceStateCommitted,
-	); e != nil {
-		return e
+	); err != nil {
+		return err
 	}
-	return nil
+	return transaction.Commit()
 }
 func (a *App) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -15,7 +15,7 @@ import (
 
 const (
 	photosAPIVersion       = "v1"
-	photosServerVersion    = "0.8.4"
+	photosServerVersion    = "0.8.5"
 	photosMinimumApp       = "1.0"
 	photosServerSettingKey = "photos.server_id"
 )
@@ -108,7 +108,7 @@ func (a *App) photosCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	derivativeRecipes := []string{}
 	if a.derivativeProcessor != nil {
-		for _, recipe := range photosBrowseRecipesV1 {
+		for _, recipe := range photosBrowseRecipesV2 {
 			derivativeRecipes = append(derivativeRecipes, recipe.ID)
 		}
 	}

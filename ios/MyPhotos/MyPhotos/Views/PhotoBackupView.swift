@@ -107,7 +107,7 @@ struct PhotoBackupView: View {
                 Label("Live Photo：静态原图与配对视频整组提交", systemImage: "livephoto")
                 Label("HDR：保留原始 HEIC/HEVC 与动态范围元数据", systemImage: "sun.max")
                 Label("RAW / ProRAW：保留 DNG、辅助照片与调整数据", systemImage: "camera.aperture")
-                Text("备份过程不把这些原件转码为 JPEG。整组资源通过 SHA-256 校验后会显示“原件已安全上传”；阶段 E 生成必要预览后，才会成为“完整可浏览备份”。")
+                Text("备份过程不把这些原件转码为 JPEG。整组资源通过 SHA-256 校验后会显示“原件已安全上传”；服务器生成必要预览后，才会成为“完整可浏览备份”。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

@@ -73,8 +73,9 @@ type photosDerivativeJobRow struct {
 }
 
 type ffmpegPhotosDerivativeProcessor struct {
-	executable             string
-	rawThumbnailExecutable string
+	executable              string
+	heifConverterExecutable string
+	rawThumbnailExecutable  string
 }
 
 type cappedPhotosDiagnosticWriter struct {
@@ -111,9 +112,14 @@ func (a *App) startPhotoDerivativeWorker() error {
 	if rawThumbnailExecutable == "" {
 		log.Printf("photos derivative worker: LibRaw thumbnail extraction is unavailable")
 	}
+	heifConverterExecutable, _ := exec.LookPath("heif-convert")
+	if heifConverterExecutable == "" {
+		log.Printf("photos derivative worker: HEIC/HEIF primary-image conversion is unavailable")
+	}
 	a.derivativeProcessor = &ffmpegPhotosDerivativeProcessor{
-		executable:             executable,
-		rawThumbnailExecutable: rawThumbnailExecutable,
+		executable:              executable,
+		heifConverterExecutable: heifConverterExecutable,
+		rawThumbnailExecutable:  rawThumbnailExecutable,
 	}
 	a.derivativeWake = make(chan struct{}, 1)
 	go a.runPhotoDerivativeWorker()
@@ -288,7 +294,7 @@ func (a *App) processPhotoDerivativeJob(ctx context.Context, job photosDerivativ
 		Duration:       job.Duration,
 		FinalDirectory: finalDirectory,
 		Sources:        sources,
-		Recipes:        photosBrowseRecipesV1,
+		Recipes:        photosBrowseRecipesV2,
 	})
 	if err != nil {
 		return err
@@ -419,7 +425,7 @@ func validatePhotosDerivativeOutputs(
 	recipeVersion string,
 ) ([]photosGeneratedDerivative, error) {
 	required := map[string]photosDerivativeRecipe{}
-	for _, recipe := range photosBrowseRecipesV1 {
+	for _, recipe := range photosBrowseRecipesV2 {
 		if recipe.RequiredForBrowse {
 			required[recipe.Kind] = recipe
 		}
@@ -711,6 +717,17 @@ func (p *ffmpegPhotosDerivativeProcessor) Process(
 				continue
 			}
 		}
+		if isPhotosHEIFSource(source) {
+			generationSource.Path, err = p.extractHEIFPrimary(ctx, source, workDirectory)
+			if err != nil {
+				_ = os.RemoveAll(workDirectory)
+				failures = append(
+					failures,
+					source.ResourceRole+": HEIC primary image: "+err.Error(),
+				)
+				continue
+			}
+		}
 		generateErr := p.generateAll(ctx, request, generationSource, workDirectory)
 		if generateErr != nil {
 			_ = os.RemoveAll(workDirectory)
@@ -718,6 +735,7 @@ func (p *ffmpegPhotosDerivativeProcessor) Process(
 			continue
 		}
 		_ = os.RemoveAll(filepath.Join(workDirectory, ".raw-preview"))
+		_ = os.RemoveAll(filepath.Join(workDirectory, ".heif-primary"))
 		staleDirectory := request.FinalDirectory + ".stale"
 		_ = os.RemoveAll(staleDirectory)
 		if _, statErr := os.Stat(request.FinalDirectory); statErr == nil {
@@ -755,6 +773,62 @@ func isPhotosRAWSource(source photosDerivativeSource) bool {
 		strings.Contains(contentType, "raw-image") ||
 		strings.Contains(contentType, "digital-negative") ||
 		strings.Contains(contentType, "adobe.raw")
+}
+
+func isPhotosHEIFSource(source photosDerivativeSource) bool {
+	contentType := strings.ToLower(strings.TrimSpace(source.ContentType))
+	extension := strings.ToLower(filepath.Ext(source.Path))
+	return extension == ".heic" || extension == ".heif" ||
+		strings.Contains(contentType, "heic") || strings.Contains(contentType, "heif")
+}
+
+// extractHEIFPrimary uses libheif instead of FFmpeg because FFmpeg can select
+// an internal HEIC tile or preview stream rather than the primary image.
+func (p *ffmpegPhotosDerivativeProcessor) extractHEIFPrimary(
+	ctx context.Context,
+	source photosDerivativeSource,
+	workDirectory string,
+) (string, error) {
+	if p.heifConverterExecutable == "" {
+		return "", errors.New("heif-convert is unavailable")
+	}
+	primaryDirectory := filepath.Join(workDirectory, ".heif-primary")
+	if err := os.MkdirAll(primaryDirectory, 0700); err != nil {
+		return "", err
+	}
+	primaryPath := filepath.Join(primaryDirectory, "primary.jpg")
+	commandContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(
+		commandContext,
+		p.heifConverterExecutable,
+		source.Path,
+		primaryPath,
+	)
+	var diagnostics bytes.Buffer
+	diagnosticWriter := &cappedPhotosDiagnosticWriter{
+		buffer:    &diagnostics,
+		remaining: 16 * 1024,
+	}
+	command.Stdout = diagnosticWriter
+	command.Stderr = diagnosticWriter
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf(
+			"convert primary image: %w: %s",
+			err,
+			strings.TrimSpace(diagnostics.String()),
+		)
+	}
+	file, err := os.Open(primaryPath)
+	if err != nil {
+		return "", err
+	}
+	config, decodeErr := jpeg.DecodeConfig(file)
+	closeErr := file.Close()
+	if decodeErr != nil || closeErr != nil || config.Width <= 0 || config.Height <= 0 {
+		return "", errors.New("heif-convert produced no decodable JPEG primary image")
+	}
+	return primaryPath, nil
 }
 
 func (p *ffmpegPhotosDerivativeProcessor) extractRAWPreview(

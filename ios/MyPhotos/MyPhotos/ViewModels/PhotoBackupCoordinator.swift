@@ -13,14 +13,16 @@ final class PhotoBackupCoordinator: ObservableObject {
     private let persistence: PhotoBackupPersistenceStore
     private let deviceID: String
     private var runTask: Task<Void, Never>?
-    private var automaticBackupRequests: [String: AutomaticBackupRequest] = [:]
+    private var mappingRecoveryRequests: [String: MappingRecoveryRequest] = [:]
     private var mappingRecoveryTasks: [String: Task<Void, Never>] = [:]
     private var recoveredMappingsByAccountID: [String: [ServerDeviceAssetMapping]] = [:]
 
-    private struct AutomaticBackupRequest {
+    /// Keeps only the local snapshot needed to reconcile previously verified
+    /// mappings after an account becomes available. It is deliberately not an
+    /// upload request: Stage G background/automatic backup has not shipped.
+    private struct MappingRecoveryRequest {
         let assets: [LocalPhotoAsset]
         let account: AccountContext
-        let client: PhotoLibraryClient
     }
 
     init(
@@ -162,14 +164,14 @@ final class PhotoBackupCoordinator: ObservableObject {
 
     func synchronizeLibrary(
         assets: [LocalPhotoAsset],
-        account: AccountContext,
-        client: PhotoLibraryClient
+        account: AccountContext
     ) {
         guard !account.isLocalOnly else { return }
-        automaticBackupRequests[account.accountID] = AutomaticBackupRequest(
+        // Do not turn a library observation or a new MyNAS connection into an
+        // upload authorization; manual backup is the current product contract.
+        mappingRecoveryRequests[account.accountID] = MappingRecoveryRequest(
             assets: assets,
-            account: account,
-            client: client
+            account: account
         )
         if shouldRecoverDeviceMappings(for: account) {
             recoverDeviceMappingsIfNeeded(for: account)
@@ -179,19 +181,9 @@ final class PhotoBackupCoordinator: ObservableObject {
             for: assets,
             account: account
         )
-        enqueue(
-            assets: assets,
-            accountID: account.accountID,
-            retryFailed: false
-        )
-        if recoveredCount > 0,
-           !jobs.contains(where: {
-               $0.accountID == account.accountID &&
-                   ($0.status == .waiting || $0.status == .preparing || $0.status == .uploading)
-           }) {
+        if recoveredCount > 0 {
             headline = "已从 MyNAS 验证记录恢复 \(recoveredCount) 项备份状态"
         }
-        startAutomaticBackupIfNeeded(accountID: account.accountID)
     }
 
     func startManualBackup(
@@ -302,24 +294,14 @@ final class PhotoBackupCoordinator: ObservableObject {
         mappingRecoveryTasks[accountID] = nil
         recoveredMappingsByAccountID[accountID] = mappings
 
-        guard let request = automaticBackupRequests[accountID] else { return }
+        guard let request = mappingRecoveryRequests[accountID] else { return }
         let recoveredCount = restoreDeviceMappings(
             for: request.assets,
             account: request.account
         )
-        enqueue(
-            assets: request.assets,
-            accountID: accountID,
-            retryFailed: false
-        )
-        if recoveredCount > 0,
-           !jobs.contains(where: {
-               $0.accountID == accountID &&
-                   ($0.status == .waiting || $0.status == .preparing || $0.status == .uploading)
-           }) {
+        if recoveredCount > 0 {
             headline = "已从 MyNAS 验证记录恢复 \(recoveredCount) 项备份状态"
         }
-        startAutomaticBackupIfNeeded(accountID: accountID)
     }
 
     /// Marks an item completed only when MyNAS's mapping is for this device,
@@ -494,7 +476,6 @@ final class PhotoBackupCoordinator: ObservableObject {
                 self.isRunning = false
                 self.runTask = nil
                 self.refreshHeadline(accountID: account.accountID)
-                self.startAutomaticBackupIfNeeded(accountID: account.accountID)
             }
 
             let jobIDs = self.jobs.filter {
@@ -517,27 +498,6 @@ final class PhotoBackupCoordinator: ObservableObject {
                 )
             }
         }
-    }
-
-    private func startAutomaticBackupIfNeeded(accountID: String) {
-        guard !isRunning,
-              let request = automaticBackupRequests[accountID],
-              !request.account.isLocalOnly,
-              request.account.selectedVolumeID != nil else {
-            return
-        }
-        let availableIdentifiers = Set(request.assets.map(\.localIdentifier))
-        let hasWaitingJob = jobs.contains {
-            $0.accountID == accountID
-                && $0.status == .waiting
-                && availableIdentifiers.contains($0.localIdentifier)
-        }
-        guard hasWaitingJob else { return }
-        run(
-            account: request.account,
-            assets: request.assets,
-            client: request.client
-        )
     }
 
     private func process(

@@ -110,12 +110,12 @@ func TestPhotosMultiResourceUploadResumesVerifiesAndDeduplicates(t *testing.T) {
 	}
 }
 
-func TestPhotosBrowseRecipeV1HasRequiredKinds(t *testing.T) {
+func TestPhotosBrowseRecipeV2HasRequiredKinds(t *testing.T) {
 	got := strings.Join(requiredPhotosDerivativeKinds(), ",")
 	if got != "tiny,grid,preview" {
 		t.Fatalf("required derivative kinds=%q", got)
 	}
-	for _, recipe := range photosBrowseRecipesV1 {
+	for _, recipe := range photosBrowseRecipesV2 {
 		if recipe.ID == "" || recipe.MaxPixelDimension <= 0 || recipe.ResizeMode == "" {
 			t.Fatalf("incomplete derivative recipe: %#v", recipe)
 		}
