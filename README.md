@@ -2,7 +2,7 @@
 
 **把树莓派和外接硬盘变成一个简单、私有、可以远程访问的个人 NAS。**
 
-MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和设备切换。网页使用 React，树莓派端使用 Go；真实文件保存在你自己的硬盘中，并通过 Tailscale 安全访问。
+MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和设备切换；同一项目中的 iOS 客户端 **MyNAS Photos** 用于备份原始照片资源和私有浏览。网页使用 React，树莓派端使用 Go，iOS 客户端使用 SwiftUI；真实文件始终保存在你自己的硬盘中，并通过 Tailscale 私有网络访问。
 
 > ## 第一次使用？从这里开始
 >
@@ -11,7 +11,7 @@ MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和�
 > 从准备设备、连接网线和硬盘，到写入 Raspberry Pi OS、开启 SSH、安装 Tailscale、接入硬盘和打开网页，全部按顺序说明。第一次接触树莓派也可以照着操作。
 
 > [!IMPORTANT]
-> 当前已部署为 **v0.8.4**。网页连接和硬盘接入已经提供新手向导，并显示实时读写速率和树莓派温度；MyNAS Photos 已具备 Tailscale 私有连接、手动原始资源备份、服务端预览生成管线、受账号隔离的远程读取 API、精确内容关联摘要，以及已在 iPhone 17 Pro 模拟器验收的受限本机删除与可选 MyNAS 备份永久删除。自动备份、原件导出和缓存管理仍在开发中。“在全新树莓派上一键安装 MyNAS 服务”仍在开发中，首次部署目前需要项目维护者完成；不要把 MyNAS 当作重要文件的唯一备份。
+> 当前部署版本为 **v0.8.5**。网页连接和硬盘接入已提供新手向导，并显示实时读写速率和树莓派温度。MyNAS Photos 已具备 Tailscale 私有连接、原始资源手动备份、服务端预览、按账号隔离的远程照片浏览、精确内容关联，以及受限的本机删除与可选 MyNAS 备份永久删除。前台自动备份策略已经实现；iOS 系统传输正在进行受控真机验收，已观察到锁屏与开发终止后手动重新打开的两条恢复路径，但网络/低电量中断、服务重启和其他边界仍未验收，因此不把它描述为已保证的后台备份。原件导出和缓存管理仍在开发中。首次部署目前需要项目维护者完成；不要把 MyNAS 当作重要文件的唯一备份。
 
 ## MyNAS 网页地址（重要）
 
@@ -19,11 +19,11 @@ MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和�
 
 **[https://mynas-rsp.pages.dev/](https://mynas-rsp.pages.dev/)**
 
-这个地址只是共享的网页前端，不保存任何用户文件。每台树莓派都有自己的 Tailscale 私有数据地址，例如 `https://rsp.tail681937.ts.net`。首次使用时，在公共网页的“设置 → 多 MyNAS 设备”中添加你自己的私有地址；之后网页会在当前浏览器中连接对应的树莓派。
+这个地址只是共享的网页前端，不保存任何用户文件。每台树莓派都有自己的 Tailscale 私有数据地址，例如 `https://mynas-rsp.<你的-tailnet>.ts.net`。首次使用时，在公共网页的“设置 → 多 MyNAS 设备”中添加你自己的私有地址；之后网页会在当前浏览器中连接对应的树莓派。
 
 ```text
 所有用户共用的网页前端：    https://mynas-rsp.pages.dev/
-你自己的树莓派数据地址：    https://<设备名>.<你的 tailnet>.ts.net/
+你自己的树莓派数据地址：    https://<设备名>.<你的-tailnet>.ts.net/
 ```
 
 不要为每台设备另外部署一个网页，也不要把 `*.ts.net` 私有地址当作用户入口；私有地址只用于网页和你的树莓派之间的后台数据连接。
@@ -88,12 +88,22 @@ MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和�
 如果必须同时使用 Clash Verge 等代理，请将以下目标设为 `DIRECT`，然后重新打开公共网页：
 
 ```text
-rsp.tail681937.ts.net
-*.tail681937.ts.net
+<设备名>.<你的-tailnet>.ts.net
+*.<你的-tailnet>.ts.net
 100.64.0.0/10
 ```
 
 > 私有 `*.ts.net` 地址只用于后台数据连接。直接打开它时，如果代理提前终止连接，浏览器无法加载 MyNAS 的诊断页面。
+
+## MyNAS Photos（iOS）
+
+MyNAS Photos 不是另一个云相册：它把你在 iPhone 上已获授权的照片资源，通过 Tailscale 直接备份到你选择的 MyNAS 卷。普通照片、视频、Live Photo 和 RAW/ProRAW 都按原始资源组处理；“备份完成”只有在 MyNAS 确认完整资源组后才成立。
+
+- **可以稳定使用：** 手动备份、断点续传、远程私有浏览、预览、Live Photo/RAW 资源保真，以及受限的本机删除与 MyNAS 删除确认。
+- **前台自动备份：** 每个 MyNAS 账号独立、默认关闭；可选仅 Wi‑Fi 或允许蜂窝数据，并可在低电量模式暂停。它只在 App 位于前台时自动发现新项目。
+- **系统后台传输：** 已具备受保护的暂存、任务账本和受限恢复入口，并有两条受控真机路径的正向证据；尚未通过所有网络、电量、服务重启、账号/卷、iCloud-only 与长队列测试。iOS 不允许任何 App 承诺无限时后台运行，因此它目前不是“始终自动备份”的产品保证。
+
+这个仓库刻意采用单仓库结构：网页、树莓派服务、iOS 客户端和共享协议一起演进，避免上传会话、账号/卷隔离和版本兼容在多个仓库之间漂移。
 
 ## 当前状态与路线图
 
@@ -108,6 +118,7 @@ rsp.tail681937.ts.net
 - Tailscale Serve 私有 HTTPS 访问
 - 数据盘挂载保护、自动重试和文件系统异常提示
 - MyNAS Photos 远程照片分页、增量变更、ETag/Range 下载，以及 Live Photo/ProRAW 原始资源保真
+- MyNAS Photos 的受保护后台传输任务账本、按账号与卷隔离的会话边界，以及受限恢复入口（完整系统后台验收仍在进行）
 
 ### 正在推进
 
@@ -116,6 +127,7 @@ rsp.tail681937.ts.net
 - 可选的局域网账号密码登录
 - 账户退出与切换：提供明确的退出入口，清理当前 MyNAS 会话/设备状态，并支持切换 Tailscale 或后续本地账号
 - 磁盘健康检查、权限、备份和故障恢复
+- MyNAS Photos 的系统后台条件回归、原件导出与缓存管理
 
 详细版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -128,21 +140,22 @@ rsp.tail681937.ts.net
 ## 技术结构
 
 ```text
-浏览器（React）
-   │
-   │ Tailscale 私有 HTTPS
-   ▼
-树莓派（Go API，仅监听 127.0.0.1）
-   │
-   ├── 已注册硬盘卷
-   └── SQLite 审计数据
+浏览器（React） ─────────────┐
+                             │ Tailscale 私有 HTTPS
+iPhone（MyNAS Photos / SwiftUI）┤
+                             ▼
+                       树莓派（Go API，仅监听 127.0.0.1）
+                             │
+                             ├── 已注册硬盘卷与照片原始资源
+                             └── SQLite 审计与照片元数据
 ```
 
 - `frontend/`：React + TypeScript + Vite 客户端
 - `backend/`：Go API 与 `mynas-setup` 接盘工具
+- `ios/MyPhotos/`：SwiftUI iPhone 客户端、Photos 备份队列和 iOS 测试
 - `scripts/`：Windows 与 macOS 本地开发和构建脚本
 - `deploy/`：树莓派 systemd、部署与 Cloudflare Pages 发布脚本
-- `docs/`：新手指南、运行、回滚和故障排查说明
+- `docs/`：新手指南、运行、回滚、故障排查，以及 `docs/myphotos/` 中的产品/协议/验收说明
 
 ## 本地开发
 
@@ -175,7 +188,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\MyNAS\deploy\deploy.p
 macOS 首次部署前，需要把专用公钥加入树莓派的 `~/.ssh/authorized_keys`。默认密钥路径为 `~/.ssh/mynas_deploy`；完成一次授权后，运行：
 
 ```bash
-MYNAS_REMOTE=rbp@100.119.44.117 ./deploy/deploy-macos.sh
+MYNAS_REMOTE=<维护者>@<树莓派的-Tailscale-IP> ./deploy/deploy-macos.sh
 ```
 
 macOS 脚本会显式绕过 Clash 的 SSH 代理，完成前后端测试、Linux ARM64 构建、上传、原子切换、服务重启和版本健康检查。可通过 `MYNAS_DEPLOY_KEY`、`MYNAS_REMOTE`、`MYNAS_PAGES_ORIGIN` 和 `MYNAS_PRIVATE_ORIGIN` 覆盖默认值。
