@@ -1,0 +1,87 @@
+import Foundation
+
+/// Proves that a current Photos asset has the same complete original resource
+/// group as a MyNAS item. Candidate metadata only reduces PhotoKit work; the
+/// final decision always requires every resource role, byte count, and SHA-256
+/// value to match.
+nonisolated enum RemotePhotoLocalCopyVerification {
+    static func candidates(
+        for remoteAsset: ServerPhotoAsset,
+        in localAssets: [LocalPhotoAsset]
+    ) -> [LocalPhotoAsset] {
+        localAssets.filter { localAsset in
+            let hasCompatibleKind: Bool
+            switch remoteAsset.mediaType {
+            case .unknown:
+                hasCompatibleKind = localAsset.mediaKind == .photo
+            default:
+                hasCompatibleKind = localAsset.mediaKind.rawValue == remoteAsset.mediaType.rawValue
+            }
+            guard hasCompatibleKind else { return false }
+
+            let hasKnownPixelSize = remoteAsset.pixelWidth > 0 && remoteAsset.pixelHeight > 0
+            guard !hasKnownPixelSize else {
+                return localAsset.pixelWidth == remoteAsset.pixelWidth
+                    && localAsset.pixelHeight == remoteAsset.pixelHeight
+            }
+            return true
+        }
+    }
+
+    static func hasSameCompleteResourceGroup(
+        localResources: [PreparedPhotoResource],
+        remoteResources: [ServerPhotoResource]
+    ) -> Bool {
+        guard !localResources.isEmpty,
+              localResources.count == remoteResources.count else {
+            return false
+        }
+
+        let localProofs = localResources.compactMap(ResourceProof.init)
+        let remoteProofs = remoteResources.compactMap(ResourceProof.init)
+        guard localProofs.count == localResources.count,
+              remoteProofs.count == remoteResources.count else {
+            return false
+        }
+        return localProofs.sorted() == remoteProofs.sorted()
+    }
+
+    private struct ResourceProof: Comparable {
+        private static let hexadecimalCharacters = CharacterSet(
+            charactersIn: "0123456789abcdefABCDEF"
+        )
+        let role: String
+        let byteSize: Int64
+        let sha256: String
+
+        init?(_ resource: PreparedPhotoResource) {
+            self.init(role: resource.role, byteSize: resource.byteSize, sha256: resource.sha256)
+        }
+
+        init?(_ resource: ServerPhotoResource) {
+            self.init(role: resource.resourceRole, byteSize: resource.byteSize, sha256: resource.sha256)
+        }
+
+        private init?(role: String, byteSize: Int64, sha256: String) {
+            let normalizedRole = role.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedHash = sha256.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalizedRole.isEmpty,
+                  byteSize >= 0,
+                  normalizedHash.count == 64,
+                  normalizedHash.unicodeScalars.allSatisfy({
+                      Self.hexadecimalCharacters.contains($0)
+                  }) else {
+                return nil
+            }
+            self.role = normalizedRole
+            self.byteSize = byteSize
+            self.sha256 = normalizedHash
+        }
+
+        static func < (lhs: ResourceProof, rhs: ResourceProof) -> Bool {
+            if lhs.role != rhs.role { return lhs.role < rhs.role }
+            if lhs.byteSize != rhs.byteSize { return lhs.byteSize < rhs.byteSize }
+            return lhs.sha256 < rhs.sha256
+        }
+    }
+}

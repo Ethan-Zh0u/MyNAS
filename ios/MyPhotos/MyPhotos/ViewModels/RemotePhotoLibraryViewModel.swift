@@ -102,6 +102,17 @@ final class RemotePhotoLibraryViewModel: ObservableObject {
         await loadNextPage()
     }
 
+    /// The server has already confirmed a permanent H1 delete. Removing the
+    /// visible item locally avoids leaving a tappable stale card until the next
+    /// `/changes` polling cycle; it never deletes or alters any PhotoKit asset.
+    func removeDeletedAsset(id: String) {
+        assets.removeAll { $0.id == id }
+        pendingChangeCount = max(0, pendingChangeCount - 1)
+        if assets.isEmpty, !hasMore {
+            state = .empty
+        }
+    }
+
     /// Called only while the remote gallery is visible. It never mutates a
     /// paginated grid in place: a small banner lets the user decide when to
     /// reload from the first page, avoiding duplicate cells and scroll jumps.

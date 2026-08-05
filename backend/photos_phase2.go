@@ -15,7 +15,7 @@ import (
 
 const (
 	photosAPIVersion       = "v1"
-	photosServerVersion    = "0.8.5"
+	photosServerVersion    = "0.8.6"
 	photosMinimumApp       = "1.0"
 	photosServerSettingKey = "photos.server_id"
 )
@@ -121,7 +121,7 @@ func (a *App) photosCapabilities(w http.ResponseWriter, r *http.Request) {
 		DerivativePolicy:     photosDerivativePolicyVersion,
 		Features: photosFeatureResponse{
 			PhotoAssets:                true,
-			BackgroundTransfers:        false,
+			BackgroundTransfers:        a.c.EnablePhotosBackgroundTransfers,
 			LivePhotos:                 true,
 			RemoteBrowsing:             true,
 			ChangeFeed:                 true,

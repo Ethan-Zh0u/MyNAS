@@ -69,7 +69,7 @@ func TestPhotosDeviceAssetMappingsAreOwnerAndDeviceScoped(t *testing.T) {
 	app := newPhotosPhase2TestApp(t)
 	deviceID := "ios-f2-recovery-device"
 	modificationDate := "2026-07-27T08:30:45.123Z"
-	_ = uploadDeviceMappingTestPhoto(t, app, "first-local-id", deviceID, modificationDate)
+	first := uploadDeviceMappingTestPhoto(t, app, "first-local-id", deviceID, modificationDate)
 	_ = uploadDeviceMappingTestPhoto(t, app, "second-local-id", deviceID, modificationDate)
 	_ = uploadDeviceMappingTestPhoto(t, app, "different-device-id", "another-ios-device", modificationDate)
 
@@ -137,6 +137,21 @@ func TestPhotosDeviceAssetMappingsAreOwnerAndDeviceScoped(t *testing.T) {
 	}
 	if len(otherOwnerPage.Mappings) != 0 {
 		t.Fatalf("other owner received mappings=%#v", otherOwnerPage.Mappings)
+	}
+
+	exactRecorder := httptest.NewRecorder()
+	exactRequest := tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/device-asset-mappings?deviceID="+url.QueryEscape(deviceID)+"&assetID="+url.QueryEscape(first.AssetID),
+	)
+	app.photosDeviceAssetMappings(exactRecorder, exactRequest)
+	var exactPage photosDeviceAssetMappingPageResponse
+	if err := json.NewDecoder(exactRecorder.Body).Decode(&exactPage); err != nil {
+		t.Fatal(err)
+	}
+	if exactRecorder.Code != http.StatusOK || exactPage.HasMore || exactPage.NextCursor != nil ||
+		len(exactPage.Mappings) != 1 || exactPage.Mappings[0].AssetID != first.AssetID {
+		t.Fatalf("exact mapping lookup status=%d page=%#v", exactRecorder.Code, exactPage)
 	}
 }
 
@@ -239,6 +254,26 @@ func TestPhotosAssetsExposeSameDeviceVersionTransitionsWithoutMappingIdentity(t 
 		t.Fatalf("version transition count=%d, want 1", transitionCount)
 	}
 
+	// Reverting the edit returns the same device/local identifier to the
+	// original complete Live Photo group. It must restore that original asset,
+	// not create a third resource group, and record the reverse transition.
+	reverted := createTestPhotoUploadSession(t, app, firstInput)
+	if reverted.Status != "duplicate" || reverted.AssetID != first.AssetID {
+		t.Fatalf("reverted Live Photo did not restore original group: %#v", reverted)
+	}
+	if err := app.db.QueryRow(
+		`SELECT COUNT(*) FROM photo_asset_version_transitions
+		 WHERE (from_asset_id=? AND to_asset_id=?)
+		    OR (from_asset_id=? AND to_asset_id=?)`,
+		first.AssetID, second.AssetID,
+		second.AssetID, first.AssetID,
+	).Scan(&transitionCount); err != nil {
+		t.Fatal(err)
+	}
+	if transitionCount != 2 {
+		t.Fatalf("version transition count after revert=%d, want 2", transitionCount)
+	}
+
 	recorder := httptest.NewRecorder()
 	app.photosAssets(recorder, tailscaleRequest(http.MethodGet, "/api/v1/photos/assets"))
 	if recorder.Code != http.StatusOK {
@@ -258,10 +293,10 @@ func TestPhotosAssetsExposeSameDeviceVersionTransitionsWithoutMappingIdentity(t 
 	for _, asset := range page.Assets {
 		assets[asset.ID] = asset
 	}
-	if assets[first.AssetID].PreviousVersionCount != 0 ||
+	if assets[first.AssetID].PreviousVersionCount != 1 ||
 		assets[first.AssetID].NextVersionCount != 1 ||
 		assets[second.AssetID].PreviousVersionCount != 1 ||
-		assets[second.AssetID].NextVersionCount != 0 {
+		assets[second.AssetID].NextVersionCount != 1 {
 		t.Fatalf("unexpected version aggregates: %#v", assets)
 	}
 
@@ -277,7 +312,7 @@ func TestPhotosAssetsExposeSameDeviceVersionTransitionsWithoutMappingIdentity(t 
 	if err := json.NewDecoder(detailRecorder.Body).Decode(&detail); err != nil {
 		t.Fatal(err)
 	}
-	if detail.PreviousVersionCount != 1 || detail.NextVersionCount != 0 {
+	if detail.PreviousVersionCount != 1 || detail.NextVersionCount != 1 {
 		t.Fatalf("unexpected version detail aggregate: %#v", detail)
 	}
 }

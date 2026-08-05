@@ -11,7 +11,7 @@ MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和�
 > 从准备设备、连接网线和硬盘，到写入 Raspberry Pi OS、开启 SSH、安装 Tailscale、接入硬盘和打开网页，全部按顺序说明。第一次接触树莓派也可以照着操作。
 
 > [!IMPORTANT]
-> 当前部署版本为 **v0.8.5**。网页连接和硬盘接入已提供新手向导，并显示实时读写速率和树莓派温度。MyNAS Photos 已具备 Tailscale 私有连接、原始资源手动备份、服务端预览、按账号隔离的远程照片浏览、精确内容关联，以及受限的本机删除与可选 MyNAS 备份永久删除。前台自动备份策略已经实现；iOS 系统传输正在进行受控真机验收，已观察到锁屏与开发终止后手动重新打开的两条恢复路径，但网络/低电量中断、服务重启和其他边界仍未验收，因此不把它描述为已保证的后台备份。原件导出和缓存管理仍在开发中。首次部署目前需要项目维护者完成；不要把 MyNAS 当作重要文件的唯一备份。
+> 当前部署版本为 **v0.8.6**。网页连接和硬盘接入已提供新手向导，并显示实时读写速率和树莓派温度。MyNAS Photos 已具备 Tailscale 私有连接、原始资源手动备份、服务端预览、按账号隔离的远程照片浏览、精确内容关联，以及受限的本机删除与可选 MyNAS 备份永久删除。前台自动备份策略已经实现；受控 G2 真机验收已观察到锁屏与开发终止后手动重新打开两条恢复路径，但网络/低电量中断、服务重启和其他边界仍未验收，因此不把它描述为已保证的后台备份。H1 后端已部署 MyNAS-only 删除接口；当前 iOS 的真实媒体下载／直接删除流程仍待验收。原件导出和缓存管理仍在开发中。首次部署目前需要项目维护者完成；不要把 MyNAS 当作重要文件的唯一备份。
 
 ## MyNAS 网页地址（重要）
 
@@ -118,7 +118,7 @@ MyNAS Photos 不是另一个云相册：它把你在 iPhone 上已获授权的�
 - Tailscale Serve 私有 HTTPS 访问
 - 数据盘挂载保护、自动重试和文件系统异常提示
 - MyNAS Photos 远程照片分页、增量变更、ETag/Range 下载，以及 Live Photo/ProRAW 原始资源保真
-- MyNAS Photos 的受保护后台传输任务账本、按账号与卷隔离的会话边界，以及受限恢复入口（完整系统后台验收仍在进行）
+- MyNAS Photos G2：后台传输会话按用户与卷隔离；iOS 已登记受限 BGProcessing handler，并只在队列持久化已确认完成结果后清理对应私有暂存副本；当前服务为受控真机验收显式声明 capability，启动时只清理七天以上且路径核验通过的未完成暂存会话；端到端验证完成前不把它描述为已交付能力
 
 ### 正在推进
 
@@ -191,7 +191,7 @@ macOS 首次部署前，需要把专用公钥加入树莓派的 `~/.ssh/authoriz
 MYNAS_REMOTE=<维护者>@<树莓派的-Tailscale-IP> ./deploy/deploy-macos.sh
 ```
 
-macOS 脚本会显式绕过 Clash 的 SSH 代理，完成前后端测试、Linux ARM64 构建、上传、原子切换、服务重启和版本健康检查。可通过 `MYNAS_DEPLOY_KEY`、`MYNAS_REMOTE`、`MYNAS_PAGES_ORIGIN` 和 `MYNAS_PRIVATE_ORIGIN` 覆盖默认值。
+macOS 脚本会显式绕过 Clash 的 SSH 代理，完成前后端测试、Linux ARM64 构建、上传、原子切换、服务重启、版本与后台能力健康检查。可通过 `MYNAS_DEPLOY_KEY`、`MYNAS_REMOTE`、`MYNAS_PAGES_ORIGIN` 和 `MYNAS_PRIVATE_ORIGIN` 覆盖默认值。`MYNAS_PHOTOS_BACKGROUND_TRANSFERS` 仅接受 `0` 或 `1`，默认 `0`；只有维护者准备做真实 iOS 系统传输验收时才显式传入 `1`，部署脚本会回读 capability 确认结果。
 
 部署使用 `/opt/mynas/releases/<UTC时间>/` 保存版本，并通过 `/opt/mynas/current` 原子切换。运维、回滚和故障排查见 [docs/operations.md](docs/operations.md)。
 

@@ -81,6 +81,38 @@ struct PreparedPhotoAsset: Sendable {
         try? FileManager.default.removeItem(at: temporaryDirectory)
     }
 
+    /// Keeps the protocol manifest shared by the foreground uploader and the
+    /// future file-backed G2 transport. The latter writes this exact payload to
+    /// protected storage before it ever asks iOS to own an upload task.
+    nonisolated func uploadSessionRequest(
+        volumeID: String,
+        deviceID: String
+    ) -> PhotoUploadSessionRequest {
+        PhotoUploadSessionRequest(
+            volumeID: volumeID,
+            deviceID: deviceID,
+            localIdentifier: localAsset.localIdentifier,
+            fingerprint: fingerprint,
+            mediaType: localAsset.mediaKind.backupMediaType,
+            captureDate: localAsset.creationDate.map(PhotoBackupSourceVersion.string),
+            modificationDate: localAsset.modificationDate.map(PhotoBackupSourceVersion.string),
+            pixelWidth: localAsset.pixelWidth,
+            pixelHeight: localAsset.pixelHeight,
+            duration: localAsset.duration,
+            favorite: localAsset.isFavorite,
+            resources: resources.map {
+                PhotoUploadResourceRequest(
+                    clientResourceID: $0.clientResourceID,
+                    resourceRole: $0.role,
+                    originalFilename: $0.originalFilename,
+                    contentType: $0.contentType,
+                    byteSize: $0.byteSize,
+                    sha256: $0.sha256
+                )
+            }
+        )
+    }
+
     private static func manifestFingerprint(_ resources: [PreparedPhotoResource]) -> String {
         var hasher = SHA256()
         for resource in resources.sorted(by: { $0.clientResourceID < $1.clientResourceID }) {
@@ -89,6 +121,33 @@ struct PreparedPhotoAsset: Sendable {
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
+}
+
+/// The source-of-truth payload for `POST /photos/upload-sessions`. It is kept
+/// outside the foreground-only uploader so a future background task can use a
+/// byte-for-byte file-backed request without duplicating metadata rules.
+nonisolated struct PhotoUploadSessionRequest: Codable, Sendable {
+    let volumeID: String
+    let deviceID: String
+    let localIdentifier: String
+    let fingerprint: String
+    let mediaType: String
+    let captureDate: String?
+    let modificationDate: String?
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let duration: TimeInterval
+    let favorite: Bool
+    let resources: [PhotoUploadResourceRequest]
+}
+
+nonisolated struct PhotoUploadResourceRequest: Codable, Sendable {
+    let clientResourceID: String
+    let resourceRole: String
+    let originalFilename: String
+    let contentType: String
+    let byteSize: Int64
+    let sha256: String
 }
 
 enum PhotoBackupJobStatus: String, Codable, Sendable {
@@ -119,7 +178,15 @@ enum PhotoBackupJobStatus: String, Codable, Sendable {
     }
 }
 
-enum PhotoBackupFailureKind: String, Codable, Sendable {
+/// Nil on older persisted jobs means the item was created by the existing
+/// manual workflow. Only jobs explicitly marked automatic are subject to G1's
+/// foreground/network/power gate when resuming.
+enum PhotoBackupJobOrigin: String, Codable, Sendable {
+    case manual
+    case automatic
+}
+
+nonisolated enum PhotoBackupFailureKind: String, Codable, Sendable {
     case network
     case sourceUnavailable
     case localStorage
@@ -128,6 +195,7 @@ enum PhotoBackupFailureKind: String, Codable, Sendable {
     case authorization
     case server
     case configuration
+    case remoteDeleted
     case unknown
 
     var title: String {
@@ -140,6 +208,7 @@ enum PhotoBackupFailureKind: String, Codable, Sendable {
         case .authorization: "MyNAS 身份或权限失效"
         case .server: "MyNAS 服务异常"
         case .configuration: "连接配置不完整"
+        case .remoteDeleted: "MyNAS 副本已删除"
         case .unknown: "未分类错误"
         }
     }
@@ -162,6 +231,8 @@ enum PhotoBackupFailureKind: String, Codable, Sendable {
             "确认 MyNAS 服务在线；短暂的服务器错误可以稍后重试。"
         case .configuration:
             "重新选择当前 MyNAS 和备份硬盘后再试。"
+        case .remoteDeleted:
+            "本机照片仍保留。需要再次备份时，请在备份页点“立即备份”或“重试”。"
         case .unknown:
             "可再次重试；如果持续失败，请保留此错误信息用于诊断。"
         }
@@ -177,6 +248,7 @@ enum PhotoBackupFailureKind: String, Codable, Sendable {
         case .authorization: "person.badge.key"
         case .server: "server.rack"
         case .configuration: "gearshape.badge.exclamationmark"
+        case .remoteDeleted: "externaldrive.badge.minus"
         case .unknown: "exclamationmark.triangle"
         }
     }
@@ -186,7 +258,7 @@ enum PhotoBackupFailureKind: String, Codable, Sendable {
     }
 }
 
-struct PhotoBackupFailure: Codable, Equatable, Sendable {
+nonisolated struct PhotoBackupFailure: Codable, Equatable, Sendable {
     let kind: PhotoBackupFailureKind
     let detail: String
     let occurredAt: Date
@@ -217,6 +289,7 @@ struct PhotoBackupJob: Identifiable, Codable, Equatable, Sendable {
     var assetID: String?
     var sourceState: PhotoSourceState?
     var derivativeState: PhotoDerivativeState?
+    var origin: PhotoBackupJobOrigin?
     var message: String?
     var failure: PhotoBackupFailure?
     var updatedAt: Date
@@ -269,8 +342,14 @@ struct PhotoBackupProgressSnapshot: Equatable, Sendable {
     let uploadedBytes: Int64
     let totalBytes: Int64
     let sizePendingCount: Int
+    /// Bytes currently reported by an iOS-owned background task but not yet
+    /// acknowledged by MyNAS. They are display-only and never mean complete.
+    let provisionalBytes: Int64
 
     var fractionCompleted: Double {
+        if hasCompleteSize, totalBytes > 0 {
+            return min(1, max(0, Double(uploadedBytes) / Double(totalBytes)))
+        }
         guard totalCount > 0 else { return 0 }
         return min(1, max(0, Double(completedCount) / Double(totalCount)))
     }
@@ -283,8 +362,33 @@ struct PhotoBackupProgressSnapshot: Equatable, Sendable {
         "\(completedCount) / \(totalCount)"
     }
 
+    /// A user-facing summary must use the same current PhotoKit denominator
+    /// as `countText`. Queue jobs only describe assets that have already been
+    /// prepared, so using their count here would make a newly discovered asset
+    /// disappear from the headline until its job exists.
+    var statusSummary: String {
+        guard totalCount > 0 else {
+            return "尚未开始备份"
+        }
+
+        if failedCount > 0 {
+            return "原件已上传 \(completedCount) / \(totalCount) 项，\(failedCount) 项需要重试"
+        }
+
+        let pendingCount = max(0, totalCount - completedCount)
+        if pendingCount > 0 {
+            return "原件已上传 \(completedCount) / \(totalCount) 项，\(pendingCount) 项待备份"
+        }
+
+        return "原件已上传 \(completedCount) / \(totalCount) 项"
+    }
+
     var hasCompleteSize: Bool {
         totalCount > 0 && sizePendingCount == 0
+    }
+
+    var hasProvisionalBytes: Bool {
+        provisionalBytes > 0
     }
 }
 

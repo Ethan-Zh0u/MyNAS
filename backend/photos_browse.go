@@ -249,6 +249,20 @@ func (a *App) photosDeviceAssetMappings(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid cursor", http.StatusBadRequest)
 		return
 	}
+	assetID := strings.TrimSpace(r.URL.Query().Get("assetID"))
+	if assetID != "" {
+		if err := validatePhotoAssetID(assetID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// A single exact-mapping lookup is never paginated. Rejecting a cursor
+		// keeps it from being accidentally combined with a cursor created for
+		// the device-wide recovery list.
+		if cursor != nil {
+			http.Error(w, "cursor is not allowed with asset ID", http.StatusBadRequest)
+			return
+		}
+	}
 
 	query := `SELECT m.local_identifier,m.asset_id,a.modification_date,a.source_state,a.derivative_state,
 		COALESCE((SELECT COUNT(1) FROM photo_resources r
@@ -260,6 +274,10 @@ func (a *App) photosDeviceAssetMappings(w http.ResponseWriter, r *http.Request) 
 		JOIN photo_assets a ON a.id=m.asset_id AND a.owner_user_id=m.owner_user_id
 		WHERE m.owner_user_id=? AND m.device_id=? AND a.source_state=?`
 	arguments := []any{owner.UserID, deviceID, photosSourceStateCommitted}
+	if assetID != "" {
+		query += ` AND m.asset_id=?`
+		arguments = append(arguments, assetID)
+	}
 	if cursor != nil {
 		query += ` AND (m.updated < ? OR (m.updated=? AND m.local_identifier < ?))`
 		arguments = append(arguments, cursor.UpdatedAt, cursor.UpdatedAt, cursor.LocalIdentifier)
@@ -312,7 +330,7 @@ func (a *App) photosDeviceAssetMappings(w http.ResponseWriter, r *http.Request) 
 		Mappings: mappings, NextCursor: nextCursor, HasMore: hasMore,
 	}
 	writePhotosJSONWithETag(
-		w, r, response, photosDeviceAssetMappingETag(owner.UserID, deviceID, mappings, nextCursor),
+		w, r, response, photosDeviceAssetMappingETag(owner.UserID, deviceID, assetID, mappings, nextCursor),
 	)
 }
 
@@ -326,6 +344,10 @@ func (a *App) photosAssetByPath(w http.ResponseWriter, r *http.Request) {
 	assetID := parts[0]
 	if r.Method == http.MethodPost && len(parts) == 1 && assetID == "delete" {
 		a.photosDeleteAssets(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "delete" {
+		a.photosDeleteRemoteAsset(w, r, assetID)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -726,11 +748,11 @@ func photosMetadataETag(
 }
 
 func photosDeviceAssetMappingETag(
-	ownerUserID, deviceID string,
+	ownerUserID, deviceID, assetID string,
 	mappings []photosDeviceAssetMappingResponse,
 	nextCursor *string,
 ) string {
-	seed := ownerUserID + ":device-mappings:" + deviceID
+	seed := ownerUserID + ":device-mappings:" + deviceID + ":" + assetID
 	for _, mapping := range mappings {
 		modificationDate := ""
 		if mapping.SourceModificationDate != nil {

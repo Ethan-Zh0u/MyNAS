@@ -7,6 +7,7 @@ struct SettingsView: View {
     let assets: [LocalPhotoAsset]
     let photoClient: PhotoLibraryClient
     @ObservedObject var backupCoordinator: PhotoBackupCoordinator
+    @AppStorage("photoTimelineShowsUnified") private var showsUnifiedTimeline = true
     private let cacheDirectories = CacheDirectoryProvider()
     private let connectionService = MyNASConnectionService()
     @State private var isConnectionPresented = false
@@ -63,7 +64,7 @@ struct SettingsView: View {
                                 }
                                 ProgressView(value: backupProgress.fractionCompleted)
                                 Text(
-                                    "原件已上传 \(backupProgress.countText) 项 · \(backupCoordinator.headline)"
+                                    "原件已上传 \(backupProgress.countText) 项 · \(backupCoordinator.headline(for: accountStore.current.accountID, assets: assets))"
                                 )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -158,11 +159,30 @@ struct SettingsView: View {
                 Section("本地照片") {
                     LabeledContent("Photos 权限", value: permissionText)
                     if authorization == .limited {
+                        Label("当前仅可访问部分图片", systemImage: "rectangle.badge.person.crop")
+                            .foregroundStyle(.secondary)
+                        Text("MyNAS Photos 只会显示系统授权给它的照片和视频，不会声称已访问完整照片库。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                         Button("管理允许访问的照片", action: onManageLimited)
                     }
                     Text("缩略图请求不会隐式从 iCloud 下载完整资源。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                if !accountStore.current.isLocalOnly {
+                    Section("照片显示") {
+                        Toggle(isOn: $showsUnifiedTimeline) {
+                            Label("统一时间线", systemImage: "rectangle.3.group.bubble.left")
+                        }
+                        Text("在“照片”中按拍摄时间同时显示本机照片和仅在 MyNAS 的项目。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Text("只有 MyNAS 已确认、且仍对应当前本机版本的备份才会合并；不会按文件名、日期或缩略图猜测同一项目。此开关只改变显示，不会上传、下载、合并或删除照片。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("存储与缓存") {
@@ -177,7 +197,7 @@ struct SettingsView: View {
 
                 Section("关于") {
                     LabeledContent("应用", value: "MyNAS Photos")
-                    LabeledContent("当前开发目标", value: "阶段 F · 跨设备统一图库")
+                    LabeledContent("当前开发目标", value: "阶段 G · 自动备份策略与后台能力")
                 }
             }
             .navigationTitle("设置")

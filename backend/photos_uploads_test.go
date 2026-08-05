@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPhotosMultiResourceUploadResumesVerifiesAndDeduplicates(t *testing.T) {
@@ -107,6 +109,167 @@ func TestPhotosMultiResourceUploadResumesVerifiesAndDeduplicates(t *testing.T) {
 		duplicate.DerivativeState != photosDerivativeStatePending ||
 		duplicate.BrowseReady {
 		t.Fatalf("duplicate response claimed the wrong backup state: %#v", duplicate)
+	}
+}
+
+func TestPhotosUploadSessionResumptionIsScopedToTheSelectedVolume(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	input := testPhotoUploadInput([]byte("same-resource-on-two-volumes"), nil)
+	primary := createTestPhotoUploadSession(t, app, input)
+
+	secondaryMount := t.TempDir()
+	if _, err := app.db.Exec(
+		`INSERT INTO volumes(id,name,uuid,device,filesystem,mount,enabled,created)
+		 VALUES(?,?,?,?,?,?,1,?)`,
+		"secondary", "Secondary", "test-secondary-uuid", secondaryMount, "ext4", secondaryMount, "now",
+	); err != nil {
+		t.Fatal(err)
+	}
+	secondaryInput := input
+	secondaryInput.VolumeID = "secondary"
+	secondary := createTestPhotoUploadSession(t, app, secondaryInput)
+	if secondary.ID == primary.ID || secondary.ID == "" {
+		t.Fatalf("volume switch reused the primary session: primary=%#v secondary=%#v", primary, secondary)
+	}
+
+	resumedPrimary := createTestPhotoUploadSession(t, app, input)
+	if resumedPrimary.ID != primary.ID {
+		t.Fatalf("primary volume did not resume its own session: got=%q want=%q", resumedPrimary.ID, primary.ID)
+	}
+}
+
+func TestPhotoUploadSessionMigrationScopesLegacyUniquenessByVolume(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy-photos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	configureDB(db)
+	app := &App{db: db}
+	if _, err = db.Exec(`CREATE TABLE photo_upload_sessions(
+		id TEXT PRIMARY KEY,
+		owner_user_id TEXT NOT NULL,
+		volume_id TEXT NOT NULL,
+		device_id TEXT NOT NULL,
+		local_identifier TEXT NOT NULL,
+		fingerprint TEXT NOT NULL,
+		asset_id TEXT NOT NULL,
+		media_type TEXT NOT NULL,
+		status TEXT NOT NULL,
+		capture_date TEXT,
+		modification_date TEXT,
+		pixel_width INTEGER NOT NULL DEFAULT 0,
+		pixel_height INTEGER NOT NULL DEFAULT 0,
+		duration REAL NOT NULL DEFAULT 0,
+		favorite INTEGER NOT NULL DEFAULT 0,
+		stage_dir TEXT NOT NULL,
+		created TEXT NOT NULL,
+		updated TEXT NOT NULL,
+		UNIQUE(owner_user_id,device_id,local_identifier,fingerprint)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err = app.migratePhotoUploadSessionsVolumeScope(); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id, volume string
+	}{
+		{id: "primary-session", volume: "primary"},
+		{id: "secondary-session", volume: "secondary"},
+	} {
+		if _, err = db.Exec(`INSERT INTO photo_upload_sessions(
+			id,owner_user_id,volume_id,device_id,local_identifier,fingerprint,asset_id,media_type,status,
+			stage_dir,created,updated
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			row.id, "owner", row.volume, "device", "local", "fingerprint", row.id+"-asset", "photo", "waiting",
+			"stage", "now", "now",
+		); err != nil {
+			t.Fatalf("insert for %s: %v", row.volume, err)
+		}
+	}
+	if _, err = db.Exec(`INSERT INTO photo_upload_sessions(
+		id,owner_user_id,volume_id,device_id,local_identifier,fingerprint,asset_id,media_type,status,
+		stage_dir,created,updated
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"duplicate-primary", "owner", "primary", "device", "local", "fingerprint", "asset", "photo", "waiting",
+		"stage", "now", "now",
+	); err == nil {
+		t.Fatal("legacy migration still allowed duplicate session identity within one volume")
+	}
+}
+
+func TestExpiredPhotoUploadSessionCleanupOnlyRemovesVerifiedExpiredStaging(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	expiredInput := testPhotoUploadInput([]byte("expired-session"), nil)
+	expired := createTestPhotoUploadSession(t, app, expiredInput)
+	var expiredStageDir string
+	if err := app.db.QueryRow("SELECT stage_dir FROM photo_upload_sessions WHERE id=?", expired.ID).Scan(&expiredStageDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(expiredStageDir, "expired-sentinel"), []byte("temporary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	expiredAt := now.Add(-photosUploadSessionMaxAge - time.Second).Format(time.RFC3339Nano)
+	if _, err := app.db.Exec("UPDATE photo_upload_sessions SET updated=? WHERE id=?", expiredAt, expired.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	freshInput := testPhotoUploadInput([]byte("fresh-session"), nil)
+	freshInput.LocalIdentifier = "fresh-local-id"
+	fresh := createTestPhotoUploadSession(t, app, freshInput)
+	var freshStageDir string
+	if err := app.db.QueryRow("SELECT stage_dir FROM photo_upload_sessions WHERE id=?", fresh.ID).Scan(&freshStageDir); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignStageDir := filepath.Join(t.TempDir(), "not-a-mynas-stage")
+	if err := os.MkdirAll(foreignStageDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignStageDir, "foreign-sentinel"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO photo_upload_sessions(
+		id,owner_user_id,volume_id,device_id,local_identifier,fingerprint,asset_id,media_type,status,
+		stage_dir,created,updated
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"unexpected-stage", "owner", "primary", "device", "unexpected-local", "unexpected-fingerprint", "unexpected-asset", "photo", "waiting",
+		foreignStageDir, expiredAt, expiredAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.cleanupExpiredPhotoUploadSessions(now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(expiredStageDir); !os.IsNotExist(err) {
+		t.Fatalf("expired staging still exists or cannot be checked: %v", err)
+	}
+	var expiredSessionCount, expiredResourceCount int
+	if err := app.db.QueryRow("SELECT COUNT(*) FROM photo_upload_sessions WHERE id=?", expired.ID).Scan(&expiredSessionCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.QueryRow("SELECT COUNT(*) FROM photo_upload_resources WHERE upload_session_id=?", expired.ID).Scan(&expiredResourceCount); err != nil {
+		t.Fatal(err)
+	}
+	if expiredSessionCount != 0 || expiredResourceCount != 0 {
+		t.Fatalf("expired metadata remained: sessions=%d resources=%d", expiredSessionCount, expiredResourceCount)
+	}
+	if _, err := os.Stat(freshStageDir); err != nil {
+		t.Fatalf("fresh staging was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(foreignStageDir, "foreign-sentinel")); err != nil {
+		t.Fatalf("unverified foreign path was removed: %v", err)
+	}
+	var foreignSessionCount int
+	if err := app.db.QueryRow("SELECT COUNT(*) FROM photo_upload_sessions WHERE id='unexpected-stage'").Scan(&foreignSessionCount); err != nil {
+		t.Fatal(err)
+	}
+	if foreignSessionCount != 1 {
+		t.Fatalf("unverified foreign session was removed: %d", foreignSessionCount)
 	}
 }
 

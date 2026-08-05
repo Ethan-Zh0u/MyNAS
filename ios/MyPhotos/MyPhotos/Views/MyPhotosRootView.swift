@@ -29,6 +29,7 @@ enum MainSection: String, CaseIterable, Identifiable, Hashable {
 
 struct MyPhotosRootView: View {
     @EnvironmentObject private var accountStore: AccountStore
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = LocalPhotoLibraryViewModel()
     @StateObject private var backupCoordinator = PhotoBackupCoordinator()
     @State private var section: MainSection = .photos
@@ -41,17 +42,51 @@ struct MyPhotosRootView: View {
         }
         .task {
             await library.start()
+            backupCoordinator.setAppIsForeground(scenePhase == .active)
+            backupCoordinator.synchronizeLibrary(
+                assets: library.assets,
+                account: accountStore.current
+            )
+            backupCoordinator.discoverAndAutomaticallyBackUp(
+                assets: library.assets,
+                account: accountStore.current,
+                client: library.imageClient
+            )
         }
         .onChange(of: library.assets) { _, assets in
             backupCoordinator.synchronizeLibrary(
                 assets: assets,
                 account: accountStore.current
             )
+            backupCoordinator.discoverAndAutomaticallyBackUp(
+                assets: assets,
+                account: accountStore.current,
+                client: library.imageClient
+            )
         }
         .onChange(of: accountStore.current) { _, account in
             backupCoordinator.synchronizeLibrary(
                 assets: library.assets,
                 account: account
+            )
+            backupCoordinator.discoverAndAutomaticallyBackUp(
+                assets: library.assets,
+                account: account,
+                client: library.imageClient
+            )
+        }
+        .onChange(of: scenePhase) { _, phase in
+            let isForeground = phase == .active
+            backupCoordinator.setAppIsForeground(isForeground)
+            guard isForeground else { return }
+            backupCoordinator.synchronizeLibrary(
+                assets: library.assets,
+                account: accountStore.current
+            )
+            backupCoordinator.discoverAndAutomaticallyBackUp(
+                assets: library.assets,
+                account: accountStore.current,
+                client: library.imageClient
             )
         }
     }

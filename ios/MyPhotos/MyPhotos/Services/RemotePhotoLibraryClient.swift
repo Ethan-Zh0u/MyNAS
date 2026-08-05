@@ -31,8 +31,140 @@ enum RemotePhotoLibraryError: LocalizedError, Sendable {
         case .serverRejected(let status):
             "MyNAS 暂时无法读取图库（HTTP \(status)）。"
         case .corruptedDownload:
-            "下载的预览文件未通过完整性校验。"
+            "下载的 MyNAS 文件未通过完整性校验。"
         }
+    }
+
+    /// A device mapping only avoids an unnecessary duplicate import. Older
+    /// MyNAS versions may support the gallery and original downloads without
+    /// implementing this optional lookup endpoint, so its absence must never
+    /// make every download unavailable.
+    var permitsDownloadWithoutDeviceMappingCheck: Bool {
+        switch self {
+        case .featureUnavailable:
+            true
+        case .invalidResponse:
+            // This is evaluated only after the optional device-mapping
+            // request. Older servers can expose the gallery while returning a
+            // mapping shape the current app cannot decode; that must not block
+            // a separately verified original-resource download.
+            true
+        case .serverRejected(let status):
+            status == 404 || status == 405 || status == 501
+        default:
+            false
+        }
+    }
+}
+
+/// A cumulative, resource-group-aware transfer update. The byte count is
+/// emitted while a file is still streaming to the app's protected temporary
+/// directory; it does not imply that the resource has passed SHA-256 yet.
+nonisolated struct RemotePhotoDownloadProgress: Sendable, Equatable {
+    let completedByteCount: Int64
+    let totalByteCount: Int64
+    let resourceIndex: Int
+    let resourceCount: Int
+    let resourceFilename: String
+
+    var fractionCompleted: Double {
+        guard totalByteCount > 0 else { return 0 }
+        return min(1, max(0, Double(completedByteCount) / Double(totalByteCount)))
+    }
+}
+
+/// `URLSession.download(for:)` intentionally has no streaming-byte callback.
+/// This single-use delegate keeps a large original on disk and reports bytes
+/// without retaining the media in memory.
+private final class OriginalResourceDownloadDelegate: NSObject, URLSessionDownloadDelegate {
+    private let destinationURL: URL
+    private let progressHandler: @Sendable (Int64) -> Void
+    private let delegateQueue: OperationQueue
+    private var session: URLSession!
+    private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
+    private var downloadedURL: URL?
+    private var response: URLResponse?
+    private var completionError: Error?
+    private var lastReportedByteCount: Int64 = -1
+
+    init(
+        configuration: URLSessionConfiguration,
+        destinationURL: URL,
+        progressHandler: @escaping @Sendable (Int64) -> Void
+    ) {
+        self.destinationURL = destinationURL
+        self.progressHandler = progressHandler
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .utility
+        self.delegateQueue = queue
+        super.init()
+        session = URLSession(
+            configuration: configuration,
+            delegate: self,
+            delegateQueue: delegateQueue
+        )
+    }
+
+    deinit {
+        session.invalidateAndCancel()
+    }
+
+    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            session.downloadTask(with: request).resume()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        let hasReachedEnd = totalBytesExpectedToWrite > 0
+            && totalBytesWritten >= totalBytesExpectedToWrite
+        guard hasReachedEnd
+            || totalBytesWritten - lastReportedByteCount >= 128 * 1_024 else {
+            return
+        }
+        lastReportedByteCount = totalBytesWritten
+        progressHandler(totalBytesWritten)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        response = downloadTask.response
+        do {
+            try FileManager.default.moveItem(at: location, to: destinationURL)
+            downloadedURL = destinationURL
+        } catch {
+            completionError = error
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        guard let continuation else { return }
+        self.continuation = nil
+        if let error {
+            continuation.resume(throwing: error)
+        } else if let completionError {
+            continuation.resume(throwing: completionError)
+        } else if let downloadedURL, let response {
+            continuation.resume(returning: (downloadedURL, response))
+        } else {
+            continuation.resume(throwing: RemotePhotoLibraryError.invalidResponse)
+        }
+        session.finishTasksAndInvalidate()
     }
 }
 
@@ -198,6 +330,62 @@ actor RemotePhotoLibraryClient {
         return mappings
     }
 
+    /// Looks up at most one owner- and current-device-scoped mapping. This is
+    /// used only to decide whether downloading the visible MyNAS item would
+    /// create a duplicate in Photos; it never guesses from dates or filenames.
+    func fetchDeviceAssetMapping(
+        account: AccountContext,
+        deviceID: String,
+        assetID: String
+    ) async throws -> ServerDeviceAssetMapping? {
+        guard let baseURL = account.serverURL else {
+            throw RemotePhotoLibraryError.notConnected
+        }
+        guard account.serverCapabilities.supportsDeviceAssetMappingRecovery != false else {
+            throw RemotePhotoLibraryError.featureUnavailable
+        }
+        let normalizedDeviceID = deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedAssetID = assetID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedDeviceID.isEmpty,
+              normalizedDeviceID.count <= 200,
+              !normalizedAssetID.isEmpty,
+              normalizedAssetID.count <= 200 else {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        let requestURL = try deviceAssetMappingPageURL(
+            baseURL: baseURL,
+            deviceID: normalizedDeviceID,
+            assetID: normalizedAssetID,
+            cursor: nil,
+            limit: 1
+        )
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try validatedHTTPResponse(response, data: data)
+        guard httpResponse.statusCode == 200 else {
+            throw error(for: httpResponse.statusCode)
+        }
+        let page: ServerDeviceAssetMappingPage
+        do {
+            page = try decoder.decode(ServerDeviceAssetMappingPage.self, from: data)
+        } catch {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        guard !page.hasMore,
+              page.nextCursor == nil,
+              page.mappings.count <= 1 else {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        guard let mapping = page.mappings.first else { return nil }
+        guard mapping.assetID == normalizedAssetID else {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        return mapping
+    }
+
     /// Permanently deletes only server-revalidated complete resource groups.
     /// It is intentionally a batch request: the backend validates every selected
     /// item before deleting the first one.
@@ -226,6 +414,48 @@ actor RemotePhotoLibraryClient {
         }
         do {
             return try decoder.decode(RemotePhotoDeletionResult.self, from: data)
+        } catch {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+    }
+
+    /// Permanently deletes exactly the remote gallery item shown to the user.
+    /// The server repeats owner, version, resource-group, sharing and worker
+    /// checks; this method never talks to PhotoKit or deletes a local asset.
+    func deleteRemoteAsset(
+        _ asset: ServerPhotoAsset,
+        account: AccountContext
+    ) async throws -> RemotePhotoDeletionResult.Item {
+        guard let baseURL = account.serverURL else {
+            throw RemotePhotoLibraryError.notConnected
+        }
+        let assetID = asset.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let version = asset.version.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !assetID.isEmpty, assetID.count <= 200,
+              !version.isEmpty, version.count <= 100 else {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        let requestURL = baseURL.appending(path: "api/v1/photos/assets/\(assetID)/delete")
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-MyNAS-Request")
+        request.httpBody = try encoder.encode(RemoteDeleteRequest(version: version))
+
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = try validatedHTTPResponse(response, data: data)
+        guard httpResponse.statusCode == 200 else {
+            throw error(for: httpResponse.statusCode)
+        }
+        do {
+            let result = try decoder.decode(RemotePhotoDeletionResult.Item.self, from: data)
+            guard result.assetID == assetID, !result.deletedAt.isEmpty else {
+                throw RemotePhotoLibraryError.invalidResponse
+            }
+            return result
+        } catch let error as RemotePhotoLibraryError {
+            throw error
         } catch {
             throw RemotePhotoLibraryError.invalidResponse
         }
@@ -333,43 +563,103 @@ actor RemotePhotoLibraryClient {
         return try resolvedDownloadURL(resource.downloadURL, relativeTo: baseURL)
     }
 
-    /// Reads only the byte range requested by AVFoundation. Keeping this inside
-    /// the actor makes video playback use the same Tailscale-safe URLSession as
-    /// the metadata and derivative clients.
-    func streamingData(
-        for resource: ServerPhotoResource,
-        in asset: ServerPhotoAsset,
+    /// Downloads every original resource as a complete file. Each resource is
+    /// verified against the metadata that was displayed with the gallery asset
+    /// before it is handed to PhotoKit; a partial group is never returned.
+    func downloadOriginalResources(
+        for asset: ServerPhotoAsset,
         account: AccountContext,
-        offset: Int64,
-        length: Int64
-    ) async throws -> RemotePhotoStreamResult {
-        let downloadURL = try streamingURL(
-            for: resource,
-            in: asset,
-            account: account
-        )
-        let safeOffset = max(offset, 0)
-        let safeLength = max(length, 1)
-        var request = URLRequest(url: downloadURL)
-        request.httpMethod = "GET"
-        request.setValue("video/*", forHTTPHeaderField: "Accept")
-        request.setValue(
-            "bytes=\(safeOffset)-\(safeOffset + safeLength - 1)",
-            forHTTPHeaderField: "Range"
-        )
-
-        let (data, response) = try await session.data(for: request)
-        let httpResponse = try validatedHTTPResponse(response, data: data)
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw error(for: httpResponse.statusCode)
+        progress: (@Sendable (RemotePhotoDownloadProgress) -> Void)? = nil
+    ) async throws -> RemotePhotoOriginalDownload {
+        guard !asset.resources.isEmpty else {
+            throw RemotePhotoLibraryError.invalidResource
         }
-        return RemotePhotoStreamResult(
-            data: data,
-            contentType: httpResponse.value(forHTTPHeaderField: "Content-Type"),
-            contentLength: Self.contentLength(from: httpResponse, fallback: data.count),
-            supportsByteRanges: httpResponse.statusCode == 206
-                || httpResponse.value(forHTTPHeaderField: "Accept-Ranges")?.lowercased() == "bytes"
-        )
+        var totalByteCount: Int64 = 0
+        for resource in asset.resources {
+            guard resource.byteSize >= 0, Self.isSHA256(resource.sha256) else {
+                throw RemotePhotoLibraryError.invalidResource
+            }
+            let (sum, didOverflow) = totalByteCount.addingReportingOverflow(resource.byteSize)
+            guard !didOverflow else {
+                throw RemotePhotoLibraryError.invalidResource
+            }
+            totalByteCount = sum
+        }
+        let directory = try temporaryDownloadDirectory(account: account)
+        do {
+            var downloaded: [DownloadedRemotePhotoResource] = []
+            downloaded.reserveCapacity(asset.resources.count)
+            var verifiedByteCount: Int64 = 0
+            for (index, resource) in asset.resources.enumerated() {
+                let sourceURL = try streamingURL(for: resource, in: asset, account: account)
+                var request = URLRequest(url: sourceURL)
+                request.httpMethod = "GET"
+                request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+                let destination = directory.appendingPathComponent(
+                    String(format: "%03d-%@", index, Self.safeDownloadFilename(resource.originalFilename, fallback: resource.id)),
+                    isDirectory: false
+                )
+                progress?(RemotePhotoDownloadProgress(
+                    completedByteCount: verifiedByteCount,
+                    totalByteCount: totalByteCount,
+                    resourceIndex: index,
+                    resourceCount: asset.resources.count,
+                    resourceFilename: resource.originalFilename
+                ))
+                let progressHandler = progress
+                let completedBeforeThisResource = verifiedByteCount
+                let currentResourceByteCount = resource.byteSize
+                let currentResourceIndex = index
+                let currentResourceCount = asset.resources.count
+                let currentResourceFilename = resource.originalFilename
+                let downloadTotalByteCount = totalByteCount
+                let transfer = OriginalResourceDownloadDelegate(
+                    configuration: session.configuration,
+                    destinationURL: destination
+                ) { receivedByteCount in
+                    progressHandler?(RemotePhotoDownloadProgress(
+                        completedByteCount: completedBeforeThisResource + min(receivedByteCount, currentResourceByteCount),
+                        totalByteCount: downloadTotalByteCount,
+                        resourceIndex: currentResourceIndex,
+                        resourceCount: currentResourceCount,
+                        resourceFilename: currentResourceFilename
+                    ))
+                }
+                let (downloadedURL, response) = try await transfer.download(request)
+                let httpResponse = try validatedDownloadHTTPResponse(response)
+                guard httpResponse.statusCode == 200 else {
+                    throw error(for: httpResponse.statusCode)
+                }
+                try FileManager.default.setAttributes(
+                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                    ofItemAtPath: destination.path
+                )
+                let metrics = try await Task.detached(priority: .utility) {
+                    let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
+                    let byteSize = (attributes[.size] as? NSNumber)?.int64Value ?? -1
+                    return (byteSize, try FileSHA256.digest(of: destination))
+                }.value
+                guard metrics.0 == resource.byteSize,
+                      metrics.1.caseInsensitiveCompare(resource.sha256) == .orderedSame else {
+                    throw RemotePhotoLibraryError.corruptedDownload
+                }
+                verifiedByteCount += resource.byteSize
+                progress?(RemotePhotoDownloadProgress(
+                    completedByteCount: verifiedByteCount,
+                    totalByteCount: totalByteCount,
+                    resourceIndex: index,
+                    resourceCount: asset.resources.count,
+                    resourceFilename: resource.originalFilename
+                ))
+                downloaded.append(
+                    DownloadedRemotePhotoResource(resource: resource, fileURL: downloadedURL)
+                )
+            }
+            return RemotePhotoOriginalDownload(temporaryDirectory: directory, resources: downloaded)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
     }
 
     /// Advances the account-isolated `/changes` cursor. On first use it drains
@@ -489,6 +779,7 @@ actor RemotePhotoLibraryClient {
     private func deviceAssetMappingPageURL(
         baseURL: URL,
         deviceID: String,
+        assetID: String? = nil,
         cursor: String?,
         limit: Int
     ) throws -> URL {
@@ -500,6 +791,9 @@ actor RemotePhotoLibraryClient {
             URLQueryItem(name: "deviceID", value: deviceID),
             URLQueryItem(name: "limit", value: String(limit))
         ]
+        if let assetID, !assetID.isEmpty {
+            queryItems.append(URLQueryItem(name: "assetID", value: assetID))
+        }
         if let cursor, !cursor.isEmpty {
             queryItems.append(URLQueryItem(name: "cursor", value: cursor))
         }
@@ -570,6 +864,23 @@ actor RemotePhotoLibraryClient {
         return response
     }
 
+    private func validatedDownloadHTTPResponse(
+        _ response: URLResponse
+    ) throws -> HTTPURLResponse {
+        guard let response = response as? HTTPURLResponse else {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        if response.statusCode == 401 {
+            throw RemotePhotoLibraryError.unauthorized
+        }
+        let contentType = response.value(forHTTPHeaderField: "Content-Type")?
+            .lowercased() ?? ""
+        if contentType.contains("text/html") {
+            throw RemotePhotoLibraryError.invalidResponse
+        }
+        return response
+    }
+
     private func error(for statusCode: Int) -> RemotePhotoLibraryError {
         if statusCode == 401 { return .unauthorized }
         if statusCode == 409 { return .backupDeletionRejected }
@@ -592,6 +903,10 @@ actor RemotePhotoLibraryClient {
                 sourceModificationDate = candidate.sourceModificationDate
             }
         }
+    }
+
+    private nonisolated struct RemoteDeleteRequest: Encodable, Sendable {
+        let version: String
     }
 
     private func metadataCacheURL(
@@ -623,6 +938,17 @@ actor RemotePhotoLibraryClient {
         )
     }
 
+    private func temporaryDownloadDirectory(account: AccountContext) throws -> URL {
+        let root = try directories.directory(for: account, kind: .temporaryDownloads)
+        let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
+        return directory
+    }
+
     private func loadMetadataEnvelope(from url: URL) throws -> MetadataCacheEnvelope {
         try decoder.decode(MetadataCacheEnvelope.self, from: Data(contentsOf: url))
     }
@@ -647,19 +973,21 @@ actor RemotePhotoLibraryClient {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func contentLength(
-        from response: HTTPURLResponse,
-        fallback: Int
-    ) -> Int64 {
-        if let contentRange = response.value(forHTTPHeaderField: "Content-Range"),
-           let total = contentRange.split(separator: "/").last,
-           let byteCount = Int64(total) {
-            return byteCount
+    private static func isSHA256(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy { scalar in
+            (48...57).contains(scalar.value)
+                || (65...70).contains(scalar.value)
+                || (97...102).contains(scalar.value)
         }
-        if response.expectedContentLength > 0 {
-            return response.expectedContentLength
-        }
-        return Int64(fallback)
+    }
+
+    private static func safeDownloadFilename(_ value: String, fallback: String) -> String {
+        let candidate = URL(fileURLWithPath: value).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: "-")
+            .replacingOccurrences(of: "\r", with: "-")
+            .replacingOccurrences(of: "\t", with: "-")
+        return candidate.isEmpty || candidate == "." || candidate == ".." ? fallback : candidate
     }
 
     private static func canUseOfflineCache(after error: Error) -> Bool {

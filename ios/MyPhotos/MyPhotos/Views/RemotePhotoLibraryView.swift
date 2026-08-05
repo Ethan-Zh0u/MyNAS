@@ -6,12 +6,29 @@ struct RemotePhotoLibraryView: View {
     @StateObject private var viewModel: RemotePhotoLibraryViewModel
     @AppStorage("remotePhotoGridColumnCount") private var columnCount = 4
     @State private var pinchStartColumnCount: Int?
+    @State private var presentedRemoteAsset: ServerPhotoAsset?
+    @State private var verificationLocalAssets: [LocalPhotoAsset] = []
+    @State private var confirmedRemoteAssetIDs: Set<String> = []
+    private let localClient: PhotoLibraryClient
+    private let backupCoordinator: PhotoBackupCoordinator
+    private let localAssets: [LocalPhotoAsset]
+    private let backupJobs: [PhotoBackupJob]
 
     private let minimumColumnCount = 2
     private let maximumColumnCount = 10
     private let gridSpacing: CGFloat = 2
 
-    init(account: AccountContext) {
+    init(
+        account: AccountContext,
+        localClient: PhotoLibraryClient,
+        backupCoordinator: PhotoBackupCoordinator,
+        localAssets: [LocalPhotoAsset],
+        backupJobs: [PhotoBackupJob]
+    ) {
+        self.localClient = localClient
+        self.backupCoordinator = backupCoordinator
+        self.localAssets = localAssets
+        self.backupJobs = backupJobs
         _viewModel = StateObject(
             wrappedValue: RemotePhotoLibraryViewModel(account: account)
         )
@@ -22,6 +39,54 @@ struct RemotePhotoLibraryView: View {
             repeating: GridItem(.flexible(minimum: 0), spacing: gridSpacing),
             count: columnCount
         )
+    }
+
+    /// The legacy mapping endpoint may not be available on an older MyNAS.
+    /// Resolve the persisted job's local identifier directly instead of using
+    /// the timeline's first loaded page, which could otherwise miss an older
+    /// but still accessible local original.
+    private func confirmedLocalCopy(for remoteAsset: ServerPhotoAsset) -> LocalPhotoAsset? {
+        return backupJobs
+            .filter {
+                $0.accountID == viewModel.account.accountID
+                    && $0.status == .completed
+                    && $0.sourceState == .committed
+                    && $0.assetID == remoteAsset.id
+            }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .compactMap { job in
+                guard let localAsset = localClient.accessibleAsset(
+                    localIdentifier: job.localIdentifier
+                ),
+                      job.sourceModificationDate == localAsset.modificationDate else {
+                    return nil
+                }
+                return localAsset
+            }
+            .first
+    }
+
+    private var localAssetsForVerification: [LocalPhotoAsset] {
+        verificationLocalAssets.isEmpty ? localAssets : verificationLocalAssets
+    }
+
+    private func refreshLocalCopyState() async {
+        confirmedRemoteAssetIDs = Set(
+            backupJobs.compactMap { job in
+                guard job.accountID == viewModel.account.accountID,
+                      job.status == .completed,
+                      job.sourceState == .committed,
+                      let remoteAssetID = job.assetID,
+                      let localAsset = localClient.accessibleAsset(
+                        localIdentifier: job.localIdentifier
+                      ),
+                      job.sourceModificationDate == localAsset.modificationDate else {
+                    return nil
+                }
+                return remoteAssetID
+            }
+        )
+        verificationLocalAssets = await localClient.allAccessibleAssets()
     }
 
     var body: some View {
@@ -37,11 +102,11 @@ struct RemotePhotoLibraryView: View {
                     systemImage: "externaldrive.badge.plus",
                     description: Text("先完成至少一项备份；衍生预览生成后会自动出现在这里。")
                 )
-            case .failed(let message):
+            case .failed:
                 ContentUnavailableView {
                     Label("无法读取 MyNAS 图库", systemImage: "wifi.exclamationmark")
                 } description: {
-                    Text(message)
+                    Text("请检查 Tailscale 连接")
                 } actions: {
                     Button("重试") {
                         Task { await viewModel.refresh() }
@@ -65,8 +130,38 @@ struct RemotePhotoLibraryView: View {
                 .accessibilityLabel("刷新 MyNAS 图库")
             }
         }
+        // Keep this presentation boundary UIKit-only. iOS 27's SwiftUI runtime
+        // crashes while it constructs the former remote-detail view tree.
+        .fullScreenCover(item: $presentedRemoteAsset) { asset in
+            RemotePhotoDetailUIKitHost(
+                asset: asset,
+                account: viewModel.account,
+                client: viewModel.client,
+                localClient: localClient,
+                localAssets: localAssetsForVerification,
+                confirmedLocalCopy: confirmedLocalCopy(for: asset),
+                onVerifiedLocalCopies: { remoteAsset, localAssets in
+                    backupCoordinator.registerVerifiedLocalCopies(
+                        localAssets,
+                        expectedRemoteAssetID: remoteAsset.id,
+                        account: viewModel.account,
+                        client: localClient
+                    )
+                },
+                onRemoteDeleted: { assetID, localDisposition in
+                    backupCoordinator.markRemoteBackupDeleted(
+                        assetID: assetID,
+                        accountID: viewModel.account.accountID,
+                        localDisposition: localDisposition
+                    )
+                    viewModel.removeDeletedAsset(id: assetID)
+                },
+                onDismiss: { presentedRemoteAsset = nil }
+            )
+        }
         .task {
             await viewModel.start()
+            await refreshLocalCopyState()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
                 guard !Task.isCancelled else { return }
@@ -91,17 +186,14 @@ struct RemotePhotoLibraryView: View {
 
                 LazyVGrid(columns: columns, spacing: gridSpacing) {
                     ForEach(viewModel.assets) { asset in
-                        NavigationLink {
-                            RemotePhotoDetailView(
-                                asset: asset,
-                                account: viewModel.account,
-                                client: viewModel.client
-                            )
+                        Button {
+                            presentedRemoteAsset = asset
                         } label: {
                             RemotePhotoGridCell(
                                 asset: asset,
                                 account: viewModel.account,
-                                client: viewModel.client
+                                client: viewModel.client,
+                                hasConfirmedLocalCopy: confirmedRemoteAssetIDs.contains(asset.id)
                             )
                         }
                         .buttonStyle(.plain)
@@ -165,6 +257,39 @@ struct RemotePhotoLibraryView: View {
     }
 }
 
+/// Remote-item details are presented outside the grid's scroll and magnify
+/// gesture tree. This keeps a problematic remote item from blocking the
+/// MyNAS gallery's navigation interaction on iOS 27.
+struct RemotePhotoDetailSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let asset: ServerPhotoAsset
+    let account: AccountContext
+    let client: RemotePhotoLibraryClient
+    let localClient: PhotoLibraryClient
+    let onRemoteDeleted: (String, PhotoBackupRemoteDeletionLocalDisposition) -> Void
+
+    /// Keep the presentation boundary erased. On iOS 27 this avoids a Swift
+    /// runtime generic-metadata crash while the full-screen detail is built.
+    var body: AnyView {
+        AnyView(
+            NavigationStack {
+                RemotePhotoDetailView(
+                    asset: asset,
+                    account: account,
+                    client: client,
+                    localClient: localClient,
+                    onRemoteDeleted: onRemoteDeleted
+                )
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("关闭", action: dismiss.callAsFunction)
+                    }
+                }
+            }
+        )
+    }
+}
+
 private struct RemoteLibraryStatusCard: View {
     let count: Int
     let serverName: String
@@ -190,7 +315,7 @@ private struct RemoteLibraryStatusCard: View {
 
                 Spacer()
 
-                Text("只读")
+                Text("受控操作")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 9)
@@ -227,6 +352,7 @@ struct RemotePhotoGridCell: View {
     let asset: ServerPhotoAsset
     let account: AccountContext
     let client: RemotePhotoLibraryClient
+    let hasConfirmedLocalCopy: Bool
 
     var body: some View {
         GeometryReader { geometry in
@@ -282,6 +408,16 @@ struct RemotePhotoGridCell: View {
                         .padding(badgeInset(for: geometry.size.width))
                         .accessibilityLabel("预览正在生成")
                 }
+
+                if hasConfirmedLocalCopy {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: localCopyBadgeSize(for: geometry.size.width), weight: .semibold))
+                        .foregroundStyle(.white, Color.green)
+                        .shadow(color: .black.opacity(0.24), radius: 2, y: 1)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(badgeInset(for: geometry.size.width))
+                        .accessibilityLabel("本机已有同一原件")
+                }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .clipped()
@@ -301,6 +437,10 @@ struct RemotePhotoGridCell: View {
 
     private func statusBadgeSize(for width: CGFloat) -> CGFloat {
         min(24, max(14, width * 0.19))
+    }
+
+    private func localCopyBadgeSize(for width: CGFloat) -> CGFloat {
+        min(20, max(13, width * 0.15))
     }
 
     private func metadataFontSize(for width: CGFloat) -> CGFloat {
@@ -325,6 +465,10 @@ private struct RemotePhotoImageView: View {
         if asset.derivative(preferredKind) != nil { return preferredKind }
         if asset.derivative("grid") != nil { return "grid" }
         return asset.derivatives.first?.kind
+    }
+
+    private var maximumPreviewPixelSize: Int {
+        effectiveKind == "preview" ? 1_920 : 768
     }
 
     var body: some View {
@@ -361,7 +505,11 @@ private struct RemotePhotoImageView: View {
                     account: account
                 )
                 guard !Task.isCancelled else { return }
-                image = UIImage(data: result.data)
+                image = await RemotePreviewImageDecoder.decode(
+                    result.data,
+                    maximumPixelSize: maximumPreviewPixelSize
+                )
+                guard !Task.isCancelled else { return }
                 didFail = image == nil
             } catch {
                 guard !Task.isCancelled else { return }
@@ -372,11 +520,37 @@ private struct RemotePhotoImageView: View {
 }
 
 struct RemotePhotoDetailView: View {
+    @Environment(\.dismiss) private var dismiss
     let asset: ServerPhotoAsset
     let account: AccountContext
     let client: RemotePhotoLibraryClient
+    let localClient: PhotoLibraryClient
+    /// A local PhotoKit asset whose current source version has already been
+    /// confirmed as this exact MyNAS asset. Do not infer this from metadata.
+    let confirmedLocalCopy: LocalPhotoAsset? = nil
+    let onRemoteDeleted: (String, PhotoBackupRemoteDeletionLocalDisposition) -> Void
+    @State private var isCheckingForDuplicate = false
+    @State private var isCheckingDeletionTarget = false
+    @State private var isDownloading = false
+    @State private var isImportingDownloadedResources = false
+    @State private var downloadProgress: RemotePhotoDownloadProgress?
+    @State private var isDeleting = false
+    @State private var showsDuplicateDownloadConfirmation = false
+    @State private var showsRemoteDeleteConfirmation = false
+    @State private var localDeletionCandidate: PhotoBackupDeletionCandidate?
+    @State private var localDeletionUnavailableReason: String?
+    @State private var resultMessage: String?
+    @State private var completionToastMessage: String?
+    @State private var shouldLoadMediaPreview = false
 
-    var body: some View {
+    /// `Body == AnyView` is deliberate. The former statically composed body
+    /// contains media, dialogs, and action branches; iOS 27 crashes while
+    /// resolving its generic metadata during presentation.
+    var body: AnyView {
+        AnyView(detailBody)
+    }
+
+    private var detailBody: some View {
         ScrollView {
             VStack(spacing: 18) {
                 mediaPreview
@@ -386,7 +560,11 @@ struct RemotePhotoDetailView: View {
                         : 1,
                     contentMode: .fit
                 )
-                .frame(maxHeight: 560)
+                // During a presentation transition SwiftUI can briefly offer
+                // this subtree a zero-height proposal. Keep the media slot
+                // non-zero so CoreAnimation never asks ImageIO for a 1206×0
+                // backing image.
+                .frame(minHeight: 240, maxHeight: 560)
                 .background(Color.black.opacity(0.04))
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -421,7 +599,15 @@ struct RemotePhotoDetailView: View {
                 RemoteOriginalResourcesCard(resources: asset.resources)
                     .padding(.horizontal)
 
-                Text("当前阶段只读取 MyNAS 中的预览、元数据和视频原件流，不会修改、导出或删除服务器原件。")
+                if hasConfirmedLocalCopy {
+                    confirmedLocalCopyNotice
+                        .padding(.horizontal)
+                }
+
+                detailActions
+                    .padding(.horizontal)
+
+                Text("下载会先核验每个原件资源的大小和 SHA-256，再通过系统 Photos 导入。删除时可只删除 MyNAS，或同时将已验证的本机原件移入系统“最近删除”。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
@@ -430,33 +616,366 @@ struct RemotePhotoDetailView: View {
         }
         .navigationTitle("MyNAS 预览")
         .navigationBarTitleDisplayMode(.inline)
+        .overlay(alignment: .bottom) {
+            if let completionToastMessage {
+                Label(completionToastMessage, systemImage: "checkmark.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 15)
+                    .padding(.vertical, 11)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 14)
+                    .allowsHitTesting(false)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: completionToastMessage)
+        .confirmationDialog(
+            "本机已有这张照片",
+            isPresented: $showsDuplicateDownloadConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("仍然下载一份副本") {
+                Task { await downloadOriginalsToPhotos() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("MyNAS 已确认这台 iPhone 仍可访问同一项目。继续会在系统照片中创建一份新的副本。")
+        }
+        .confirmationDialog(
+            "选择删除范围",
+            isPresented: $showsRemoteDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            if let localDeletionCandidate {
+                Button("同时删除本机照片（移入“最近删除”）", role: .destructive) {
+                    Task { await deleteLocalAndRemoteAsset(localDeletionCandidate) }
+                }
+            }
+            Button("仅删除 MyNAS 项目", role: .destructive) {
+                Task { await deleteRemoteAsset() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            if localDeletionCandidate != nil {
+                Text("“仅删除 MyNAS 项目”不会改动本机照片。另一项会先由 iOS 将本机照片移入“最近删除”，再永久删除 MyNAS 原件、预览和备份记录；若 MyNAS 拒绝删除，本机照片仍可在系统“最近删除”中恢复。")
+            } else if let localDeletionUnavailableReason {
+                Text("\(localDeletionUnavailableReason) 因此这次只能删除 MyNAS 项目，本机照片不会被删除。")
+            } else {
+                Text("这会永久删除 MyNAS 中的原件、预览和备份记录，不能撤销。本机照片不会被删除。")
+            }
+        }
+        .alert(
+            "MyNAS 图库",
+            isPresented: Binding(
+                get: { resultMessage != nil },
+                set: { if !$0 { resultMessage = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) { resultMessage = nil }
+        } message: {
+            Text(resultMessage ?? "")
+        }
+    }
+
+    private var isPerformingAction: Bool {
+        isCheckingForDuplicate || isCheckingDeletionTarget || isDownloading || isDeleting
+    }
+
+    private var hasConfirmedLocalCopy: Bool {
+        guard let confirmedLocalCopy else { return false }
+        return localClient.hasAccessibleAsset(localIdentifier: confirmedLocalCopy.localIdentifier)
+    }
+
+    private var confirmedLocalCopyNotice: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("本机已有同一原件")
+                    .font(.subheadline.weight(.semibold))
+                Text("继续下载会在系统照片中创建一份新的副本。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var detailActions: some View {
+        VStack(spacing: 10) {
+            Button {
+                Task { await prepareOriginalDownload() }
+            } label: {
+                Label(
+                    downloadActionTitle,
+                    systemImage: "arrow.down.to.line.compact"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .disabled(isPerformingAction)
+            remotePrimaryActionStyle()
+
+            if isDownloading {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: downloadProgress?.fractionCompleted ?? 0)
+                        .tint(.accentColor)
+                    Text(downloadProgressDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 2)
+            }
+
+            Button(role: .destructive) {
+                Task { await prepareRemoteDeletion() }
+            } label: {
+                Label(
+                    isCheckingDeletionTarget || isDeleting ? "正在准备删除…" : "删除…",
+                    systemImage: "trash"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .disabled(isPerformingAction)
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private func prepareOriginalDownload() async {
+        guard !isPerformingAction else { return }
+        if hasConfirmedLocalCopy {
+            showsDuplicateDownloadConfirmation = true
+            return
+        }
+        isCheckingForDuplicate = true
+        defer { isCheckingForDuplicate = false }
+        do {
+            let mapping = try await client.fetchDeviceAssetMapping(
+                account: account,
+                deviceID: PhotoBackupDeviceIdentity.currentID(),
+                assetID: asset.id
+            )
+            guard !Task.isCancelled else { return }
+            if let mapping,
+               localClient.hasAccessibleAsset(localIdentifier: mapping.localIdentifier) {
+                showsDuplicateDownloadConfirmation = true
+            } else {
+                await downloadOriginalsToPhotos()
+            }
+        } catch let error as RemotePhotoLibraryError
+            where error.permitsDownloadWithoutDeviceMappingCheck {
+            // A server without the optional device-mapping endpoint can still
+            // safely provide originals: the resource download verifies URL,
+            // byte count, and SHA-256 before Photos receives anything.
+            await downloadOriginalsToPhotos()
+        } catch {
+            guard !Task.isCancelled else { return }
+            resultMessage = "下载未开始：无法确认这台 iPhone 是否已有同一 MyNAS 项目。\n\n\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+        }
+    }
+
+    private func downloadOriginalsToPhotos() async {
+        guard !isDownloading && !isDeleting else { return }
+        isDownloading = true
+        isImportingDownloadedResources = false
+        downloadProgress = nil
+        defer {
+            isDownloading = false
+            isImportingDownloadedResources = false
+        }
+        do {
+            let download = try await client.downloadOriginalResources(
+                for: asset,
+                account: account
+            ) { progress in
+                Task { @MainActor in
+                    downloadProgress = progress
+                }
+            }
+            defer { download.removeTemporaryFiles() }
+            isImportingDownloadedResources = true
+            _ = try await localClient.importDownloadedRemoteResources(download.resources)
+            guard !Task.isCancelled else { return }
+            showDownloadCompletionToast("已导入 \(download.resources.count) 个 MyNAS 原件资源")
+        } catch {
+            guard !Task.isCancelled else { return }
+            resultMessage = "下载或导入未完成：\n\n\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+        }
+    }
+
+    private var downloadActionTitle: String {
+        if isCheckingForDuplicate { return "正在准备下载…" }
+        if isImportingDownloadedResources { return "正在导入系统照片…" }
+        if isDownloading { return "正在下载原件…" }
+        if hasConfirmedLocalCopy { return "仍然下载一份副本" }
+        return "下载原件到本机"
+    }
+
+    private var downloadProgressDescription: String {
+        if isImportingDownloadedResources {
+            return "原件已核验，正在导入系统照片…"
+        }
+        guard let downloadProgress else {
+            return "正在准备下载原件…"
+        }
+        let completed = ByteCountFormatter.string(
+            fromByteCount: downloadProgress.completedByteCount,
+            countStyle: .file
+        )
+        let total = ByteCountFormatter.string(
+            fromByteCount: downloadProgress.totalByteCount,
+            countStyle: .file
+        )
+        return "正在下载 \(downloadProgress.resourceIndex + 1) / \(downloadProgress.resourceCount) · \(completed) / \(total)"
+    }
+
+    private func showDownloadCompletionToast(_ message: String) {
+        withAnimation {
+            completionToastMessage = message
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 2_400_000_000)
+            guard !Task.isCancelled, completionToastMessage == message else { return }
+            withAnimation {
+                completionToastMessage = nil
+            }
+        }
+    }
+
+    /// The paired action is offered only with an exact, current device mapping
+    /// and a locally accessible PhotoKit asset. The server repeats validation
+    /// when the paired H0 deletion request arrives; this UI check exists solely
+    /// to keep the local and remote choices understandable and safe.
+    private func prepareRemoteDeletion() async {
+        guard !isPerformingAction else { return }
+        isCheckingDeletionTarget = true
+        defer { isCheckingDeletionTarget = false }
+        localDeletionCandidate = nil
+        localDeletionUnavailableReason = nil
+
+        do {
+            let mapping = try await client.fetchDeviceAssetMapping(
+                account: account,
+                deviceID: PhotoBackupDeviceIdentity.currentID(),
+                assetID: asset.id
+            )
+            guard !Task.isCancelled else { return }
+            guard let mapping else {
+                localDeletionUnavailableReason = "MyNAS 没有找到这台 iPhone 的已验证本机对应项。"
+                showsRemoteDeleteConfirmation = true
+                return
+            }
+            guard mapping.sourceState == PhotoSourceState.committed.rawValue,
+                  let sourceModificationDate = mapping.sourceModificationDate,
+                  !sourceModificationDate.isEmpty else {
+                localDeletionUnavailableReason = "这台 iPhone 的对应备份状态不是可安全删除的已提交版本。"
+                showsRemoteDeleteConfirmation = true
+                return
+            }
+            guard localClient.hasAccessibleAsset(localIdentifier: mapping.localIdentifier) else {
+                localDeletionUnavailableReason = "这台 iPhone 已无法访问对应的本机照片。"
+                showsRemoteDeleteConfirmation = true
+                return
+            }
+
+            localDeletionCandidate = PhotoBackupDeletionCandidate(
+                assetID: asset.id,
+                deviceID: PhotoBackupDeviceIdentity.currentID(),
+                localIdentifier: mapping.localIdentifier,
+                sourceModificationDate: sourceModificationDate
+            )
+            showsRemoteDeleteConfirmation = true
+        } catch {
+            guard !Task.isCancelled else { return }
+            // Direct MyNAS-only deletion remains available even if a mapping
+            // lookup is unavailable. Never guess a local Photos identifier.
+            localDeletionUnavailableReason = "无法确认这台 iPhone 的本机对应项。"
+            showsRemoteDeleteConfirmation = true
+        }
+    }
+
+    private func deleteRemoteAsset() async {
+        guard !isPerformingAction else { return }
+        isDeleting = true
+        defer { isDeleting = false }
+        do {
+            let result = try await client.deleteRemoteAsset(asset, account: account)
+            guard !Task.isCancelled else { return }
+            onRemoteDeleted(result.assetID, .retained)
+            dismiss()
+        } catch {
+            guard !Task.isCancelled else { return }
+            resultMessage = "MyNAS 未删除该项目：\n\n\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+        }
+    }
+
+    /// PhotoKit always owns the local deletion. Only after it confirms the
+    /// item moved to Recently Deleted do we ask MyNAS to remove the matching,
+    /// server-verified backup. A MyNAS rejection deliberately leaves the
+    /// remote item visible and explains how to recover the local item.
+    private func deleteLocalAndRemoteAsset(_ candidate: PhotoBackupDeletionCandidate) async {
+        guard !isPerformingAction else { return }
+        isDeleting = true
+        defer { isDeleting = false }
+
+        do {
+            try await localClient.deleteAssets(localIdentifiers: [candidate.localIdentifier])
+        } catch {
+            guard !Task.isCancelled else { return }
+            resultMessage = "本机照片没有删除，MyNAS 也没有删除该项目：\n\n\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            return
+        }
+
+        do {
+            let result = try await client.deleteBackups(candidates: [candidate], account: account)
+            guard result.items.count == 1,
+                  result.items[0].assetID == asset.id else {
+                throw RemotePhotoLibraryError.invalidResponse
+            }
+            guard !Task.isCancelled else { return }
+            onRemoteDeleted(asset.id, .movedToRecentlyDeleted)
+            dismiss()
+        } catch {
+            guard !Task.isCancelled else { return }
+            resultMessage = "本机照片已移入系统“最近删除”，但 MyNAS 没有删除该项目。若要恢复本机照片，请在系统照片的“最近删除”中恢复；MyNAS 项目仍保留。\n\n\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+        }
     }
 
     @ViewBuilder
     private var mediaPreview: some View {
-        switch asset.mediaType {
-        case .video:
-            RemoteVideoPreview(
-                resource: asset.videoResource,
-                asset: asset,
-                account: account,
-                client: client
-            )
-        case .livePhoto:
-            RemoteLivePhotoPreview(
-                resource: asset.pairedVideoResource,
-                asset: asset,
-                account: account,
-                client: client
-            )
-        case .photo, .unknown:
-            RemotePhotoImageView(
-                asset: asset,
-                preferredKind: "preview",
-                fillsContainer: false,
-                account: account,
-                client: client
-            )
+        if !shouldLoadMediaPreview {
+            RemoteMediaPreviewPlaceholder(asset: asset) {
+                shouldLoadMediaPreview = true
+            }
+        } else {
+            switch asset.mediaType {
+            case .video:
+                RemoteVideoPreview(
+                    resource: asset.videoResource,
+                    asset: asset,
+                    account: account,
+                    client: client
+                )
+            case .livePhoto:
+                RemoteLivePhotoPreview(
+                    resource: asset.pairedVideoResource,
+                    asset: asset,
+                    account: account,
+                    client: client
+                )
+            case .photo, .unknown:
+                RemotePhotoImageView(
+                    asset: asset,
+                    preferredKind: "preview",
+                    fillsContainer: false,
+                    account: account,
+                    client: client
+                )
+            }
         }
     }
 
@@ -469,6 +988,34 @@ struct RemotePhotoDetailView: View {
     }
 }
 
+/// Opening a MyNAS detail must be safe even when its remote derivative is slow,
+/// malformed, or too expensive to decode. The grid already shows a compact
+/// thumbnail, so defer the larger remote preview until the user asks for it.
+private struct RemoteMediaPreviewPlaceholder: View {
+    let asset: ServerPhotoAsset
+    let loadPreview: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.06)
+            VStack(spacing: 12) {
+                Image(systemName: asset.mediaType.systemImage)
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("远端预览尚未加载")
+                    .font(.subheadline.weight(.semibold))
+                Text("打开详情不会自动读取 MyNAS 媒体。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("加载预览", action: loadPreview)
+                    .buttonStyle(.borderedProminent)
+            }
+            .multilineTextAlignment(.center)
+            .padding()
+        }
+    }
+}
+
 private struct RemoteVideoPreview: View {
     let resource: ServerPhotoResource?
     let asset: ServerPhotoAsset
@@ -476,6 +1023,7 @@ private struct RemoteVideoPreview: View {
     let client: RemotePhotoLibraryClient
     @State private var player: AVPlayer?
     @State private var resourceLoader: MyNASMediaResourceLoader?
+    @State private var isPreparingPlayback = false
     @State private var didFail = false
 
     var body: some View {
@@ -483,50 +1031,87 @@ private struct RemoteVideoPreview: View {
             Color.black
             if let player {
                 VideoPlayer(player: player)
-            } else if didFail {
-                remotePreviewUnavailable(
-                    title: "无法从 MyNAS 播放视频",
-                    symbol: "video.slash",
-                    message: "请检查 Tailscale 连接后重试。视频不会被完整下载到 iPhone。"
-                )
             } else {
-                remotePreviewProgress("正在从 MyNAS 缓冲视频…")
-            }
-        }
-        .task(id: resource?.id) {
-            guard let resource else {
-                didFail = true
-                return
-            }
-            do {
-                let url = try await client.streamingURL(
-                    for: resource,
-                    in: asset,
-                    account: account
-                )
-                let loader = MyNASMediaResourceLoader(
-                    sourceURL: url,
-                    resource: resource,
+                RemotePhotoImageView(
                     asset: asset,
+                    preferredKind: "preview",
+                    fillsContainer: false,
                     account: account,
                     client: client
                 )
-                let urlAsset = try loader.makeAsset()
-                guard try await urlAsset.load(.isPlayable) else {
-                    didFail = true
-                    return
+                .allowsHitTesting(false)
+
+                Color.black.opacity(0.28)
+
+                VStack(spacing: 10) {
+                    if didFail {
+                        Text("无法从 MyNAS 播放视频")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                        Text("请检查 Tailscale 连接后重试。视频不会完整下载到 iPhone。")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.84))
+                            .multilineTextAlignment(.center)
+                    }
+                    Button {
+                        Task { await startPlayback() }
+                    } label: {
+                        Label(
+                            isPreparingPlayback ? "正在连接 MyNAS…" : "播放视频",
+                            systemImage: "play.fill"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isPreparingPlayback)
                 }
-                guard !Task.isCancelled else { return }
-                resourceLoader = loader
-                let newPlayer = AVPlayer(playerItem: AVPlayerItem(asset: urlAsset))
-                player = newPlayer
-                newPlayer.play()
-            } catch {
-                guard !Task.isCancelled else { return }
-                didFail = true
+                .padding()
             }
         }
-        .onDisappear { player?.pause() }
+        .onDisappear(perform: stopPlayback)
+    }
+
+    private func startPlayback() async {
+        guard !isPreparingPlayback, let resource else {
+            didFail = resource == nil
+            return
+        }
+        isPreparingPlayback = true
+        didFail = false
+        defer { isPreparingPlayback = false }
+        do {
+            let url = try await client.streamingURL(
+                for: resource,
+                in: asset,
+                account: account
+            )
+            let loader = MyNASMediaResourceLoader(
+                sourceURL: url,
+                resource: resource,
+                asset: asset,
+                account: account,
+                client: client
+            )
+            let urlAsset = try loader.makeAsset()
+            guard !Task.isCancelled else {
+                loader.invalidate()
+                return
+            }
+            resourceLoader = loader
+            let newPlayer = AVPlayer(playerItem: AVPlayerItem(asset: urlAsset))
+            player = newPlayer
+            newPlayer.play()
+        } catch {
+            guard !Task.isCancelled else { return }
+            didFail = true
+        }
+    }
+
+    private func stopPlayback() {
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+        resourceLoader?.invalidate()
+        resourceLoader = nil
     }
 }
 
@@ -573,7 +1158,13 @@ private struct RemoteLivePhotoPreview: View {
                 }
             }
         }
-        .onDisappear { player?.pause() }
+        .onDisappear {
+            player?.pause()
+            player?.replaceCurrentItem(with: nil)
+            player = nil
+            resourceLoader?.invalidate()
+            resourceLoader = nil
+        }
     }
 
     private func startPlayback() async {
@@ -598,10 +1189,7 @@ private struct RemoteLivePhotoPreview: View {
                 client: client
             )
             let urlAsset = try loader.makeAsset()
-            guard try await urlAsset.load(.isPlayable) else {
-                didFail = true
-                return
-            }
+            guard !Task.isCancelled else { return }
             resourceLoader = loader
             let newPlayer = AVPlayer(playerItem: AVPlayerItem(asset: urlAsset))
             player = newPlayer
@@ -670,6 +1258,15 @@ private func remotePreviewUnavailable(
 }
 
 private extension View {
+    @ViewBuilder
+    func remotePrimaryActionStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            buttonStyle(.glassProminent)
+        } else {
+            buttonStyle(.borderedProminent)
+        }
+    }
+
     func remoteMetadataBadge(fontSize: CGFloat) -> some View {
         self
             .font(.system(size: fontSize, weight: .semibold))

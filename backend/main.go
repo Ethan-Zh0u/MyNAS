@@ -26,7 +26,7 @@ import (
 
 type Config struct {
 	Root, DataDir, Listen, Origin, PrivateOrigin, ThermalPath string
-	DevIdentity                                               bool
+	DevIdentity, EnablePhotosBackgroundTransfers              bool
 }
 type StorageHealth struct {
 	Status     string `json:"status"`
@@ -84,7 +84,7 @@ type upload struct {
 }
 
 func main() {
-	c := Config{Root: env("MYNAS_ROOT", "/mnt/nas"), DataDir: env("MYNAS_DATA_DIR", filepath.Join(os.Getenv("HOME"), ".local/share/mynas")), Listen: env("MYNAS_LISTEN", "127.0.0.1:8080"), Origin: env("MYNAS_ALLOWED_ORIGIN", ""), PrivateOrigin: env("MYNAS_PRIVATE_ORIGIN", ""), ThermalPath: env("MYNAS_THERMAL_PATH", "/sys/class/thermal/thermal_zone0/temp"), DevIdentity: os.Getenv("MYNAS_ENV") == "development" && os.Getenv("MYNAS_DEV_IDENTITY") == "1"}
+	c := Config{Root: env("MYNAS_ROOT", "/mnt/nas"), DataDir: env("MYNAS_DATA_DIR", filepath.Join(os.Getenv("HOME"), ".local/share/mynas")), Listen: env("MYNAS_LISTEN", "127.0.0.1:8080"), Origin: env("MYNAS_ALLOWED_ORIGIN", ""), PrivateOrigin: env("MYNAS_PRIVATE_ORIGIN", ""), ThermalPath: env("MYNAS_THERMAL_PATH", "/sys/class/thermal/thermal_zone0/temp"), DevIdentity: os.Getenv("MYNAS_ENV") == "development" && os.Getenv("MYNAS_DEV_IDENTITY") == "1", EnablePhotosBackgroundTransfers: os.Getenv("MYNAS_PHOTOS_BACKGROUND_TRANSFERS") == "1"}
 	if os.Getenv("MYNAS_ENV") == "production" {
 		c.DevIdentity = false
 	}
@@ -120,6 +120,11 @@ func main() {
 	}
 	if err = a.ensureRegisteredVolumeDirs(); err != nil {
 		log.Fatal(err)
+	}
+	if c.EnablePhotosBackgroundTransfers {
+		if err = a.cleanupExpiredPhotoUploadSessions(time.Now().UTC()); err != nil {
+			log.Fatal(err)
+		}
 	}
 	if err = a.startPhotoDerivativeWorker(); err != nil {
 		log.Fatal(err)
@@ -246,7 +251,7 @@ CREATE TABLE IF NOT EXISTS photo_upload_sessions(
 	stage_dir TEXT NOT NULL,
 	created TEXT NOT NULL,
 	updated TEXT NOT NULL,
-	UNIQUE(owner_user_id,device_id,local_identifier,fingerprint)
+	UNIQUE(owner_user_id,volume_id,device_id,local_identifier,fingerprint)
 );
 CREATE TABLE IF NOT EXISTS photo_upload_resources(
 	id TEXT PRIMARY KEY,
@@ -318,6 +323,9 @@ CREATE INDEX IF NOT EXISTS photo_derivative_jobs_status ON photo_derivative_jobs
 CREATE INDEX IF NOT EXISTS photo_derivatives_asset ON photo_derivatives(asset_id,kind);
 CREATE INDEX IF NOT EXISTS photo_changes_owner_sequence ON photo_changes(owner_user_id,sequence);`)
 	if e != nil {
+		return e
+	}
+	if e = a.migratePhotoUploadSessionsVolumeScope(); e != nil {
 		return e
 	}
 	if _, e = a.db.Exec("ALTER TABLE uploads ADD COLUMN volume_id TEXT NOT NULL DEFAULT 'primary'"); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {

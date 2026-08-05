@@ -71,12 +71,26 @@ func TestPhotosPhase2HandshakeUsesStableServerAndUserIDs(t *testing.T) {
 	if !capabilities.Features.PhotoAssets || !capabilities.Features.LivePhotos {
 		t.Fatal("manual source backup must advertise photo assets and multi-resource Live Photo support")
 	}
+	if capabilities.Features.BackgroundTransfers {
+		t.Fatal("background transfers must remain disabled unless the server is explicitly configured")
+	}
 	if capabilities.BackupStateModel != photosBackupStateModelVersion ||
 		capabilities.DerivativePolicy != photosDerivativePolicyVersion {
 		t.Fatalf("unexpected backup state contract: %#v", capabilities)
 	}
 	if len(capabilities.DerivativeRecipes) != 0 {
 		t.Fatal("E1 must not advertise derivative recipes before the E2 worker is available")
+	}
+
+	app.c.EnablePhotosBackgroundTransfers = true
+	enabledRecorder := httptest.NewRecorder()
+	app.photosCapabilities(enabledRecorder, tailscaleRequest(http.MethodGet, "/api/v1/photos/capabilities"))
+	var enabled photosCapabilitiesResponse
+	if err := json.NewDecoder(enabledRecorder.Body).Decode(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if !enabled.Features.BackgroundTransfers {
+		t.Fatal("explicit server configuration did not advertise background transfer support")
 	}
 
 	firstRecorder := httptest.NewRecorder()

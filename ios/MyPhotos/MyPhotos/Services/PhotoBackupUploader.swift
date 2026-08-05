@@ -163,34 +163,16 @@ actor PhotoBackupUploader {
         volumeID: String,
         deviceID: String
     ) async throws -> PhotoUploadSessionEnvelope {
-        let requestBody = PhotoUploadSessionRequest(
-            volumeID: volumeID,
-            deviceID: deviceID,
-            localIdentifier: preparedAsset.localAsset.localIdentifier,
-            fingerprint: preparedAsset.fingerprint,
-            mediaType: preparedAsset.localAsset.mediaKind.backupMediaType,
-            captureDate: preparedAsset.localAsset.creationDate.map(Self.dateString),
-            modificationDate: preparedAsset.localAsset.modificationDate.map(Self.dateString),
-            pixelWidth: preparedAsset.localAsset.pixelWidth,
-            pixelHeight: preparedAsset.localAsset.pixelHeight,
-            duration: preparedAsset.localAsset.duration,
-            favorite: preparedAsset.localAsset.isFavorite,
-            resources: preparedAsset.resources.map {
-                PhotoUploadResourceRequest(
-                    clientResourceID: $0.clientResourceID,
-                    resourceRole: $0.role,
-                    originalFilename: $0.originalFilename,
-                    contentType: $0.contentType,
-                    byteSize: $0.byteSize,
-                    sha256: $0.sha256
-                )
-            }
-        )
         return try await jsonRequest(
             baseURL: baseURL,
             path: "api/v1/photos/upload-sessions",
             method: "POST",
-            body: try encoder.encode(requestBody)
+            body: try encoder.encode(
+                preparedAsset.uploadSessionRequest(
+                    volumeID: volumeID,
+                    deviceID: deviceID
+                )
+            )
         )
     }
 
@@ -307,13 +289,7 @@ actor PhotoBackupUploader {
         }
     }
 
-    private nonisolated static func dateString(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
-    }
-
-    private nonisolated static func outcome(
+    nonisolated static func outcome(
         from session: PhotoUploadSessionEnvelope,
         wasDuplicate: Bool
     ) throws -> PhotoBackupUploadOutcome {
@@ -354,31 +330,7 @@ actor PhotoBackupUploader {
     }
 }
 
-private nonisolated struct PhotoUploadSessionRequest: Encodable {
-    let volumeID: String
-    let deviceID: String
-    let localIdentifier: String
-    let fingerprint: String
-    let mediaType: String
-    let captureDate: String?
-    let modificationDate: String?
-    let pixelWidth: Int
-    let pixelHeight: Int
-    let duration: TimeInterval
-    let favorite: Bool
-    let resources: [PhotoUploadResourceRequest]
-}
-
-private nonisolated struct PhotoUploadResourceRequest: Encodable {
-    let clientResourceID: String
-    let resourceRole: String
-    let originalFilename: String
-    let contentType: String
-    let byteSize: Int64
-    let sha256: String
-}
-
-private nonisolated struct PhotoUploadSessionEnvelope: Decodable {
+nonisolated struct PhotoUploadSessionEnvelope: Decodable {
     let id: String?
     let assetID: String
     let status: String
@@ -391,7 +343,7 @@ private nonisolated struct PhotoUploadSessionEnvelope: Decodable {
     var resources: [PhotoUploadResourceEnvelope]
 }
 
-private nonisolated struct PhotoUploadResourceEnvelope: Decodable {
+nonisolated struct PhotoUploadResourceEnvelope: Decodable {
     let id: String
     let clientResourceID: String
     let resourceRole: String
@@ -404,7 +356,7 @@ private nonisolated struct PhotoUploadResourceEnvelope: Decodable {
     let status: String
 }
 
-private nonisolated struct PhotoUploadPartEnvelope: Decodable {
+nonisolated struct PhotoUploadPartEnvelope: Decodable {
     let resourceID: String
     let receivedBytes: Int64
     let status: String

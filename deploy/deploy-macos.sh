@@ -6,6 +6,7 @@ remote=${MYNAS_REMOTE:-rbp@rsp}
 key=${MYNAS_DEPLOY_KEY:-$HOME/.ssh/mynas_deploy}
 pages_origin=${MYNAS_PAGES_ORIGIN:-https://mynas-rsp.pages.dev}
 private_origin=${MYNAS_PRIVATE_ORIGIN:-https://rsp.tail681937.ts.net}
+background_transfers=${MYNAS_PHOTOS_BACKGROUND_TRANSFERS:-0}
 version=$(tr -d '[:space:]' < "$root/VERSION")
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 remote_release="/tmp/mynas-release-$stamp"
@@ -51,10 +52,15 @@ done
 
 case "$pages_origin" in https://*) ;; *) echo "MYNAS_PAGES_ORIGIN must be an HTTPS URL." >&2; exit 1 ;; esac
 case "$private_origin" in https://*) ;; *) echo "MYNAS_PRIVATE_ORIGIN must be an HTTPS URL." >&2; exit 1 ;; esac
+case "$background_transfers" in 0|1) ;; *) echo "MYNAS_PHOTOS_BACKGROUND_TRANSFERS must be 0 or 1." >&2; exit 1 ;; esac
+expected_background_transfers=false
+if [ "$background_transfers" = "1" ]; then
+  expected_background_transfers=true
+fi
 test -f "$key" || { echo "Missing deployment key: $key" >&2; exit 1; }
 mkdir -p "$build_dir"
 
-echo "Building and testing MyNAS v$version..."
+echo "Building and testing MyNAS v$version (background transfers=$background_transfers)..."
 (
   cd "$root/frontend"
   pnpm install --frozen-lockfile
@@ -71,7 +77,8 @@ echo "Building and testing MyNAS v$version..."
     go build -buildvcs=false -trimpath -ldflags='-s -w' -o "$build_dir/mynas-setup" ./cmd/mynas-setup
 )
 COPYFILE_DISABLE=1 tar -cf "$archive" -C "$root/frontend/dist" .
-printf 'MYNAS_ALLOWED_ORIGIN=%s\nMYNAS_PRIVATE_ORIGIN=%s\n' "$pages_origin" "$private_origin" > "$env_file"
+printf 'MYNAS_ALLOWED_ORIGIN=%s\nMYNAS_PRIVATE_ORIGIN=%s\nMYNAS_PHOTOS_BACKGROUND_TRANSFERS=%s\n' \
+  "$pages_origin" "$private_origin" "$background_transfers" > "$env_file"
 
 echo "Checking $remote before deployment..."
 retry "remote preflight" ssh "${ssh_options[@]}" "$remote" \
@@ -93,7 +100,7 @@ ssh "${ssh_options[@]}" "$remote" \
 
 echo "Verifying the deployed service..."
 retry "remote validation" ssh "${ssh_options[@]}" "$remote" \
-  "set -eu; systemctl is-active --quiet mynas; response=\$(curl --fail --silent -H 'Tailscale-User-Login: deploy-check' -H 'Tailscale-User-Name: deploy-check' http://127.0.0.1:8080/api/v1/health); printf '%s\n' \"\$response\"; printf '%s' \"\$response\" | grep -F '\"version\":\"$version\"' >/dev/null; printf 'current='; readlink -f /opt/mynas/current; tailscale serve status"
+  "set -eu; systemctl is-active --quiet mynas; response=\$(curl --fail --silent -H 'Tailscale-User-Login: deploy-check' -H 'Tailscale-User-Name: deploy-check' http://127.0.0.1:8080/api/v1/health); printf '%s\n' \"\$response\"; printf '%s' \"\$response\" | grep -F '\"version\":\"$version\"' >/dev/null; capabilities=\$(curl --fail --silent -H 'Tailscale-User-Login: deploy-check' -H 'Tailscale-User-Name: deploy-check' http://127.0.0.1:8080/api/v1/photos/capabilities); printf '%s\n' \"\$capabilities\"; printf '%s' \"\$capabilities\" | grep -F '\"backgroundTransfers\":$expected_background_transfers' >/dev/null; printf 'current='; readlink -f /opt/mynas/current; tailscale serve status"
 
 echo "MyNAS v$version deployed successfully to $remote."
 echo "Release source: $remote_release"

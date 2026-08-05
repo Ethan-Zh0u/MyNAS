@@ -12,6 +12,10 @@ struct PhotoTimelineView: View {
     @State private var deletionRequest: PhotoDeletionRequest?
     @State private var deletionErrorMessage: String?
     @State private var isDeleting = false
+    /// The local picker is intentionally paged for the plain “本机” grid.
+    /// “全部” needs a metadata-only complete snapshot, otherwise an older
+    /// physical duplicate cannot be joined to its verified MyNAS mapping.
+    @State private var unifiedLocalAssets: [LocalPhotoAsset] = []
     @AppStorage("photoTimelineShowsUnified") private var showsUnifiedTimeline = true
     @AppStorage("photoGridColumnCount") private var columnCount = 3
     @State private var pinchStartColumnCount: Int?
@@ -34,6 +38,28 @@ struct PhotoTimelineView: View {
 
     private var usesUnifiedTimeline: Bool {
         !accountStore.current.isLocalOnly && showsUnifiedTimeline && !selectionMode
+    }
+
+    private var timelineLocalAssets: [LocalPhotoAsset] {
+        usesUnifiedTimeline && !unifiedLocalAssets.isEmpty
+            ? unifiedLocalAssets
+            : viewModel.assets
+    }
+
+    private func synchronizeUnifiedTimeline(jobs: [PhotoBackupJob]? = nil) {
+        unifiedTimeline.synchronizeLocal(
+            assets: timelineLocalAssets,
+            jobs: jobs ?? backupCoordinator.jobs,
+            accountID: accountStore.current.accountID
+        )
+    }
+
+    private func refreshUnifiedLocalAssetSnapshot() async {
+        guard usesUnifiedTimeline else { return }
+        let assets = await viewModel.imageClient.allAccessibleAssets()
+        guard usesUnifiedTimeline, !Task.isCancelled else { return }
+        unifiedLocalAssets = assets
+        synchronizeUnifiedTimeline()
     }
 
     private var completedBackupIdentifiers: Set<String> {
@@ -123,16 +149,15 @@ struct PhotoTimelineView: View {
             Text(deletionErrorMessage ?? "")
         }
         .task(id: accountStore.current.accountID) {
-            unifiedTimeline.synchronizeLocal(
-                assets: viewModel.assets,
-                jobs: backupCoordinator.jobs,
-                accountID: accountStore.current.accountID
-            )
+            unifiedLocalAssets = []
+            synchronizeUnifiedTimeline()
             guard usesUnifiedTimeline else { return }
+            await refreshUnifiedLocalAssetSnapshot()
             await unifiedTimeline.refreshRemote(account: accountStore.current)
         }
         .task(id: "\(accountStore.current.accountID)-\(usesUnifiedTimeline)") {
             guard usesUnifiedTimeline else { return }
+            await refreshUnifiedLocalAssetSnapshot()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
                 guard !Task.isCancelled else { return }
@@ -140,29 +165,20 @@ struct PhotoTimelineView: View {
             }
         }
         .onChange(of: viewModel.assets) { _, assets in
-            unifiedTimeline.synchronizeLocal(
-                assets: assets,
-                jobs: backupCoordinator.jobs,
-                accountID: accountStore.current.accountID
-            )
+            unifiedLocalAssets = []
+            synchronizeUnifiedTimeline()
+            guard usesUnifiedTimeline else { return }
+            Task { await refreshUnifiedLocalAssetSnapshot() }
         }
         .onChange(of: backupCoordinator.jobs) { _, jobs in
-            unifiedTimeline.synchronizeLocal(
-                assets: viewModel.assets,
-                jobs: jobs,
-                accountID: accountStore.current.accountID
-            )
+            synchronizeUnifiedTimeline(jobs: jobs)
         }
         .onChange(of: showsUnifiedTimeline) { _, shouldShowUnified in
             guard shouldShowUnified, !accountStore.current.isLocalOnly else { return }
             selectionMode = false
             selectedIDs.removeAll()
             Task {
-                unifiedTimeline.synchronizeLocal(
-                    assets: viewModel.assets,
-                    jobs: backupCoordinator.jobs,
-                    accountID: accountStore.current.accountID
-                )
+                await refreshUnifiedLocalAssetSnapshot()
                 await unifiedTimeline.refreshRemote(account: accountStore.current)
             }
         }
@@ -196,7 +212,10 @@ struct PhotoTimelineView: View {
                                 for: accountStore.current.accountID,
                                 assets: viewModel.assets
                             ),
-                            headline: backupCoordinator.headline,
+                            headline: backupCoordinator.headline(
+                                for: accountStore.current.accountID,
+                                assets: viewModel.assets
+                            ),
                             isConnected: !accountStore.current.isLocalOnly
                         )
                     }
@@ -205,15 +224,14 @@ struct PhotoTimelineView: View {
                     .padding(.top, 2)
 
                     if !accountStore.current.isLocalOnly {
-                        Picker("显示范围", selection: $showsUnifiedTimeline) {
-                            Text("全部").tag(true)
-                            Text("本机").tag(false)
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.horizontal, 10)
-
                         NavigationLink {
-                            RemotePhotoLibraryView(account: accountStore.current)
+                            RemotePhotoLibraryView(
+                                account: accountStore.current,
+                                localClient: viewModel.imageClient,
+                                backupCoordinator: backupCoordinator,
+                                localAssets: viewModel.assets,
+                                backupJobs: backupCoordinator.jobs
+                            )
                         } label: {
                             RemoteLibraryEntryRow(
                                 serverName: accountStore.current.displayName
@@ -223,16 +241,12 @@ struct PhotoTimelineView: View {
                         .padding(.horizontal, 10)
                     }
 
-                    if viewModel.authorization == .limited {
-                        LimitedAccessBanner(action: viewModel.showLimitedPicker)
-                            .padding(.horizontal)
-                    }
-
                     if usesUnifiedTimeline {
                         UnifiedPhotoTimelineView(
                             viewModel: unifiedTimeline,
                             account: accountStore.current,
                             localClient: viewModel.imageClient,
+                            backupCoordinator: backupCoordinator,
                             columns: columns,
                             thumbnailTargetSize: thumbnailTargetSize
                         )
@@ -259,13 +273,11 @@ struct PhotoTimelineView: View {
             }
             .refreshable {
                 await viewModel.refresh()
-                unifiedTimeline.synchronizeLocal(
-                    assets: viewModel.assets,
-                    jobs: backupCoordinator.jobs,
-                    accountID: accountStore.current.accountID
-                )
                 if usesUnifiedTimeline {
+                    await refreshUnifiedLocalAssetSnapshot()
                     await unifiedTimeline.refreshRemote(account: accountStore.current)
+                } else {
+                    synchronizeUnifiedTimeline()
                 }
             }
             .simultaneousGesture(gridMagnificationGesture, including: .gesture)
@@ -361,11 +373,11 @@ struct PhotoTimelineView: View {
             selectionMode = false
             deletionRequest = nil
             await viewModel.refresh()
-            unifiedTimeline.synchronizeLocal(
-                assets: viewModel.assets,
-                jobs: backupCoordinator.jobs,
-                accountID: accountStore.current.accountID
-            )
+            if usesUnifiedTimeline {
+                await refreshUnifiedLocalAssetSnapshot()
+            } else {
+                synchronizeUnifiedTimeline()
+            }
             guard alsoDeleteMyNASBackups else { return }
             guard request.canAlsoDeleteMyNASBackups else {
                 deletionErrorMessage = PhotoDeletionFlowError.backupVerificationUnavailable.errorDescription
@@ -695,7 +707,7 @@ struct PhotoGridCell: View {
     }
 
     private func statusBadgeSize(for cellWidth: CGFloat) -> CGFloat {
-        min(24, max(14, cellWidth * 0.19))
+        min(20, max(13, cellWidth * 0.15))
     }
 
     private func metadataFontSize(for cellWidth: CGFloat) -> CGFloat {
@@ -772,28 +784,5 @@ struct PhotoThumbnailView: View {
     private var accessibilityDescription: String {
         if isCloudOnly { return "\(asset.mediaKind.displayName)，仅在 iCloud 中，未自动下载" }
         return asset.mediaKind.displayName
-    }
-}
-
-private struct LimitedAccessBanner: View {
-    let action: () -> Void
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "rectangle.badge.person.crop")
-                .foregroundStyle(Color.accentColor)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("当前仅可访问部分照片")
-                    .font(.subheadline.weight(.semibold))
-                Text("MyNAS Photos 只会显示系统授权给它的项目，不会声称已访问完整照片库。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-            Button("管理") { action() }
-                .font(.footnote.weight(.semibold))
-        }
-        .padding(12)
-        .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
     }
 }

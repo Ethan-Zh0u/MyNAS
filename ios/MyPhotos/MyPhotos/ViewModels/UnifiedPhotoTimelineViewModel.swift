@@ -30,6 +30,7 @@ final class UnifiedPhotoTimelineViewModel: ObservableObject {
 
     var hasMoreRemoteItems: Bool { remoteHasMore }
     var remoteClient: RemotePhotoLibraryClient { client }
+    var currentLocalAssets: [LocalPhotoAsset] { localAssets }
 
     func synchronizeLocal(
         assets: [LocalPhotoAsset],

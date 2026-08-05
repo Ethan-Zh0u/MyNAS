@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	photosUploadChunkSize = int64(4 * 1024 * 1024)
-	photosMaxResourceSize = int64(1 << 40)
+	photosUploadChunkSize     = int64(4 * 1024 * 1024)
+	photosMaxResourceSize     = int64(1 << 40)
+	photosUploadSessionMaxAge = 7 * 24 * time.Hour
 )
 
 type photosUploadResourceInput struct {
@@ -173,8 +174,8 @@ func (a *App) photosUploadSessions(w http.ResponseWriter, r *http.Request) {
 	var existingID string
 	err = a.db.QueryRow(
 		`SELECT id FROM photo_upload_sessions
-		 WHERE owner_user_id=? AND device_id=? AND local_identifier=? AND fingerprint=?`,
-		owner.UserID, input.DeviceID, input.LocalIdentifier, input.Fingerprint,
+		 WHERE owner_user_id=? AND volume_id=? AND device_id=? AND local_identifier=? AND fingerprint=?`,
+		owner.UserID, input.VolumeID, input.DeviceID, input.LocalIdentifier, input.Fingerprint,
 	).Scan(&existingID)
 	if err == nil {
 		response, responseErr := a.photoUploadSessionResponse(existingID, owner.UserID)
@@ -278,6 +279,160 @@ func (a *App) photosUploadSessions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// migratePhotoUploadSessionsVolumeScope upgrades the original session identity
+// to include the selected volume. Uploads are not interchangeable across
+// volumes: reusing an old session after a volume switch could write the wrong
+// staging directory or incorrectly report another volume's received bytes.
+// SQLite cannot alter an inline UNIQUE constraint, so the table is rebuilt in
+// one startup transaction while the server is not accepting requests.
+func (a *App) migratePhotoUploadSessionsVolumeScope() error {
+	var schema string
+	if err := a.db.QueryRow(
+		"SELECT sql FROM sqlite_master WHERE type='table' AND name='photo_upload_sessions'",
+	).Scan(&schema); err != nil {
+		return fmt.Errorf("read photo upload session schema: %w", err)
+	}
+	compactSchema := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(schema))
+	if strings.Contains(compactSchema, "unique(owner_user_id,volume_id,device_id,local_identifier,fingerprint)") {
+		return nil
+	}
+	if !strings.Contains(compactSchema, "unique(owner_user_id,device_id,local_identifier,fingerprint)") {
+		return errors.New("unsupported photo upload session uniqueness schema")
+	}
+
+	transaction, err := a.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin photo upload session migration: %w", err)
+	}
+	defer transaction.Rollback()
+	if _, err = transaction.Exec(`CREATE TABLE photo_upload_sessions_volume_scoped(
+		id TEXT PRIMARY KEY,
+		owner_user_id TEXT NOT NULL,
+		volume_id TEXT NOT NULL,
+		device_id TEXT NOT NULL,
+		local_identifier TEXT NOT NULL,
+		fingerprint TEXT NOT NULL,
+		asset_id TEXT NOT NULL,
+		media_type TEXT NOT NULL,
+		status TEXT NOT NULL,
+		capture_date TEXT,
+		modification_date TEXT,
+		pixel_width INTEGER NOT NULL DEFAULT 0,
+		pixel_height INTEGER NOT NULL DEFAULT 0,
+		duration REAL NOT NULL DEFAULT 0,
+		favorite INTEGER NOT NULL DEFAULT 0,
+		stage_dir TEXT NOT NULL,
+		created TEXT NOT NULL,
+		updated TEXT NOT NULL,
+		UNIQUE(owner_user_id,volume_id,device_id,local_identifier,fingerprint)
+	)`); err != nil {
+		return fmt.Errorf("create volume-scoped upload session table: %w", err)
+	}
+	if _, err = transaction.Exec(`INSERT INTO photo_upload_sessions_volume_scoped(
+		id,owner_user_id,volume_id,device_id,local_identifier,fingerprint,asset_id,media_type,status,
+		capture_date,modification_date,pixel_width,pixel_height,duration,favorite,stage_dir,created,updated
+	) SELECT
+		id,owner_user_id,volume_id,device_id,local_identifier,fingerprint,asset_id,media_type,status,
+		capture_date,modification_date,pixel_width,pixel_height,duration,favorite,stage_dir,created,updated
+	FROM photo_upload_sessions`); err != nil {
+		return fmt.Errorf("copy photo upload sessions: %w", err)
+	}
+	if _, err = transaction.Exec("DROP TABLE photo_upload_sessions"); err != nil {
+		return fmt.Errorf("replace legacy photo upload session table: %w", err)
+	}
+	if _, err = transaction.Exec("ALTER TABLE photo_upload_sessions_volume_scoped RENAME TO photo_upload_sessions"); err != nil {
+		return fmt.Errorf("rename volume-scoped photo upload session table: %w", err)
+	}
+	if err = transaction.Commit(); err != nil {
+		return fmt.Errorf("commit photo upload session migration: %w", err)
+	}
+	if _, err = a.db.Exec("CREATE INDEX IF NOT EXISTS photo_upload_owner_status ON photo_upload_sessions(owner_user_id,status,updated)"); err != nil {
+		return fmt.Errorf("restore photo upload session index: %w", err)
+	}
+	return nil
+}
+
+// cleanupExpiredPhotoUploadSessions removes abandoned staging only when the
+// server is being started with system background transfers explicitly enabled.
+// The exact generated path is recomputed from the trusted registered volume and
+// opaque session ID; malformed records, offline volumes and unknown timestamps
+// are deliberately retained for manual recovery rather than guessed at.
+func (a *App) cleanupExpiredPhotoUploadSessions(now time.Time) error {
+	type candidate struct {
+		id, volumeID, stageDir, updated string
+	}
+	rows, err := a.db.Query(`SELECT id,volume_id,stage_dir,updated
+		FROM photo_upload_sessions
+		WHERE status IN ('waiting','uploading','failed') AND stage_dir<>''`)
+	if err != nil {
+		return fmt.Errorf("list upload sessions for expiry: %w", err)
+	}
+	defer rows.Close()
+	candidates := make([]candidate, 0)
+	for rows.Next() {
+		var item candidate
+		if err = rows.Scan(&item.id, &item.volumeID, &item.stageDir, &item.updated); err != nil {
+			return fmt.Errorf("read upload session for expiry: %w", err)
+		}
+		candidates = append(candidates, item)
+	}
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("iterate upload sessions for expiry: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return fmt.Errorf("close upload session expiry query: %w", err)
+	}
+
+	cutoff := now.Add(-photosUploadSessionMaxAge)
+	for _, item := range candidates {
+		updatedAt, parseErr := time.Parse(time.RFC3339Nano, item.updated)
+		if parseErr != nil || updatedAt.After(cutoff) {
+			continue
+		}
+		if item.id == "" || filepath.Base(item.id) != item.id {
+			continue
+		}
+		volume, volumeErr := a.volumeByID(item.volumeID)
+		if volumeErr != nil || volume.Status != "online" {
+			continue
+		}
+		expectedStageDir := filepath.Clean(filepath.Join(volume.Mount, ".mynas", "photos-staging", item.id))
+		if filepath.Clean(item.stageDir) != expectedStageDir {
+			continue
+		}
+		info, statErr := os.Lstat(expectedStageDir)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return fmt.Errorf("inspect expired upload staging %q: %w", item.id, statErr)
+		}
+		if statErr == nil && !info.IsDir() {
+			continue
+		}
+		if err = os.RemoveAll(expectedStageDir); err != nil {
+			return fmt.Errorf("remove expired upload staging %q: %w", item.id, err)
+		}
+
+		transaction, transactionErr := a.db.Begin()
+		if transactionErr != nil {
+			return fmt.Errorf("begin expired upload cleanup %q: %w", item.id, transactionErr)
+		}
+		if _, transactionErr = transaction.Exec(
+			"DELETE FROM photo_upload_resources WHERE upload_session_id=?", item.id,
+		); transactionErr == nil {
+			_, transactionErr = transaction.Exec(
+				"DELETE FROM photo_upload_sessions WHERE id=? AND updated=?", item.id, item.updated,
+			)
+		}
+		if transactionErr != nil {
+			_ = transaction.Rollback()
+			return fmt.Errorf("remove expired upload session %q: %w", item.id, transactionErr)
+		}
+		if transactionErr = transaction.Commit(); transactionErr != nil {
+			return fmt.Errorf("commit expired upload cleanup %q: %w", item.id, transactionErr)
+		}
+	}
+	return nil
 }
 
 func (a *App) photosUploadSessionByPath(w http.ResponseWriter, r *http.Request) {

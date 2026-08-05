@@ -145,6 +145,77 @@ func TestPhotosDeleteBatchRejectsBeforeStagingAnyAsset(t *testing.T) {
 	}
 }
 
+func TestPhotosRemoteDeletePermanentlyRemovesOnlyTheConfirmedGalleryAsset(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	input := testPhotoUploadInput([]byte("remote-gallery-delete"), nil)
+	completed := completeTestPhotoUpload(t, app, input, map[string][]byte{
+		"photo-0": []byte("remote-gallery-delete"),
+	})
+	ownerUserID := testPhotoOwnerID(t, app, completed.AssetID)
+	asset, err := app.photoAsset(ownerUserID, completed.AssetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath, _ := testCommittedPhotoSource(t, app, completed.AssetID)
+
+	recorder := postPhotosRemoteDelete(t, app, completed.AssetID, asset.Version)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("remote delete status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response photosDeleteItemResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.AssetID != completed.AssetID || response.DeletedAt == "" {
+		t.Fatalf("unexpected remote delete response=%#v", response)
+	}
+	if _, err := os.Stat(originalPath); !os.IsNotExist(err) {
+		t.Fatalf("remote deletion left original=%v", err)
+	}
+	var assetCount int
+	if err := app.db.QueryRow("SELECT COUNT(1) FROM photo_assets WHERE id=?", completed.AssetID).Scan(&assetCount); err != nil || assetCount != 0 {
+		t.Fatalf("remote deletion left asset metadata count=%d err=%v", assetCount, err)
+	}
+}
+
+func TestPhotosRemoteDeleteRejectsStaleOrSharedAssetWithoutDeleting(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	input := testPhotoUploadInput([]byte("remote-delete-reject"), nil)
+	input.DeviceID = "first-device"
+	input.LocalIdentifier = "first-local"
+	first := completeTestPhotoUpload(t, app, input, map[string][]byte{
+		"photo-0": []byte("remote-delete-reject"),
+	})
+	ownerUserID := testPhotoOwnerID(t, app, first.AssetID)
+	asset, err := app.photoAsset(ownerUserID, first.AssetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath, _ := testCommittedPhotoSource(t, app, first.AssetID)
+
+	stale := postPhotosRemoteDelete(t, app, first.AssetID, "stale-gallery-version")
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale remote delete status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	if _, err := os.Stat(originalPath); err != nil {
+		t.Fatalf("stale remote delete removed original: %v", err)
+	}
+
+	secondInput := input
+	secondInput.DeviceID = "second-device"
+	secondInput.LocalIdentifier = "second-local"
+	if duplicate := createTestPhotoUploadSession(t, app, secondInput); duplicate.Status != "duplicate" {
+		t.Fatalf("expected shared duplicate: %#v", duplicate)
+	}
+	shared := postPhotosRemoteDelete(t, app, first.AssetID, asset.Version)
+	if shared.Code != http.StatusConflict {
+		t.Fatalf("shared remote delete status=%d body=%s", shared.Code, shared.Body.String())
+	}
+	if _, err := os.Stat(originalPath); err != nil {
+		t.Fatalf("shared remote delete removed original: %v", err)
+	}
+}
+
 func postPhotosDelete(t *testing.T, app *App, input photosDeleteAssetsInput) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(input)
@@ -158,4 +229,32 @@ func postPhotosDelete(t *testing.T, app *App, input photosDeleteAssetsInput) *ht
 	recorder := httptest.NewRecorder()
 	app.photosAssetByPath(recorder, request)
 	return recorder
+}
+
+func postPhotosRemoteDelete(
+	t *testing.T, app *App, assetID, version string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(photosRemoteDeleteInput{Version: version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := tailscaleRequest(http.MethodPost, "/api/v1/photos/assets/"+assetID+"/delete")
+	request.Header.Set("Content-Type", "application/json")
+	request.Body = ioNopCloser(strings.NewReader(string(body)))
+	request.ContentLength = int64(len(body))
+	recorder := httptest.NewRecorder()
+	app.photosAssetByPath(recorder, request)
+	return recorder
+}
+
+func testPhotoOwnerID(t *testing.T, app *App, assetID string) string {
+	t.Helper()
+	var ownerUserID string
+	if err := app.db.QueryRow(
+		"SELECT owner_user_id FROM photo_assets WHERE id=?", assetID,
+	).Scan(&ownerUserID); err != nil {
+		t.Fatal(err)
+	}
+	return ownerUserID
 }

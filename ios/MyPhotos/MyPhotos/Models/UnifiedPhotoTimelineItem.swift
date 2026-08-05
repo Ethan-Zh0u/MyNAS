@@ -55,8 +55,14 @@ struct UnifiedPhotoTimelineItem: Identifiable, Sendable {
     let remoteAsset: ServerPhotoAsset?
     let backupJob: PhotoBackupJob?
     let availability: UnifiedPhotoTimelineAvailability
+    /// More than one physical Photos item can be deliberately associated with
+    /// this exact MyNAS resource group (for example, a historical restore
+    /// duplicate). The unified grid presents that group once; it never deletes
+    /// or mutates the additional Photos items.
+    let localCopyCount: Int
 
     var id: String {
+        if let remoteAsset { return "linked-\(remoteAsset.id)" }
         if let localAsset { return "local-\(localAsset.localIdentifier)" }
         return "remote-\(remoteAsset?.id ?? "unknown")"
     }
@@ -87,20 +93,67 @@ struct UnifiedPhotoTimelineItem: Identifiable, Sendable {
         let remoteByID = Dictionary(uniqueKeysWithValues: remoteAssets.map { ($0.id, $0) })
         var matchedRemoteIDs = Set<String>()
 
-        var result = localAssets.map { localAsset -> UnifiedPhotoTimelineItem in
+        struct CurrentLocalRecord {
+            let localAsset: LocalPhotoAsset
+            let job: PhotoBackupJob?
+            let remoteAsset: ServerPhotoAsset?
+        }
+
+        let currentLocalRecords = localAssets.map { localAsset -> CurrentLocalRecord in
             let job = currentJobsByLocalIdentifier[localAsset.localIdentifier]
             let isCurrentSource = job?.sourceModificationDate == localAsset.modificationDate
             let currentJob = isCurrentSource ? job : nil
             let remoteAsset = currentJob?.assetID.flatMap { remoteByID[$0] }
-            if let remoteAsset { matchedRemoteIDs.insert(remoteAsset.id) }
-
-            return UnifiedPhotoTimelineItem(
+            return CurrentLocalRecord(
                 localAsset: localAsset,
-                remoteAsset: remoteAsset,
-                backupJob: currentJob,
-                availability: Self.availability(for: currentJob, remoteAsset: remoteAsset)
+                job: currentJob,
+                remoteAsset: remoteAsset
             )
         }
+
+        let linkedRecordsByRemoteID = Dictionary(grouping: currentLocalRecords.compactMap { record in
+            record.remoteAsset.map { ($0.id, record) }
+        }, by: { $0.0 })
+
+        linkedRecordsByRemoteID.keys.forEach { matchedRemoteIDs.insert($0) }
+        var result = currentLocalRecords
+            .filter { record in
+                if case nil = record.remoteAsset { return true }
+                return false
+            }
+            .map { record -> UnifiedPhotoTimelineItem in
+                UnifiedPhotoTimelineItem(
+                    localAsset: record.localAsset,
+                    remoteAsset: nil,
+                    backupJob: record.job,
+                    availability: Self.availability(for: record.job, remoteAsset: nil),
+                    localCopyCount: 1
+                )
+            }
+
+        result.append(
+            contentsOf: linkedRecordsByRemoteID.values.compactMap { linkedRecords in
+                guard let remoteAsset = linkedRecords.first?.1.remoteAsset else { return nil }
+                let primary = linkedRecords
+                    .map(\.1)
+                    .sorted {
+                        if $0.job?.updatedAt != $1.job?.updatedAt {
+                            return ($0.job?.updatedAt ?? .distantPast) > ($1.job?.updatedAt ?? .distantPast)
+                        }
+                        return $0.localAsset.localIdentifier < $1.localAsset.localIdentifier
+                    }
+                    .first
+                guard let primary else { return nil }
+
+                return UnifiedPhotoTimelineItem(
+                    localAsset: primary.localAsset,
+                    remoteAsset: remoteAsset,
+                    backupJob: primary.job,
+                    availability: Self.availability(for: primary.job, remoteAsset: remoteAsset),
+                    localCopyCount: linkedRecords.count
+                )
+            }
+        )
 
         result.append(
             contentsOf: remoteAssets
@@ -110,7 +163,8 @@ struct UnifiedPhotoTimelineItem: Identifiable, Sendable {
                         localAsset: nil,
                         remoteAsset: $0,
                         backupJob: nil,
-                        availability: .remoteOnly(isBrowseReady: $0.browseReady)
+                        availability: .remoteOnly(isBrowseReady: $0.browseReady),
+                        localCopyCount: 0
                     )
                 }
         )

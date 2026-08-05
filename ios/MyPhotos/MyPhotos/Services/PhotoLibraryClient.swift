@@ -21,6 +21,26 @@ enum PhotoLibraryDeletionError: LocalizedError {
     }
 }
 
+enum PhotoLibraryImportError: LocalizedError {
+    case permissionDenied
+    case invalidResource
+    case unsupportedResourceCombination
+    case systemRejected
+
+    var errorDescription: String? {
+        switch self {
+        case .permissionDenied:
+            "没有写入系统照片库的权限。请在系统设置中允许 MyNAS Photos 添加照片。"
+        case .invalidResource:
+            "下载的原件资源不完整或无法安全导入系统照片库。"
+        case .unsupportedResourceCombination:
+            "这组 MyNAS 原件不能由 iPhone 的照片图库还原为一个项目。"
+        case .systemRejected:
+            "iPhone 没有确认这次原件导入。"
+        }
+    }
+}
+
 @MainActor
 final class PhotoLibraryClient: NSObject {
     private let imageManager = PHCachingImageManager()
@@ -96,6 +116,171 @@ final class PhotoLibraryClient: NSObject {
                     continuation.resume(throwing: error)
                 } else {
                     continuation.resume(throwing: PhotoLibraryDeletionError.systemRejected)
+                }
+            }
+        }
+    }
+
+    /// Returns true only for a PhotoKit identifier MyNAS has already confirmed
+    /// for this device and which remains accessible under the current Photos
+    /// permission. It intentionally does not compare filenames or dates.
+    func hasAccessibleAsset(localIdentifier: String) -> Bool {
+        authorizationState().canReadLibrary && photoAsset(localIdentifier) != nil
+    }
+
+    /// Resolves one currently accessible Photos item without relying on the
+    /// timeline's paged grid snapshot. A persisted backup mapping can name an
+    /// older item that is not among the first visible local results.
+    func accessibleAsset(localIdentifier: String) -> LocalPhotoAsset? {
+        guard authorizationState().canReadLibrary,
+              let asset = photoAsset(localIdentifier) else {
+            return nil
+        }
+        return localAsset(from: asset)
+    }
+
+    /// Reads only PhotoKit metadata for the current permission scope. It does
+    /// not request image data or iCloud originals; callers still must perform
+    /// complete-resource verification before describing a candidate as equal.
+    func allAccessibleAssets() async -> [LocalPhotoAsset] {
+        guard authorizationState().canReadLibrary else { return [] }
+        let assets = photoAssets()
+        var result: [LocalPhotoAsset] = []
+        result.reserveCapacity(assets.count)
+        for index in 0..<assets.count {
+            guard !Task.isCancelled else { return result }
+            let asset = assets.object(at: index)
+            if let localAsset = self.localAsset(from: asset) {
+                result.append(localAsset)
+            }
+            // This inspection reads only PhotoKit metadata. Yield regularly so
+            // a large library cannot block scrolling or the close button.
+            if index > 0 && index.isMultiple(of: 120) {
+                await Task.yield()
+            }
+        }
+        return result
+    }
+
+    /// Imports an already verified complete original-resource group. PhotoKit
+    /// owns the actual library write; the caller keeps ownership of its private
+    /// temporary directory and removes it only after this method returns.
+    func importDownloadedRemoteResources(
+        _ downloadedResources: [DownloadedRemotePhotoResource]
+    ) async throws -> String? {
+        guard authorizationState().canReadLibrary else {
+            throw PhotoLibraryImportError.permissionDenied
+        }
+        guard !downloadedResources.isEmpty else {
+            throw PhotoLibraryImportError.invalidResource
+        }
+
+        let resources: [(DownloadedRemotePhotoResource, PHAssetResourceType)] = try downloadedResources.map { downloaded in
+            guard let resourceType = Self.photoResourceType(for: downloaded.resource.resourceRole),
+                  Self.isRegularFile(
+                    at: downloaded.fileURL,
+                    expectedByteSize: downloaded.resource.byteSize
+                  ) else {
+                throw PhotoLibraryImportError.invalidResource
+            }
+            return (downloaded, resourceType)
+        }
+
+        let resourceTypes = resources.map { NSNumber(value: $0.1.rawValue) }
+        guard PHAssetCreationRequest.supportsAssetResourceTypes(resourceTypes) else {
+            throw PhotoLibraryImportError.unsupportedResourceCombination
+        }
+
+        // A Photos service restart can invalidate its XPC connection while a
+        // request is in flight. Do not blindly retry: first use the creation
+        // placeholder to determine whether Photos committed the first request,
+        // so an interrupted callback cannot create an accidental duplicate.
+        let firstAttempt = await submitDownloadedRemoteResources(resources)
+        switch firstAttempt {
+        case .success(let placeholderLocalIdentifier):
+            return placeholderLocalIdentifier
+        case .failure(let error, let placeholderLocalIdentifier):
+            guard Self.wasPhotoLibraryServiceInterrupted(error) else {
+                throw error
+            }
+            if let placeholderLocalIdentifier,
+               hasAccessibleAsset(localIdentifier: placeholderLocalIdentifier) {
+                return placeholderLocalIdentifier
+            }
+
+            // Let photolibraryd finish reconnecting, then make exactly one
+            // fresh change request using the still-owned temporary files.
+            try await Task.sleep(nanoseconds: 750_000_000)
+            let retry = await submitDownloadedRemoteResources(resources)
+            switch retry {
+            case .success(let placeholderLocalIdentifier):
+                return placeholderLocalIdentifier
+            case .failure(let retryError, let retryPlaceholderLocalIdentifier):
+                if Self.wasPhotoLibraryServiceInterrupted(retryError),
+                   let retryPlaceholderLocalIdentifier,
+                   hasAccessibleAsset(localIdentifier: retryPlaceholderLocalIdentifier) {
+                    return retryPlaceholderLocalIdentifier
+                }
+                throw retryError
+            }
+        }
+    }
+
+    private enum DownloadedRemoteResourceImportResult {
+        case success(placeholderLocalIdentifier: String?)
+        case failure(Error, placeholderLocalIdentifier: String?)
+    }
+
+    /// Submits one Photos change request and retains the placeholder identity
+    /// even if the system reports failure after it has accepted the request.
+    private func submitDownloadedRemoteResources(
+        _ resources: [(DownloadedRemotePhotoResource, PHAssetResourceType)]
+    ) async -> DownloadedRemoteResourceImportResult {
+        await withCheckedContinuation { continuation in
+            var placeholderLocalIdentifier: String?
+            PHPhotoLibrary.shared().performChanges {
+                let request = PHAssetCreationRequest.forAsset()
+                placeholderLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
+                for (downloaded, resourceType) in resources {
+                    let options = PHAssetResourceCreationOptions()
+                    options.shouldMoveFile = false
+                    options.originalFilename = Self.safeBackupFilename(
+                        downloaded.resource.originalFilename,
+                        fallback: downloaded.resource.id
+                    )
+                    // MyNAS preserves PhotoKit's UTI when it is available.
+                    // A MIME string is not accepted by this PhotoKit property,
+                    // so leave it unset and let Photos infer from the filename.
+                    if !downloaded.resource.contentType.contains("/") {
+                        options.uniformTypeIdentifier = downloaded.resource.contentType
+                    }
+                    request.addResource(
+                        with: resourceType,
+                        fileURL: downloaded.fileURL,
+                        options: options
+                    )
+                }
+            } completionHandler: { success, error in
+                if success {
+                    continuation.resume(
+                        returning: .success(
+                            placeholderLocalIdentifier: placeholderLocalIdentifier
+                        )
+                    )
+                } else if let error {
+                    continuation.resume(
+                        returning: .failure(
+                            error,
+                            placeholderLocalIdentifier: placeholderLocalIdentifier
+                        )
+                    )
+                } else {
+                    continuation.resume(
+                        returning: .failure(
+                            PhotoLibraryImportError.systemRejected,
+                            placeholderLocalIdentifier: placeholderLocalIdentifier
+                        )
+                    )
                 }
             }
         }
@@ -430,6 +615,40 @@ final class PhotoLibraryClient: NSObject {
         case .adjustmentBasePairedVideo: "adjustmentBasePairedVideo"
         @unknown default: "resourceType\(type.rawValue)"
         }
+    }
+
+    private static func photoResourceType(for role: String) -> PHAssetResourceType? {
+        switch role {
+        case "photo": .photo
+        case "video": .video
+        case "audio": .audio
+        case "alternatePhoto": .alternatePhoto
+        case "photoProxy": .photoProxy
+        case "fullSizePhoto": .fullSizePhoto
+        case "fullSizeVideo": .fullSizeVideo
+        case "adjustmentData": .adjustmentData
+        case "adjustmentBasePhoto": .adjustmentBasePhoto
+        case "pairedVideo": .pairedVideo
+        case "fullSizePairedVideo": .fullSizePairedVideo
+        case "adjustmentBaseVideo": .adjustmentBaseVideo
+        case "adjustmentBasePairedVideo": .adjustmentBasePairedVideo
+        default: nil
+        }
+    }
+
+    private static func isRegularFile(at url: URL, expectedByteSize: Int64) -> Bool {
+        guard expectedByteSize >= 0,
+              let values = try? FileManager.default.attributesOfItem(atPath: url.path),
+              values[.type] as? FileAttributeType == .typeRegular,
+              let byteSize = (values[.size] as? NSNumber)?.int64Value else {
+            return false
+        }
+        return byteSize == expectedByteSize
+    }
+
+    private static func wasPhotoLibraryServiceInterrupted(_ error: Error) -> Bool {
+        let cocoaError = error as NSError
+        return cocoaError.domain == NSCocoaErrorDomain && cocoaError.code == 4099
     }
 
     private nonisolated static func resourceContentTypeIdentifier(

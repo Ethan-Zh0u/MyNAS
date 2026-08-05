@@ -52,11 +52,29 @@ struct PhotoBackupView: View {
         )
     }
 
+    private var automationPolicy: PhotoBackupAutomationPolicy {
+        coordinator.automationPolicy(for: accountStore.current)
+    }
+
+    private var automationStatus: PhotoBackupAutomationStatus {
+        coordinator.automationStatus(for: accountStore.current)
+    }
+
+    private var automationFooter: String {
+        if accountStore.current.serverCapabilities.supportsBackgroundTransfers {
+            return "新项目仍只在 App 前台通过 PhotoKit 发现。已准备且此账号允许的上传可交给 iOS background URLSession/BGTask 续接；网络、电量和系统调度仍可能延后，不能保证持续或即时上传。"
+        }
+        return "当前 G1 仅在 App 前台通过 PhotoKit 发现新项目并使用现有前台上传队列。它不是 BGTask 或 background URLSession：锁屏、退出 App 或系统回收后不保证继续上传。"
+    }
+
     var body: some View {
         List {
             Section {
                 BackupSummaryCard(
-                    headline: coordinator.headline,
+                    headline: coordinator.headline(
+                        for: accountStore.current.accountID,
+                        assets: assets
+                    ),
                     progress: backupProgress
                 )
                 .listRowInsets(EdgeInsets())
@@ -81,9 +99,64 @@ struct PhotoBackupView: View {
                         }
                     }
                 }
-                Text("App 在前台检测到新照片或视频后会自动加入并开始备份；这个按钮用于手动补充未完成项目。网络中断时会从 MyNAS 已记录的字节位置继续。")
+                Text("此按钮会立即检查并补充当前可访问的未完成项目。网络中断时会从 MyNAS 已记录的字节位置继续。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+
+            Section {
+                if accountStore.current.isLocalOnly {
+                    Label("连接 MyNAS 后可为每个账号单独设置自动备份", systemImage: "externaldrive.badge.plus")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Toggle(
+                        "前台自动备份",
+                        isOn: Binding(
+                            get: { automationPolicy.isEnabled },
+                            set: { coordinator.setAutomaticBackupEnabled($0, for: accountStore.current) }
+                        )
+                    )
+
+                    if automationPolicy.isEnabled {
+                        Picker(
+                            "自动上传网络",
+                            selection: Binding(
+                                get: { automationPolicy.networkPolicy },
+                                set: { coordinator.setAutomaticNetworkPolicy($0, for: accountStore.current) }
+                            )
+                        ) {
+                            ForEach(PhotoBackupAutomaticNetworkPolicy.allCases, id: \.self) { policy in
+                                Text(policy.title).tag(policy)
+                            }
+                        }
+
+                        Toggle(
+                            "低电量模式暂停",
+                            isOn: Binding(
+                                get: { automationPolicy.pausesInLowPowerMode },
+                                set: { coordinator.setAutomaticLowPowerPause($0, for: accountStore.current) }
+                            )
+                        )
+
+                        automationPauseButton
+                    }
+
+                    Label(automationStatus.title, systemImage: automationStatus.systemImage)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(automationPolicy.isEnabled ? .primary : .secondary)
+                    Text(automationStatus.detail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if automationPolicy.isEnabled {
+                        Text(automationPolicy.networkPolicy.detail)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("自动备份")
+            } footer: {
+                Text(automationFooter)
             }
 
             if !failedJobs.isEmpty {
@@ -197,6 +270,21 @@ struct PhotoBackupView: View {
             button.buttonStyle(.bordered)
         }
     }
+
+    @ViewBuilder
+    private var automationPauseButton: some View {
+        let button = Button(role: .destructive) {
+            coordinator.setAutomaticBackupEnabled(false, for: accountStore.current)
+        } label: {
+            Label("暂停自动备份", systemImage: "pause.circle")
+        }
+
+        if #available(iOS 26.0, *) {
+            button.buttonStyle(.glass)
+        } else {
+            button.buttonStyle(.bordered)
+        }
+    }
 }
 
 private struct BackupSummaryCard: View {
@@ -258,6 +346,13 @@ private struct BackupSummaryCard: View {
             fromByteCount: progress.totalBytes,
             countStyle: .file
         )
+        if progress.hasProvisionalBytes {
+            let provisional = ByteCountFormatter.string(
+                fromByteCount: progress.provisionalBytes,
+                countStyle: .file
+            )
+            return "iOS 已发送 \(uploaded) / 总计 \(total)；其中 \(provisional) 等待 MyNAS 确认"
+        }
         if progress.hasCompleteSize {
             return "已上传 \(uploaded) / 总计 \(total)"
         }

@@ -210,11 +210,22 @@ nonisolated struct RemotePhotoImageResult: Sendable {
     let isUsingOfflineCache: Bool
 }
 
-nonisolated struct RemotePhotoStreamResult: Sendable {
-    let data: Data
-    let contentType: String?
-    let contentLength: Int64
-    let supportsByteRanges: Bool
+/// A complete MyNAS original resource that has already passed the server
+/// metadata's byte-size and SHA-256 checks in an account-isolated temporary
+/// directory. It is intentionally short lived: PhotoKit imports it as a copy,
+/// then the caller removes the enclosing download directory.
+nonisolated struct DownloadedRemotePhotoResource: Sendable {
+    let resource: ServerPhotoResource
+    let fileURL: URL
+}
+
+nonisolated struct RemotePhotoOriginalDownload: Sendable {
+    let temporaryDirectory: URL
+    let resources: [DownloadedRemotePhotoResource]
+
+    func removeTemporaryFiles() {
+        try? FileManager.default.removeItem(at: temporaryDirectory)
+    }
 }
 
 nonisolated struct ServerPhotoChange: Codable, Hashable, Sendable {

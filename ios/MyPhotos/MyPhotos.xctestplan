@@ -1,0 +1,26 @@
+{
+  "configurations" : [
+    {
+      "id" : "D8D2F932-5D58-4A51-9C42-171A57C4B829",
+      "name" : "Default",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "testInteropMode" : "complete",
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:MyPhotos.xcodeproj",
+        "identifier" : "000000000000000200000000",
+        "name" : "MyPhotosTests"
+      }
+    }
+  ],
+  "version" : 1
+}

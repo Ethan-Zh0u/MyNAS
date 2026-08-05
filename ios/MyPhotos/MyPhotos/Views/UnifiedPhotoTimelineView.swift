@@ -7,8 +7,20 @@ struct UnifiedPhotoTimelineView: View {
     @ObservedObject var viewModel: UnifiedPhotoTimelineViewModel
     let account: AccountContext
     let localClient: PhotoLibraryClient
+    let backupCoordinator: PhotoBackupCoordinator
     let columns: [GridItem]
     let thumbnailTargetSize: CGSize
+    @State private var presentedRemoteAsset: ServerPhotoAsset?
+    /// The visible local grid is paged, but duplicate prevention must also see
+    /// older Photos items. This reads metadata only; resource export starts
+    /// solely after the user explicitly chooses verification in remote detail.
+    @State private var verificationLocalAssets: [LocalPhotoAsset] = []
+
+    private var localAssetsForVerification: [LocalPhotoAsset] {
+        verificationLocalAssets.isEmpty
+            ? viewModel.currentLocalAssets
+            : verificationLocalAssets
+    }
 
     private var timelineSections: [PhotoTimelineYearSection<UnifiedPhotoTimelineItem>] {
         PhotoTimelineYearSection.make(
@@ -19,13 +31,7 @@ struct UnifiedPhotoTimelineView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            UnifiedTimelineStatusCard(
-                items: viewModel.items,
-                remoteState: viewModel.remoteState,
-                isUsingOfflineCache: viewModel.isUsingOfflineCache,
-                refresh: { Task { await viewModel.refreshRemote(account: account) } }
-            )
-            .padding(.horizontal, 10)
+            remoteAvailabilityNotice
 
             PhotoTimelineYearGroupedGrid(
                 sections: timelineSections,
@@ -45,6 +51,37 @@ struct UnifiedPhotoTimelineView: View {
                     .font(.footnote)
                     .padding(.vertical, 16)
             }
+        }
+        // See RemotePhotoLibraryView: keep remote detail UIKit-only on iOS 27.
+        .fullScreenCover(item: $presentedRemoteAsset) { asset in
+            RemotePhotoDetailUIKitHost(
+                asset: asset,
+                account: account,
+                client: viewModel.remoteClient,
+                localClient: localClient,
+                localAssets: localAssetsForVerification,
+                confirmedLocalCopy: nil,
+                onVerifiedLocalCopies: { remoteAsset, localAssets in
+                    backupCoordinator.registerVerifiedLocalCopies(
+                        localAssets,
+                        expectedRemoteAssetID: remoteAsset.id,
+                        account: account,
+                        client: localClient
+                    )
+                },
+                onRemoteDeleted: { assetID, localDisposition in
+                    backupCoordinator.markRemoteBackupDeleted(
+                        assetID: assetID,
+                        accountID: account.accountID,
+                        localDisposition: localDisposition
+                    )
+                    Task { await viewModel.refreshRemote(account: account) }
+                },
+                onDismiss: { presentedRemoteAsset = nil }
+            )
+        }
+        .task(id: account.accountID) {
+            verificationLocalAssets = await localClient.allAccessibleAssets()
         }
     }
 
@@ -70,12 +107,8 @@ struct UnifiedPhotoTimelineView: View {
             }
             .buttonStyle(.plain)
         } else if let remoteAsset = item.remoteAsset {
-            NavigationLink {
-                RemotePhotoDetailView(
-                    asset: remoteAsset,
-                    account: account,
-                    client: viewModel.remoteClient
-                )
+            Button {
+                presentedRemoteAsset = remoteAsset
             } label: {
                 UnifiedTimelineCell(
                     item: item,
@@ -88,92 +121,23 @@ struct UnifiedPhotoTimelineView: View {
             .buttonStyle(.plain)
         }
     }
-}
 
-private struct UnifiedTimelineStatusCard: View {
-    let items: [UnifiedPhotoTimelineItem]
-    let remoteState: UnifiedPhotoTimelineViewModel.RemoteState
-    let isUsingOfflineCache: Bool
-    let refresh: () -> Void
-
-    private var localCount: Int { items.filter { $0.localAsset != nil }.count }
-    private var remoteOnlyCount: Int { items.filter { $0.localAsset == nil && $0.remoteAsset != nil }.count }
-    private var browseReadyCount: Int {
-        items.filter { $0.availability == .browseReady }.count
-    }
-    private var exactContentRelationCount: Int {
-        Set<String>(
-            items.compactMap { item in
-                guard let remoteAsset = item.remoteAsset,
-                      remoteAsset.hasExactContentRelationship else {
-                    return nil
-                }
-                return remoteAsset.id
-            }
-        ).count
-    }
-    private var versionTransitionRelationCount: Int {
-        Set<String>(
-            items.compactMap { item in
-                guard let remoteAsset = item.remoteAsset,
-                      remoteAsset.hasVersionTransitionRelationship else {
-                    return nil
-                }
-                return remoteAsset.id
-            }
-        ).count
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Image(systemName: "rectangle.3.group.bubble.left")
-                    .font(.title3)
-                    .foregroundStyle(Color.accentColor)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("统一时间线")
-                        .font(.subheadline.weight(.semibold))
-                    Text(summary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                Button(action: refresh) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityLabel("刷新统一时间线中的 MyNAS 项目")
-            }
-
-            switch remoteState {
-            case .loading:
-                Label("正在合并 MyNAS 图库…", systemImage: "arrow.triangle.2.circlepath")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            case .failed(let message):
-                Label(message, systemImage: "wifi.exclamationmark")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            case .ready where isUsingOfflineCache:
-                Label("MyNAS 暂时不可达，正在使用已校验的离线目录", systemImage: "externaldrive.badge.icloud")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            default:
-                EmptyView()
-            }
+    @ViewBuilder
+    private var remoteAvailabilityNotice: some View {
+        switch viewModel.remoteState {
+        case .failed:
+            Label("请检查 Tailscale 连接", systemImage: "wifi.exclamationmark")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+        case .ready where viewModel.isUsingOfflineCache:
+            Label("MyNAS 暂时不可达，正在使用已校验的离线目录", systemImage: "externaldrive.badge.icloud")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+        default:
+            EmptyView()
         }
-        .padding(14)
-        .unifiedTimelineSurface()
-        .accessibilityElement(children: .combine)
-    }
-
-    private var summary: String {
-        var parts = ["本机 \(localCount) 项", "可浏览备份 \(browseReadyCount) 项"]
-        if remoteOnlyCount > 0 { parts.append("仅 MyNAS \(remoteOnlyCount) 项") }
-        if exactContentRelationCount > 0 { parts.append("跨设备关联 \(exactContentRelationCount) 项") }
-        if versionTransitionRelationCount > 0 { parts.append("版本关系 \(versionTransitionRelationCount) 项") }
-        return parts.joined(separator: " · ")
     }
 }
 
@@ -198,13 +162,26 @@ private struct UnifiedTimelineCell: View {
                 RemotePhotoGridCell(
                     asset: remoteAsset,
                     account: account,
-                    client: remoteClient
+                    client: remoteClient,
+                    hasConfirmedLocalCopy: false
                 )
             }
 
             if shouldShowAvailabilityBadge {
                 UnifiedTimelineAvailabilityBadge(availability: item.availability)
                     .padding(5)
+            }
+
+            if item.localCopyCount > 1 {
+                Text("\(item.localCopyCount) 份")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.black.opacity(0.58), in: Capsule())
+                    .padding(5)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .accessibilityHidden(true)
             }
         }
         .accessibilityElement(children: .ignore)
@@ -234,7 +211,10 @@ private struct UnifiedTimelineCell: View {
         let relationshipSuffix = relationshipDescriptions.isEmpty
             ? ""
             : "，" + relationshipDescriptions.joined(separator: "，")
-        return "\(item.displayMediaName)，\(item.availability.title)\(relationshipSuffix)"
+        let localCopySuffix = item.localCopyCount > 1
+            ? "，已合并 \(item.localCopyCount) 份同一原件的本机副本"
+            : ""
+        return "\(item.displayMediaName)，\(item.availability.title)\(localCopySuffix)\(relationshipSuffix)"
     }
 }
 
@@ -263,17 +243,6 @@ private struct UnifiedTimelineAvailabilityBadge: View {
             .green
         case .remoteOnly(let isBrowseReady):
             isBrowseReady ? .teal : .orange
-        }
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func unifiedTimelineSurface() -> some View {
-        if #available(iOS 26.0, *) {
-            glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        } else {
-            background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
     }
 }

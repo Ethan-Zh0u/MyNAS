@@ -4,6 +4,26 @@
 
 ## 未发布
 
+## [0.8.6] - 2026-08-05
+
+### 新增与改进
+
+- MyNAS Photos 的自动备份策略与系统传输基础继续完善：每账号策略、Wi-Fi/蜂窝与低电量门槛、受保护传输登记册、file-backed background `URLSession` 及受限 BGProcessing 恢复入口均保持可解释状态和失败关闭语义。
+- 远端图库新增完整原件组下载前的同源、字节数和 SHA-256 校验；本机存在候选时必须先核验并关联，或由用户明确确认创建另一份副本。
+- 新增 MyNAS-only 删除与受精确设备映射限制的“同时删除本机照片”流程。前者永不触碰本机 Photos；后者固定先由 PhotoKit 移入“最近删除”，再请求 MyNAS 删除。
+- 统一时间线的“统一时间线”开关及 Limited Photos 权限说明移至设置；主页不再长期占用显示范围切换或汇总卡。
+
+### 安全
+
+- 删除请求继续由服务端复核 owner、当前 asset version、完整资源组、映射基数和衍生 worker 状态；共享、旧版本或处理中资源会被拒绝。
+- 后台传输任务持续绑定账号、服务器、用户、卷与当前源版本；传输进度不等同 MyNAS 已确认完成。
+
+### 部署与验证
+
+- 23 项前端测试、TypeScript/生产构建、后端 `go test ./...`、`go vet ./...` 和 Linux ARM64 构建通过。
+- 2026-08-05 已将该后端/Web 版本原子部署到树莓派；health 正常，capabilities 回读 `photoDelete=true` 与 `backgroundTransfers=true`。
+- 当前 iOS H1 下载／删除真实媒体流程仍待设备验收；完整 iOS test build 受本机 CoreSimulator/Icon Studio 图标导出服务阻塞，不能把该环境故障误记为通过。
+
 ## [0.8.5] - 2026-07-27
 
 ### 修复
