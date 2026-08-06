@@ -295,13 +295,26 @@ private struct LocalAnalysisQueueView: View {
                                         Text("没有与“\(textQuery)”匹配的已识别本地文字。")
                                     }
                                 } else {
-                                    ForEach(textIndex.results) { record in
-                                        NavigationLink {
-                                            textSearchResultDestination(for: record)
-                                        } label: {
-                                            textSearchResultRow(for: record)
+                                    LazyVGrid(
+                                        columns: Array(
+                                            repeating: GridItem(.flexible(), spacing: 8),
+                                            count: 3
+                                        ),
+                                        spacing: 8
+                                    ) {
+                                        ForEach(textIndex.results) { record in
+                                            NavigationLink {
+                                                textSearchResultDestination(for: record)
+                                            } label: {
+                                                textSearchResultTile(for: record)
+                                            }
+                                            .buttonStyle(.plain)
                                         }
                                     }
+                                    .padding(.vertical, 4)
+                                    .listRowInsets(
+                                        EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16)
+                                    )
                                 }
                             }
                         }
@@ -476,21 +489,19 @@ private struct LocalAnalysisQueueView: View {
         }
     }
 
-    private func textSearchResultRow(for record: PhotoTextIndexRecord) -> some View {
-        HStack(spacing: 12) {
+    private func textSearchResultTile(for record: PhotoTextIndexRecord) -> some View {
+        GeometryReader { proxy in
             PhotoThumbnailView(
                 localIdentifier: record.assetID,
                 mediaKind: .photo,
-                targetSize: CGSize(width: 180, height: 180),
+                targetSize: CGSize(width: 360, height: 360),
                 client: photoClient
             )
-            .frame(width: 72, height: 72)
+            .frame(width: proxy.size.width, height: proxy.size.width)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-            Spacer()
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("OCR 搜索结果照片")
+        .aspectRatio(1, contentMode: .fit)
+        .accessibilityLabel("OCR 搜索结果照片，点按查看详情")
     }
 
     private static let timestampFormatter: DateFormatter = {
