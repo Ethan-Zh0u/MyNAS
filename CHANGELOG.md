@@ -17,7 +17,7 @@
 ### 验证
 
 - Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 51 项通过，其中 7 项 I2 回归覆盖默认拒绝、最小持久化字段、增量队列、账号隔离、错账号复制拒绝、关闭/账号缓存清理和损坏/重复队列失败关闭。
-- 这是 `v0.9.1` 发布候选；树莓派部署/readback、iPhone 16 Pro 验收和 GitHub annotated tag/Release 尚未完成，I2 仍不得标记为完成或进入 I3。
+- 候选提交 `bf75153` 已原子部署为树莓派 release `20260806T042351Z`，systemd active、health/capabilities 精确回读 `0.9.1`，并保留 `photoDelete=true` 与 `backgroundTransfers=true`；同一提交的签名 Debug App 已在 iPhone 16 Pro 验收，annotated tag `v0.9.1` 与 GitHub Release 已发布。
 
 ## [0.9.0] - 2026-08-06
 

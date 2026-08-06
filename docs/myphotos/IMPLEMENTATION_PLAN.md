@@ -37,7 +37,7 @@
 | F | 本地/远程统一时间线与去重 | 已完成（F1–F4） | 进入阶段 G 的后台自动备份设计与真机策略验收 |
 | G | 后台自动备份 | 进行中（G1 已完成模拟器及 iPhone 16 Pro 的默认关闭、持久化、前台自动上传、低电量暂停/恢复、Wi‑Fi/蜂窝网络策略、一次锁屏后完成的受限观察，以及真实 App 终止/重新打开后的自动恢复；G2 已完成真实 212.1 MB 锁屏系统会话、开发终止后恢复、真机实时进度、传输中低电量暂停/续传完成，以及 Wi‑Fi 中断后等待、恢复并达到 MyNAS-confirmed 最终完成；服务重启、账号/卷、iCloud-only 与长队列仍未验收） | 验证服务重启，再完成账号/卷、iCloud-only 和长队列边界 |
 | H | 恢复、导出、删除与缓存管理 | 已完成（H0–H2 均已真机验收） | 返回阶段 G，从 MyNAS 服务重启边界继续 |
-| I | 端侧 AI 搜索、人物/物体分类 | 进行中（I1 已于 v0.9.0 完成发布门槛；I2 v0.9.1 候选已完成实现与模拟器回归，仍待部署、真机和发布） | 只完成 I2 的发布门槛；不得进入 I3 Vision OCR |
+| I | 端侧 AI 搜索、人物/物体分类 | 进行中（I1 v0.9.0、I2 v0.9.1 均已完成独立发布门槛） | I3 Vision OCR 尚未开始；开始前单独定义边界和验收 |
 | J | 大规模、灾难恢复与版本升级 | 部分完成 | 通用卷/健康基础已有，Photos 专项韧性未做 |
 
 ## 阶段 A — 产品边界与工程基础
@@ -204,7 +204,7 @@
 - **每个子阶段的强制发布门槛（用户于 2026-08-06 明确）：** 子阶段只有同时满足以下条件才可标记完成并进入下一个：①实现、自动化回归和文档/安全边界同步完成；②`VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与发布 README 统一到同一个候选版本；③由候选提交构建并原子部署 MyNAS 服务到树莓派，回读 systemd active、health 和 capabilities，版本必须精确一致；④由同一提交构建、签名并安装 iOS App 到 iPhone 16 Pro，完成该子阶段的真机验收；⑤验收通过后才把同一提交推送到 GitHub，创建 annotated tag 并发布对应 GitHub Release。即使子阶段只有 iOS 改动，也必须走完整的树莓派部署和 GitHub 发布门槛；任一验收失败都留在当前子阶段修复，不发布完成状态，也不开始下一阶段。
 - **状态与证据：** **I1 已完成（v0.9.0；模型分析尚未开始）。** 搜索页默认关闭，用户明确启用后才读取当前 PhotoKit 权限范围内的元数据；I1 只索引媒体类型、拍摄日期、收藏、RAW 标记和像素尺寸。索引建立/更新不请求图像像素；用户输入查询并看到结果时，界面用索引中的 PhotoKit asset ID 按需请求本地缩略图，明确禁止 PhotoKit 网络访问，不把缩略图写入索引、不下载 iCloud 原件且不联网到 MyNAS。单一受保护 JSON 索引位于当前 `AppCache/<server>/<user>/search-index` 命名空间，包含 schema/model revision 与 `accountID + serverID + userID` 身份封套；错账号、损坏数据、重复 asset ID 和未知 schema 均失败关闭。同步会复用源版本未变的记录、替换变更版本并移除已不在权限范围的项目；清空索引保持用户选择，关闭或通用缓存清理会删除索引并保守回到未启用。搜索页可查看项目数/更新时间、手动更新、清空或关闭删除，并明确说明人物/OCR/物体属于 I2 且人物不会自动命名。用户已在 iPhone 16 Pro 主动启用，首建显示 **12** 个项目，与当时可访问的本机图库 12 项一致。首轮结果 UI 只显示日期和类型、没有视觉预览；现已改为 72 pt 缩略图、媒体类型主标题、日期/尺寸辅助信息，并可点入完整本地详情，失效权限项目给出明确提示。2026-08-06 真机复核中，`photo`、`video` 和 `2026-07` 分别返回 4、8 和 10 项，真实缩略图、媒体类型主标题、日期/尺寸辅助信息和普通照片详情入口均通过；用户随后以真实照片完成收藏切换验收，收藏检索标记可用，且切换收藏不会令已完成的备份重新排队或在统一时间线重复显示。用户也已在同一设备完成清空索引→重建、关闭并删除→重新启用：记录归零、默认关闭和 12 项重建均正确，未影响系统照片或 MyNAS 备份；随后 3 次更新、三类查询、详情往返和后台恢复的轻量热/电量/内存观察也获用户通过。全库 PhotoKit 元数据快照已从 `@MainActor` 移到独立 utility worker，只把 `Sendable` 值记录回传 UI，以消除原始元数据按需读取阻塞主线程的风险。对 PhotoKit 明确标为 `assetContentChanged == false` 的元数据变更，备份队列只推进受信任的本地修改观察值，保留原始上传/删除证明；不能明确分类的变更仍失败关闭并重新备份。Xcode 27 beta（27A5228h）iPhone 17 Pro 模拟器完整 **44** 项 `MyPhotosTests` 通过，其中 7 项 I1 回归覆盖默认关闭、增量更新、跨账号隔离、复制错账号索引拒绝、重复 ID 拒绝、清空/关闭及损坏索引恢复。提交 `85cd4f2` 已原子部署为树莓派 release `20260806T032331Z`，systemd active、health/capabilities 都是 `0.9.0`，且保持 `photoDelete=true` 与 `backgroundTransfers=true`；同一提交已签名安装、启动并由 iPhone 16 Pro 最终验收，annotated `v0.9.0` GitHub Release 已发布。Vision/OCR/人物/物体/embedding 尚未实现。
 
-- **I2 候选实现与自动化证据（2026-08-06，v0.9.1）：** 人物页已由占位替换为独立、默认关闭的端侧像素分析许可与当前账号待分析队列。明确允许后，I2 只使用当前 Photos 权限范围的值型元数据建立 `assetID + sourceVersion + queuedAt` 清单；队列 API 不接收像素、缩略图、`PHAsset` 或文件 URL，不依赖 Vision/Core ML/AVFoundation/网络，因而不存在像素读取、iCloud 原件下载或模型推理。受保护 JSON 位于 `AppCache/<server>/<user>/analysis-queue`，绑定 schema、许可 revision 与账号身份；错账号、损坏、重复 ID、未知版本和不安全符号链接均失败关闭。关闭许可、损坏恢复和当前账号缓存清理会删除队列且不触碰系统照片、MyNAS 原件或 I1 索引。7 项 I2 回归覆盖默认拒绝、最小字段、增量同步、隔离、错账号复制、删除/缓存清理和损坏/重复拒绝；Xcode 27 beta iPhone 17 Pro 模拟器完整 **51** 项通过。部署/readback、同提交 iPhone 16 Pro 验收和 GitHub tag/Release 未完成前，I2 仍进行中，不得开始 I3 或宣称 OCR/标签/人物/语义能力。
+- **I2 发布证据（2026-08-06，v0.9.1）：** 人物页已由占位替换为独立、默认关闭的端侧像素分析许可与当前账号待分析队列。明确允许后，I2 只使用当前 Photos 权限范围的值型元数据建立 `assetID + sourceVersion + queuedAt` 清单；队列 API 不接收像素、缩略图、`PHAsset` 或文件 URL，不依赖 Vision/Core ML/AVFoundation/网络，因而不存在像素读取、iCloud 原件下载或模型推理。受保护 JSON 位于 `AppCache/<server>/<user>/analysis-queue`，绑定 schema、许可 revision 与账号身份；错账号、损坏、重复 ID、未知版本和不安全符号链接均失败关闭。关闭许可、损坏恢复和当前账号缓存清理会删除队列且不触碰系统照片、MyNAS 原件或 I1 索引。7 项 I2 回归覆盖默认拒绝、最小字段、增量同步、隔离、错账号复制、删除/缓存清理和损坏/重复拒绝；Xcode 27 beta iPhone 17 Pro 模拟器完整 **51** 项通过。提交 `bf75153` 已部署为树莓派 release `20260806T042351Z`，systemd active、health/capabilities 均为 `0.9.1` 并保留 `photoDelete=true` 与 `backgroundTransfers=true`；同一提交签名安装并在 iPhone 16 Pro 验收，随后以 annotated tag `v0.9.1` 发布 GitHub Release。I2 完成；OCR/标签/人物/语义仍未实现，I3 尚未开始。
 
 ## 阶段 J — 大规模、灾难恢复与版本升级
 
@@ -218,11 +218,11 @@
 - **明确不包含：** 把本机和单块 NAS 宣称为唯一灾备；不承诺未演练的 RPO/RTO。
 - **状态与证据：** **部分完成。** 通用 MyNAS 已有健康检查、稳定卷 ID、离线状态和 SQLite 单连接以降低 `SQLITE_BUSY`；Photos 专用 migration version、灾备扫描、断电恢复和大规模基准尚未实现。
 
-## 当前工作状态与下一优先级：阶段 I 的 I2 发布候选验收
+## 当前工作状态与下一优先级：阶段 I 的 I2 已发布
 
 **I1 发布完成（2026-08-06）：** 候选提交 `85cd4f2` 已以 MyNAS `0.9.0` 原子部署到树莓派 release `20260806T032331Z`，systemd active、health 和 capabilities 精确回读 `0.9.0`，并保留 `photoDelete=true`、`backgroundTransfers=true`。该提交的签名 Debug App 已在 iPhone 16 Pro 安装、启动并通过最终验收；annotated tag `v0.9.0` 与公开 GitHub Release 已发布。因此 I1 完成，下一步才允许开始 I2 的端侧分析队列与独立像素分析许可。
 
-**I2 候选（2026-08-06，待发布）：** `v0.9.1` 已统一写入 `VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与 README 的候选说明。实现和完整 51 项 iPhone 17 Pro 模拟器回归已通过。下一步只能将这个同一候选提交部署到树莓派并回读 systemd、health/capabilities，再构建签名 iPhone 包并由用户验收；完成前不得进入 I3 或创建 GitHub Release。
+**I2 发布完成（2026-08-06）：** 提交 `bf75153` 已作为 `v0.9.1` 原子部署到树莓派 release `20260806T042351Z`，systemd active、health/capabilities 均精确回读 `0.9.1`，并保留 `photoDelete=true`、`backgroundTransfers=true`；同一提交已签名安装并在 iPhone 16 Pro 验收，annotated tag `v0.9.1` 与公开 GitHub Release 已发布。因此 I2 完成；只有用户明确进入后，才开始 I3 Vision OCR 的独立设计、实现和验收。
 
 ### I1 发布前历史验收记录
 
