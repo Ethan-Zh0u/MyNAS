@@ -17,7 +17,7 @@
 
 - Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 44 项通过；I1 包含默认关闭、隔离、损坏恢复、清空/关闭以及收藏元数据不重传/不重复回归。
 - iPhone 16 Pro 已通过 I1 的结果展示、收藏切换、清空重建、关闭重启用与轻量资源观察；H1/H2 的下载、分享、删除和账号隔离缓存流程也已通过。
-- 本版本部署后将回读树莓派 systemd active、health 与 capabilities 的 `0.9.0`，并以同一提交建立 GitHub Release。
+- 2026-08-06 已由提交 `85cd4f2` 原子部署到树莓派 release `20260806T032331Z`；systemd active，health 与 capabilities 均回读 `0.9.0`，保留 `photoDelete=true` 与 `backgroundTransfers=true`。同一提交已在 iPhone 16 Pro 安装、启动并通过最终验收，随后发布 annotated `v0.9.0` GitHub Release。
 
 ## [0.8.6] - 2026-08-05
 
