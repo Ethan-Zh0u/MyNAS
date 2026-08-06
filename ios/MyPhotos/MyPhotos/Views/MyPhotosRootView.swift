@@ -130,9 +130,10 @@ struct MyPhotosRootView: View {
                 systemImage: MainSection.people.symbol,
                 value: MainSection.people
             ) {
-                LocalAnalysisQueueView(
-                    photoClient: library.imageClient,
-                    backupCoordinator: backupCoordinator
+                PhasePlaceholderView(
+                    title: "人物",
+                    symbol: MainSection.people.symbol,
+                    message: "这里将用于人物识别、人物集合及对应照片；OCR 和内容搜索统一从“照片”主页进入。"
                 )
             }
 
@@ -165,19 +166,18 @@ struct MyPhotosRootView: View {
     }
 }
 
-/// The People tab hosts Phase I's explicitly consented local analysis stages.
-/// I3 only adds Vision text recognition; it is not person recognition,
-/// object classification, embedding generation or a MyNAS service request.
-private struct LocalAnalysisQueueView: View {
+/// Privacy controls for Phase I's explicitly consented on-device analysis.
+/// This is intentionally reached from Settings, rather than the People tab:
+/// I3 text search belongs in the Photos home search entry, while the People tab
+/// is reserved for the later person-recognition experience.
+struct LocalAnalysisSettingsView: View {
     @EnvironmentObject private var accountStore: AccountStore
     let photoClient: PhotoLibraryClient
-    @ObservedObject var backupCoordinator: PhotoBackupCoordinator
     @StateObject private var queue = PhotoAnalysisQueueViewModel()
     @StateObject private var textIndex = PhotoTextIndexViewModel()
     @State private var showsDisableConfirmation = false
     @State private var showsClearTextIndexConfirmation = false
     @State private var showsDisableTextIndexConfirmation = false
-    @State private var textQuery = ""
 
     var body: some View {
         NavigationStack {
@@ -280,46 +280,7 @@ private struct LocalAnalysisQueueView: View {
                             }
                         }
 
-                        Section("OCR 文字搜索") {
-                            TextField("搜索已识别的本地文字", text: $textQuery)
-                                .textInputAutocapitalization(.never)
-                                .onChange(of: textQuery) { _, query in
-                                    Task { await textIndex.updateQuery(query, account: accountStore.current) }
-                                }
-
-                            if !textQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                if textIndex.results.isEmpty {
-                                    ContentUnavailableView {
-                                        Label("没有找到文字结果", systemImage: "text.magnifyingglass")
-                                    } description: {
-                                        Text("没有与“\(textQuery)”匹配的已识别本地文字。")
-                                    }
-                                } else {
-                                    LazyVGrid(
-                                        columns: Array(
-                                            repeating: GridItem(.flexible(), spacing: 8),
-                                            count: 3
-                                        ),
-                                        spacing: 8
-                                    ) {
-                                        ForEach(textIndex.results) { record in
-                                            NavigationLink {
-                                                textSearchResultDestination(for: record)
-                                            } label: {
-                                                textSearchResultTile(for: record)
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                    }
-                                    .padding(.vertical, 4)
-                                    .listRowInsets(
-                                        EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16)
-                                    )
-                                }
-                            }
-                        }
-
-                        Section("OCR 索引控制") {
+                    Section("OCR 索引控制") {
                             Button(role: .destructive) {
                                 showsClearTextIndexConfirmation = true
                             } label: {
@@ -385,7 +346,7 @@ private struct LocalAnalysisQueueView: View {
                     }
                 }
             }
-            .navigationTitle("人物")
+            .navigationTitle("端侧分析")
             .task(id: accountIdentity) {
                 await queue.load(account: accountStore.current)
                 await textIndex.load(account: accountStore.current)
@@ -469,41 +430,6 @@ private struct LocalAnalysisQueueView: View {
         )
     }
 
-    @ViewBuilder
-    private func textSearchResultDestination(for record: PhotoTextIndexRecord) -> some View {
-        if let asset = photoClient.accessibleAsset(localIdentifier: record.assetID) {
-            PhotoDetailView(
-                asset: asset,
-                isBackedUp: backupCoordinator.hasCurrentVerifiedBackup(
-                    for: asset,
-                    accountID: accountStore.current.accountID
-                ),
-                client: photoClient
-            )
-        } else {
-            ContentUnavailableView(
-                "照片已不可访问",
-                systemImage: "photo.badge.exclamationmark",
-                description: Text("它可能已被删除或不再属于当前 Photos 权限范围；更新 OCR 索引后会从结果中移除。")
-            )
-        }
-    }
-
-    private func textSearchResultTile(for record: PhotoTextIndexRecord) -> some View {
-        GeometryReader { proxy in
-            PhotoThumbnailView(
-                localIdentifier: record.assetID,
-                mediaKind: .photo,
-                targetSize: CGSize(width: 360, height: 360),
-                client: photoClient
-            )
-            .frame(width: proxy.size.width, height: proxy.size.width)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .accessibilityLabel("OCR 搜索结果照片，点按查看详情")
-    }
-
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = .current
@@ -537,6 +463,7 @@ private struct LocalSearchView: View {
     let photoClient: PhotoLibraryClient
     @ObservedObject var backupCoordinator: PhotoBackupCoordinator
     @StateObject private var index = PhotoSearchIndexViewModel()
+    @StateObject private var textIndex = PhotoTextIndexViewModel()
     @State private var query = ""
     @State private var showsClearConfirmation = false
     @State private var showsDisableConfirmation = false
@@ -544,11 +471,11 @@ private struct LocalSearchView: View {
     var body: some View {
         NavigationStack {
             List {
-                if !index.status.isEnabled {
+                if !index.status.isEnabled && !textIndex.status.isEnabled {
                     Section("阶段 I · 本地索引") {
                         Label("默认关闭", systemImage: "hand.raised.fill")
                             .foregroundStyle(.secondary)
-                        Text("启用与更新索引时只读取当前 Photos 权限范围内的类型、日期、收藏和尺寸。搜索结果只按需显示本地缩略图，缩略图不写入索引、不下载 iCloud 原件，也不上传到 MyNAS 或任何中心化服务。")
+                        Text("启用与更新索引时只读取当前 Photos 权限范围内的类型、日期、收藏和尺寸。搜索结果只按需显示本地缩略图，缩略图不写入索引、不下载 iCloud 原件，也不上传到 MyNAS 或任何中心化服务。OCR 可在“设置 > 端侧分析与本地索引”中单独允许；两个来源共用本页的一个搜索框。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                         Button {
@@ -562,112 +489,104 @@ private struct LocalSearchView: View {
                     if let statusMessage = index.statusMessage {
                         Section { Text(statusMessage).foregroundStyle(.secondary) }
                     }
-                } else if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Section("当前账号索引") {
-                        LabeledContent("账号", value: accountStore.current.displayName)
-                        LabeledContent("已索引项目", value: "\(index.status.indexedAssetCount)")
-                        LabeledContent("最近更新", value: lastUpdatedText)
+                } else if !hasQuery {
+                    if index.status.isEnabled {
+                        Section("本地元数据索引") {
+                            LabeledContent("账号", value: accountStore.current.displayName)
+                            LabeledContent("已索引项目", value: "\(index.status.indexedAssetCount)")
+                            LabeledContent("最近更新", value: lastUpdatedText)
 
-                        if index.isWorking {
-                            HStack(spacing: 9) {
-                                ProgressView()
-                                Text("正在读取本地图库元数据…")
+                            if index.isWorking {
+                                HStack(spacing: 9) {
+                                    ProgressView()
+                                    Text("正在读取本地图库元数据…")
+                                        .foregroundStyle(.secondary)
+                                }
+                            } else {
+                                Button {
+                                    Task { await indexCurrentLibrary() }
+                                } label: {
+                                    Label("更新本地索引", systemImage: "arrow.clockwise")
+                                }
+                            }
+
+                            if let statusMessage = index.statusMessage {
+                                Text(statusMessage)
+                                    .font(.footnote)
                                     .foregroundStyle(.secondary)
                             }
-                        } else {
-                            Button {
-                                Task { await indexCurrentLibrary() }
-                            } label: {
-                                Label("更新本地索引", systemImage: "arrow.clockwise")
-                            }
-                        }
 
-                        if let statusMessage = index.statusMessage {
-                            Text(statusMessage)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
+                            Button(role: .destructive) {
+                                showsClearConfirmation = true
+                            } label: {
+                                Label("清空当前账号索引", systemImage: "trash")
+                            }
+                            .disabled(index.isWorking || index.status.indexedAssetCount == 0)
+
+                            Button(role: .destructive) {
+                                showsDisableConfirmation = true
+                            } label: {
+                                Label("关闭并删除本地索引", systemImage: "hand.raised")
+                            }
+                            .disabled(index.isWorking)
                         }
                     }
 
-                    Section("I1 搜索范围") {
-                        Label("媒体类型、日期、收藏与尺寸", systemImage: "text.magnifyingglass")
-                        Text("OCR 文字索引在 I3 独立启用；人物、物体与语义模型仍未交付，人物结果不会自动命名。")
+                    Section("OCR 文字索引") {
+                        if textIndex.status.isEnabled {
+                            LabeledContent("已处理静态图片", value: "\(textIndex.status.indexedAssetCount)")
+                            LabeledContent("最近更新", value: lastTextIndexUpdatedText)
+                        } else {
+                            Label("尚未启用", systemImage: "text.viewfinder")
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("OCR 与元数据使用上方同一个搜索框；结果不会显示 OCR 原文或来源。许可与索引管理位于“设置 > 端侧分析与本地索引”。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-
-                    Section("索引控制") {
-                        Button(role: .destructive) {
-                            showsClearConfirmation = true
-                        } label: {
-                            Label("清空当前账号索引", systemImage: "trash")
-                        }
-                        .disabled(index.isWorking || index.status.indexedAssetCount == 0)
-
-                        Button(role: .destructive) {
-                            showsDisableConfirmation = true
-                        } label: {
-                            Label("关闭并删除本地索引", systemImage: "hand.raised")
-                        }
-                        .disabled(index.isWorking)
-                    }
-                } else if index.results.isEmpty {
+                } else if unifiedResults.isEmpty {
                     ContentUnavailableView {
                         Label("没有找到结果", systemImage: "magnifyingglass")
                     } description: {
-                        Text("没有与“\(query)”匹配的本地项目。请检查输入或尝试其他搜索。")
+                        Text("没有与“\(query)”匹配的本地照片或视频。请检查输入或尝试其他搜索。")
                     }
                 } else {
-                    Section("本地结果（\(index.results.count)）") {
-                        ForEach(index.results) { record in
-                            NavigationLink {
-                                searchResultDestination(for: record)
-                            } label: {
-                                HStack(spacing: 12) {
-                                    PhotoThumbnailView(
-                                        localIdentifier: record.assetID,
-                                        mediaKind: record.mediaKind,
-                                        targetSize: CGSize(width: 180, height: 180),
-                                        client: photoClient
-                                    )
-                                    .frame(width: 72, height: 72)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        HStack(spacing: 6) {
-                                            Text(record.displayMediaName)
-                                                .font(.headline)
-                                            if record.isFavorite {
-                                                Image(systemName: "heart.fill")
-                                                    .foregroundStyle(.pink)
-                                                    .accessibilityLabel("已收藏")
-                                            }
-                                        }
-                                        Text(resultMetadata(for: record))
-                                            .font(.subheadline)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(2)
-                                    }
-                                    Spacer()
+                    Section {
+                        LazyVGrid(
+                            columns: Array(
+                                repeating: GridItem(.flexible(), spacing: 8),
+                                count: 3
+                            ),
+                            spacing: 8
+                        ) {
+                            ForEach(unifiedResults) { result in
+                                NavigationLink {
+                                    searchResultDestination(for: result)
+                                } label: {
+                                    searchResultTile(for: result)
                                 }
-                                .accessibilityElement(children: .combine)
+                                .buttonStyle(.plain)
                             }
                         }
+                        .padding(.vertical, 4)
                     }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                 }
             }
             .navigationTitle("搜索")
-            .searchable(text: $query, prompt: "照片、视频、日期或收藏")
+            .searchable(text: $query, prompt: "搜索照片、文字、日期或收藏")
             .onChange(of: query) { _, newValue in
                 Task { await index.updateQuery(newValue, account: accountStore.current) }
+                Task { await textIndex.updateQuery(newValue, account: accountStore.current) }
             }
             .task(id: accountIdentity) {
                 query = ""
                 await index.load(account: accountStore.current)
+                await textIndex.load(account: accountStore.current)
                 if index.status.isEnabled {
                     await indexCurrentLibrary()
                 }
-                searchIsFocused = index.status.isEnabled
+                searchIsFocused = index.status.isEnabled || textIndex.status.isEnabled
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -723,6 +642,21 @@ private struct LocalSearchView: View {
         index.status.lastSynchronizedAt.map { Self.timestampFormatter.string(from: $0) } ?? "尚未建立"
     }
 
+    private var lastTextIndexUpdatedText: String {
+        textIndex.status.lastSynchronizedAt.map { Self.timestampFormatter.string(from: $0) } ?? "尚未建立"
+    }
+
+    private var hasQuery: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var unifiedResults: [LocalUnifiedSearchResult] {
+        LocalUnifiedSearchResultMerger.merge(
+            metadata: index.results,
+            recognizedText: textIndex.results
+        )
+    }
+
     private func enableAndIndexCurrentLibrary() async {
         guard await index.enable(account: accountStore.current) else { return }
         await indexCurrentLibrary()
@@ -736,14 +670,9 @@ private struct LocalSearchView: View {
         await index.synchronize(assets: assets, account: account)
     }
 
-    private func resultMetadata(for record: PhotoSearchIndexRecord) -> String {
-        let date = record.creationDate.map { Self.dayFormatter.string(from: $0) } ?? "未知日期"
-        return "\(date) · \(record.pixelWidth) × \(record.pixelHeight)"
-    }
-
     @ViewBuilder
-    private func searchResultDestination(for record: PhotoSearchIndexRecord) -> some View {
-        if let asset = photoClient.accessibleAsset(localIdentifier: record.assetID) {
+    private func searchResultDestination(for result: LocalUnifiedSearchResult) -> some View {
+        if let asset = photoClient.accessibleAsset(localIdentifier: result.assetID) {
             PhotoDetailView(
                 asset: asset,
                 isBackedUp: backupCoordinator.hasCurrentVerifiedBackup(
@@ -761,13 +690,20 @@ private struct LocalSearchView: View {
         }
     }
 
-    private static let dayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = .current
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter
-    }()
+    private func searchResultTile(for result: LocalUnifiedSearchResult) -> some View {
+        GeometryReader { proxy in
+            PhotoThumbnailView(
+                localIdentifier: result.assetID,
+                mediaKind: result.mediaKind,
+                targetSize: CGSize(width: 360, height: 360),
+                client: photoClient
+            )
+            .frame(width: proxy.size.width, height: proxy.size.width)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .accessibilityLabel("搜索结果照片，点按查看详情")
+    }
 
     private static let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()

@@ -180,6 +180,17 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("隐私与本地分析") {
+                    NavigationLink {
+                        LocalAnalysisSettingsView(photoClient: photoClient)
+                    } label: {
+                        Label("端侧分析与本地索引", systemImage: "hand.raised.square")
+                    }
+                    Text("在此管理端侧像素分析和 OCR 的独立许可与可删除索引；文字与内容检索统一从“照片”主页的搜索入口使用。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 if !accountStore.current.isLocalOnly {
                     Section("照片显示") {
                         Toggle(isOn: $showsUnifiedTimeline) {
