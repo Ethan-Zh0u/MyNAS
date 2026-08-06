@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 @testable import MyPhotos
 
+@MainActor
 final class PhotoTextIndexStoreTests: XCTestCase {
     func testOCRRequiresBothPixelAnalysisAndSeparateOCRConsent() async throws {
         let root = try makeTemporaryRoot()
@@ -250,6 +251,33 @@ final class PhotoTextIndexStoreTests: XCTestCase {
         } catch let error as PhotoTextIndexError {
             XCTAssertEqual(error, .corruptedIndex)
         }
+    }
+
+    func testViewModelKeepsOCRSearchResultsWhenSameAccountViewReloadsAfterDetailNavigation() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = CacheDirectoryProvider(applicationSupportRootOverride: root)
+        let account = makeAccount(id: "account-a", userID: "user-a")
+        let pixelConsent = PhotoAnalysisQueueStore(directories: provider)
+        let store = PhotoTextIndexStore(directories: provider, pixelAnalysisConsent: pixelConsent)
+        _ = try await pixelConsent.enablePixelAnalysis(for: account)
+        _ = try await store.enable(for: account)
+        _ = try await store.synchronize(
+            assets: [makeAsset(id: "photo-a", date: date(2026, 8, 6), kind: .photo)],
+            outputs: [PhotoTextRecognitionOutput(assetID: "photo-a", recognizedText: "详情返回后仍可搜索")],
+            for: account
+        )
+
+        let viewModel = PhotoTextIndexViewModel(store: store)
+        await viewModel.load(account: account)
+        await viewModel.updateQuery("返回", account: account)
+        XCTAssertEqual(viewModel.results.map(\.assetID), ["photo-a"])
+
+        // A NavigationStack source view may re-run its task after returning from
+        // detail. This must reload its status without erasing an unchanged
+        // account's OCR query/result state.
+        await viewModel.load(account: account)
+        XCTAssertEqual(viewModel.results.map(\.assetID), ["photo-a"])
     }
 
     private func makeTemporaryRoot() throws -> URL {

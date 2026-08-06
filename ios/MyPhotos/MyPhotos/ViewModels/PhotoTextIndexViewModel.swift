@@ -24,19 +24,30 @@ final class PhotoTextIndexViewModel: ObservableObject {
 
     func load(account: AccountContext) async {
         let identity = Self.identity(for: account)
+        let didChangeAccount = activeAccountIdentity != identity
         activeAccountIdentity = identity
-        activeQuery = ""
-        results = []
-        isWorking = false
-        statusMessage = nil
-        errorMessage = nil
+        if didChangeAccount {
+            activeQuery = ""
+            results = []
+            isWorking = false
+            statusMessage = nil
+            errorMessage = nil
+        }
         do {
             let loaded = try await store.status(for: account)
             guard activeAccountIdentity == identity else { return }
             status = loaded
+            guard loaded.isEnabled else {
+                activeQuery = ""
+                results = []
+                return
+            }
+            await refreshSearchIfNeeded(account: account)
         } catch {
             guard activeAccountIdentity == identity else { return }
             status = .disabled
+            activeQuery = ""
+            results = []
             errorMessage = error.localizedDescription
         }
     }
@@ -182,9 +193,9 @@ final class PhotoTextIndexViewModel: ObservableObject {
     }
 
     private static func synchronizedMessage(for result: PhotoTextIndexSyncResult) -> String {
-        var message = "已建立 OCR 索引 (result.status.indexedAssetCount) 项：新增 (result.insertedCount)、更新 (result.updatedCount)、移除 (result.removedCount)。"
+        var message = "已建立 OCR 索引 \(result.status.indexedAssetCount) 项：新增 \(result.insertedCount)、更新 \(result.updatedCount)、移除 \(result.removedCount)。"
         if result.deferredAssetCount > 0 {
-            message += " (result.deferredAssetCount) 项未取得本机图片，未下载 iCloud 原件。"
+            message += " \(result.deferredAssetCount) 项未取得本机图片，未下载 iCloud 原件。"
         }
         return message
     }

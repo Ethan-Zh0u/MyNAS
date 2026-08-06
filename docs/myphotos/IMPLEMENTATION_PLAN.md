@@ -37,7 +37,7 @@
 | F | 本地/远程统一时间线与去重 | 已完成（F1–F4） | 进入阶段 G 的后台自动备份设计与真机策略验收 |
 | G | 后台自动备份 | 进行中（G1 已完成模拟器及 iPhone 16 Pro 的默认关闭、持久化、前台自动上传、低电量暂停/恢复、Wi‑Fi/蜂窝网络策略、一次锁屏后完成的受限观察，以及真实 App 终止/重新打开后的自动恢复；G2 已完成真实 212.1 MB 锁屏系统会话、开发终止后恢复、真机实时进度、传输中低电量暂停/续传完成，以及 Wi‑Fi 中断后等待、恢复并达到 MyNAS-confirmed 最终完成；服务重启、账号/卷、iCloud-only 与长队列仍未验收） | 验证服务重启，再完成账号/卷、iCloud-only 和长队列边界 |
 | H | 恢复、导出、删除与缓存管理 | 已完成（H0–H2 均已真机验收） | 返回阶段 G，从 MyNAS 服务重启边界继续 |
-| I | 端侧 AI 搜索、人物/物体分类 | 进行中（I1 v0.9.0、I2 v0.9.1 已发布；I3 v0.9.2 候选已完成实现与模拟器回归） | 完成 I3 同一候选的树莓派、iPhone 与 GitHub 发布门槛；不得进入 I4 |
+| I | 端侧 AI 搜索、人物/物体分类 | 进行中（I1 v0.9.0、I2 v0.9.1 已发布；I3 v0.9.2 修复候选已完成实现与模拟器回归） | 完成 I3 同一候选的树莓派、iPhone 与 GitHub 发布门槛；不得进入 I4 |
 | J | 大规模、灾难恢复与版本升级 | 部分完成 | 通用卷/健康基础已有，Photos 专项韧性未做 |
 
 ## 阶段 A — 产品边界与工程基础
@@ -206,7 +206,7 @@
 
 - **I2 发布证据（2026-08-06，v0.9.1）：** 人物页已由占位替换为独立、默认关闭的端侧像素分析许可与当前账号待分析队列。明确允许后，I2 只使用当前 Photos 权限范围的值型元数据建立 `assetID + sourceVersion + queuedAt` 清单；队列 API 不接收像素、缩略图、`PHAsset` 或文件 URL，不依赖 Vision/Core ML/AVFoundation/网络，因而不存在像素读取、iCloud 原件下载或模型推理。受保护 JSON 位于 `AppCache/<server>/<user>/analysis-queue`，绑定 schema、许可 revision 与账号身份；错账号、损坏、重复 ID、未知版本和不安全符号链接均失败关闭。关闭许可、损坏恢复和当前账号缓存清理会删除队列且不触碰系统照片、MyNAS 原件或 I1 索引。7 项 I2 回归覆盖默认拒绝、最小字段、增量同步、隔离、错账号复制、删除/缓存清理和损坏/重复拒绝；Xcode 27 beta iPhone 17 Pro 模拟器完整 **51** 项通过。提交 `bf75153` 已部署为树莓派 release `20260806T042351Z`，systemd active、health/capabilities 均为 `0.9.1` 并保留 `photoDelete=true` 与 `backgroundTransfers=true`；同一提交签名安装并在 iPhone 16 Pro 验收，随后以 annotated tag `v0.9.1` 发布 GitHub Release。I2 完成；I3 需要独立许可、实现和发布门槛。
 
-- **I3 候选实现与自动化证据（2026-08-06，v0.9.2）：** I2 像素分析父许可仍是必要条件，但人物页还要求用户明确允许本地 OCR 文字索引。此后才以 Apple Vision 的 `.accurate` 文字识别对本机可取得的静态图片逐张处理；图像读取上限 2,048 px，PhotoKit 网络访问严格关闭，因此视频、Live Photo 和 iCloud-only 原件均不会被处理或下载。Vision actor 不在 UI actor 上并串行执行；OCR 存储 actor 不接收图片、`PHAsset`、缩略图、文件 URL 或 Vision observation。它仅以受保护 JSON 保存当前账号的 `assetID + sourceVersion + processorRevision + recognizedText + indexedAt`，绑定 schema、OCR consent revision 与账号身份；错账号复制、损坏、重复 ID、未知版本、超长原文和不安全符号链接均失败关闭。用户可搜索、清空或关闭删除 OCR 索引；单独关闭只删 OCR，撤回 I2 父许可或清理当前账号缓存会删除全部依赖数据。新增 6 项回归覆盖双重 opt-in、最小字段、增量与 iCloud-only 不产生陈旧文字、账号隔离、删除链和损坏/重复拒绝；Xcode 27 beta iPhone 17 Pro 模拟器完整 **57** 项通过。树莓派部署/readback、同提交 iPhone 16 Pro 验收和 GitHub tag/Release 未完成前，I3 仍进行中，不得开始 I4 或宣称人物、物体、embedding 或语义能力。
+- **I3 候选实现与自动化证据（2026-08-06，v0.9.2）：** I2 像素分析父许可仍是必要条件，但人物页还要求用户明确允许本地 OCR 文字索引。此后才以 Apple Vision 的 `.accurate` 文字识别对本机可取得的静态图片逐张处理；图像读取上限 2,048 px，PhotoKit 网络访问严格关闭，因此视频、Live Photo 和 iCloud-only 原件均不会被处理或下载。Vision actor 不在 UI actor 上并串行执行；OCR 存储 actor 不接收图片、`PHAsset`、缩略图、文件 URL 或 Vision observation。它仅以受保护 JSON 保存当前账号的 `assetID + sourceVersion + processorRevision + recognizedText + indexedAt`，绑定 schema、OCR consent revision 与账号身份；错账号复制、损坏、重复 ID、未知版本、超长原文和不安全符号链接均失败关闭。用户可搜索、清空或关闭删除 OCR 索引；单独关闭只删 OCR，撤回 I2 父许可或清理当前账号缓存会删除全部依赖数据。修复候选还保证从详情返回时，同一账号的 OCR 查询和结果会从本地索引恢复，只有账号切换或许可失效才清空。新增 7 项回归覆盖双重 opt-in、最小字段、增量与 iCloud-only 不产生陈旧文字、账号隔离、删除链、损坏/重复拒绝和详情返回状态保持；Xcode 27 beta iPhone 17 Pro 模拟器完整 **58** 项通过。树莓派部署/readback、同提交 iPhone 16 Pro 验收和 GitHub tag/Release 未完成前，I3 仍进行中，不得开始 I4 或宣称人物、物体、embedding 或语义能力。
 
 ## 阶段 J — 大规模、灾难恢复与版本升级
 
@@ -226,7 +226,7 @@
 
 **I2 发布完成（2026-08-06）：** 提交 `bf75153` 已作为 `v0.9.1` 原子部署到树莓派 release `20260806T042351Z`，systemd active、health/capabilities 均精确回读 `0.9.1`，并保留 `photoDelete=true`、`backgroundTransfers=true`；同一提交已签名安装并在 iPhone 16 Pro 验收，annotated tag `v0.9.1` 与公开 GitHub Release 已发布。因此 I2 完成；只有用户明确进入后，才开始 I3 Vision OCR 的独立设计、实现和验收。
 
-**I3 候选（2026-08-06，待发布）：** `v0.9.2` 已统一写入 `VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与 README 的候选说明。实现和完整 57 项 iPhone 17 Pro 模拟器回归已通过。下一步只能将这个同一候选提交部署到树莓派并回读 systemd、health/capabilities，再构建签名 iPhone 包并由用户验收；完成前不得进入 I4 或创建 GitHub Release。
+**I3 候选（2026-08-06，待发布）：** `v0.9.2` 已统一写入 `VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与 README 的候选说明。详情返回结果丢失已在修复候选中覆盖；完整 58 项 iPhone 17 Pro 模拟器回归必须通过。下一步只能将这个同一候选提交部署到树莓派并回读 systemd、health/capabilities，再构建签名 iPhone 包并由用户验收；完成前不得进入 I4 或创建 GitHub Release。
 
 ### I1 发布前历史验收记录
 
