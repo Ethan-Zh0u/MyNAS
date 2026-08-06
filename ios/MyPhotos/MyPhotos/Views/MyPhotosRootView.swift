@@ -487,20 +487,10 @@ private struct LocalAnalysisQueueView: View {
             .frame(width: 72, height: 72)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            Text(textSnippet(record.recognizedText))
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
             Spacer()
         }
-        .accessibilityElement(children: .combine)
-    }
-
-    private func textSnippet(_ text: String) -> String {
-        let compact = text
-            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
-            .joined(separator: " ")
-        return compact.isEmpty ? "未识别到可检索文字" : compact
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("OCR 搜索结果照片")
     }
 
     private static let timestampFormatter: DateFormatter = {
