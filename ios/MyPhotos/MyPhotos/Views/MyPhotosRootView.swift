@@ -232,24 +232,24 @@ private struct LocalAnalysisQueueView: View {
                             Label("关闭许可并删除本地队列", systemImage: "hand.raised.slash")
                         }
                         .disabled(queue.isWorking)
+                        .confirmationDialog(
+                            "关闭端侧像素分析？",
+                            isPresented: $showsDisableConfirmation,
+                            titleVisibility: .visible
+                        ) {
+                            Button("关闭并删除", role: .destructive) {
+                                Task { await queue.disableAndDelete(account: accountStore.current) }
+                            }
+                            Button("取消", role: .cancel) {}
+                        } message: {
+                            Text("会撤回当前账号的端侧像素分析许可并删除待分析队列。不会删除系统照片、MyNAS 原件或 I1 本地搜索索引。")
+                        }
                     }
                 }
             }
             .navigationTitle("人物")
             .task(id: accountIdentity) {
                 await queue.load(account: accountStore.current)
-            }
-            .confirmationDialog(
-                "关闭端侧像素分析？",
-                isPresented: $showsDisableConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button("关闭并删除", role: .destructive) {
-                    Task { await queue.disableAndDelete(account: accountStore.current) }
-                }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("会撤回当前账号的端侧像素分析许可并删除待分析队列。不会删除系统照片、MyNAS 原件或 I1 本地搜索索引。")
             }
             .alert(
                 "端侧分析队列不可用",
