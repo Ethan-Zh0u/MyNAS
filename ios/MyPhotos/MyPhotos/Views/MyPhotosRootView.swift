@@ -487,14 +487,10 @@ private struct LocalAnalysisQueueView: View {
             .frame(width: 72, height: 72)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text("本地 OCR 文字")
-                    .font(.headline)
-                Text(textSnippet(record.recognizedText))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
+            Text(textSnippet(record.recognizedText))
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
             Spacer()
         }
         .accessibilityElement(children: .combine)
