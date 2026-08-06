@@ -130,11 +130,7 @@ struct MyPhotosRootView: View {
                 systemImage: MainSection.people.symbol,
                 value: MainSection.people
             ) {
-                PhasePlaceholderView(
-                    title: "人物",
-                    symbol: MainSection.people.symbol,
-                    message: "阶段 I 已先建立按账号隔离、可删除的本地索引。人物聚类将在后续接入，且不会自动猜测真实姓名。"
-                )
+                LocalAnalysisQueueView(photoClient: library.imageClient)
             }
 
             Tab(
@@ -164,6 +160,143 @@ struct MyPhotosRootView: View {
             }
         }
     }
+}
+
+/// I2 is deliberately a consent and queue screen, not a person-recognition
+/// screen. No Vision/Core ML processor is linked from this view.
+private struct LocalAnalysisQueueView: View {
+    @EnvironmentObject private var accountStore: AccountStore
+    let photoClient: PhotoLibraryClient
+    @StateObject private var queue = PhotoAnalysisQueueViewModel()
+    @State private var showsDisableConfirmation = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !queue.status.isPixelAnalysisAllowed {
+                    Section("阶段 I · I2 端侧分析许可") {
+                        Label("默认关闭", systemImage: "hand.raised.fill")
+                            .foregroundStyle(.secondary)
+                        Text("I2 只会读取当前 Photos 权限范围内的元数据，以建立待分析项目清单；不会读取照片或视频像素、不会下载 iCloud 原件、不会调用 Vision/Core ML，也不会上传到 MyNAS 或其他服务。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Text("明确允许后，许可和队列只属于当前 MyNAS 账号；关闭许可或清理当前账号缓存会删除它们。OCR、物体、人物和语义结果仍未交付。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button {
+                            Task { await enableAndPrepareQueue() }
+                        } label: {
+                            Label("允许端侧像素分析并建立队列", systemImage: "checkmark.shield")
+                        }
+                        .disabled(queue.isWorking)
+                    }
+                } else {
+                    Section("端侧像素分析许可") {
+                        LabeledContent("状态", value: "已允许")
+                        LabeledContent("当前账号", value: accountStore.current.displayName)
+                        LabeledContent("待分析项目", value: "\(queue.status.pendingAssetCount)")
+                        LabeledContent("最近准备", value: lastPreparedText)
+
+                        if queue.isWorking {
+                            HStack(spacing: 9) {
+                                ProgressView()
+                                Text("正在读取本地图库元数据…")
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Button {
+                                Task { await prepareQueue() }
+                            } label: {
+                                Label("更新待分析队列", systemImage: "arrow.clockwise")
+                            }
+                        }
+
+                        if let statusMessage = queue.statusMessage {
+                            Text(statusMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Section("I2 当前边界") {
+                        Label("仅保存标识符和源版本", systemImage: "list.bullet.rectangle")
+                        Text("本阶段的队列不会读取、缓存或上传像素，也没有 OCR、物体标签、人物聚类、embedding 或搜索结果。后续每项能力都会单独进入阶段并重新验收。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Section("许可控制") {
+                        Button(role: .destructive) {
+                            showsDisableConfirmation = true
+                        } label: {
+                            Label("关闭许可并删除本地队列", systemImage: "hand.raised.slash")
+                        }
+                        .disabled(queue.isWorking)
+                    }
+                }
+            }
+            .navigationTitle("人物")
+            .task(id: accountIdentity) {
+                await queue.load(account: accountStore.current)
+            }
+            .confirmationDialog(
+                "关闭端侧像素分析？",
+                isPresented: $showsDisableConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("关闭并删除", role: .destructive) {
+                    Task { await queue.disableAndDelete(account: accountStore.current) }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("会撤回当前账号的端侧像素分析许可并删除待分析队列。不会删除系统照片、MyNAS 原件或 I1 本地搜索索引。")
+            }
+            .alert(
+                "端侧分析队列不可用",
+                isPresented: Binding(
+                    get: { queue.errorMessage != nil },
+                    set: { if !$0 { queue.errorMessage = nil } }
+                )
+            ) {
+                Button("删除不可读队列", role: .destructive) {
+                    Task { await queue.resetCorruptedQueue(account: accountStore.current) }
+                }
+                Button("取消", role: .cancel) { queue.errorMessage = nil }
+            } message: {
+                Text(queue.errorMessage ?? "")
+            }
+        }
+    }
+
+    private var accountIdentity: String {
+        "\(accountStore.current.accountID)|\(accountStore.current.serverID)|\(accountStore.current.userID)"
+    }
+
+    private var lastPreparedText: String {
+        queue.status.lastPreparedAt.map { Self.timestampFormatter.string(from: $0) } ?? "尚未建立"
+    }
+
+    private func enableAndPrepareQueue() async {
+        let account = accountStore.current
+        let assets = await photoClient.allAccessibleAssets()
+        guard accountIdentity == "\(account.accountID)|\(account.serverID)|\(account.userID)" else { return }
+        await queue.enableAndPrepare(assets: assets, account: account)
+    }
+
+    private func prepareQueue() async {
+        let account = accountStore.current
+        let assets = await photoClient.allAccessibleAssets()
+        guard accountIdentity == "\(account.accountID)|\(account.serverID)|\(account.userID)" else { return }
+        await queue.prepare(assets: assets, account: account)
+    }
+
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }
 
 private struct PhasePlaceholderView: View {

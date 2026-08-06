@@ -311,6 +311,7 @@ actor RemotePhotoCacheManager {
         case .thumbnails: 2
         case .metadata: 3
         case .searchIndex: 4
+        case .analysisQueue: 5
         }
     }
 }
