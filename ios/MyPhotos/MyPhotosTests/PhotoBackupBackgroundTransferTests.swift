@@ -85,6 +85,41 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
         XCTAssertEqual(try persistence.load(), [restoredJob])
     }
 
+    func testLegacyQueueWithoutPendingVerifiedRemoteAssetIDStillLoads() throws {
+        let queueURL = temporaryRoot.appendingPathComponent("legacy-jobs.json", isDirectory: false)
+        let persistence = PhotoBackupPersistenceStore(explicitURL: queueURL)
+        let legacyJob = PhotoBackupJob(
+            id: UUID(),
+            accountID: "legacy-account",
+            localIdentifier: "legacy-local",
+            mediaKind: .photo,
+            creationDate: nil,
+            sourceModificationDate: Date(timeIntervalSince1970: 1_700_000_100),
+            status: .completed,
+            totalBytes: 512,
+            uploadedBytes: 512,
+            resourceCount: 1,
+            assetID: "legacy-remote",
+            sourceState: .committed,
+            derivativeState: .ready,
+            origin: .manual,
+            message: "旧版本记录",
+            failure: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_200)
+        )
+        let encoded = try JSONEncoder().encode([legacyJob])
+        var payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [[String: Any]]
+        )
+        payload[0].removeValue(forKey: "pendingVerifiedRemoteAssetID")
+        try JSONSerialization.data(withJSONObject: payload).write(to: queueURL)
+
+        let restored = try XCTUnwrap(persistence.load().first)
+        XCTAssertEqual(restored.id, legacyJob.id)
+        XCTAssertEqual(restored.assetID, legacyJob.assetID)
+        XCTAssertNil(restored.pendingVerifiedRemoteAssetID)
+    }
+
     func testMetadataOnlyLibraryChangeKeepsCompletedProofAndDeletionVersion() throws {
         let account = connectedAccount()
         let queueURL = temporaryRoot.appendingPathComponent("metadata-change-jobs.json", isDirectory: false)

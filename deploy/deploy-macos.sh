@@ -8,6 +8,10 @@ pages_origin=${MYNAS_PAGES_ORIGIN:-https://mynas-rsp.pages.dev}
 private_origin=${MYNAS_PRIVATE_ORIGIN:-https://rsp.tail681937.ts.net}
 background_transfers=${MYNAS_PHOTOS_BACKGROUND_TRANSFERS:-0}
 version=$(tr -d '[:space:]' < "$root/VERSION")
+if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "VERSION must use MAJOR.MINOR.PATCH semver." >&2
+  exit 1
+fi
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 remote_release="/tmp/mynas-release-$stamp"
 build_dir="$root/.dev-state/deploy-$stamp"
@@ -69,10 +73,11 @@ echo "Building and testing MyNAS v$version (background transfers=$background_tra
 )
 (
   cd "$root/backend"
+  mynas_server_ldflags="-s -w -X main.photosServerVersion=$version"
   GOCACHE="$build_dir/go-build" go test ./...
   GOCACHE="$build_dir/go-build" go vet ./...
   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOCACHE="$build_dir/go-build" \
-    go build -buildvcs=false -trimpath -ldflags='-s -w' -o "$build_dir/mynas" .
+    go build -buildvcs=false -trimpath -ldflags="$mynas_server_ldflags" -o "$build_dir/mynas" .
   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOCACHE="$build_dir/go-build" \
     go build -buildvcs=false -trimpath -ldflags='-s -w' -o "$build_dir/mynas-setup" ./cmd/mynas-setup
 )

@@ -1,9 +1,9 @@
 import Foundation
 
 /// A read-only presentation record for the main timeline. A local and a remote
-/// asset are joined only when this device's server-confirmed backup job names
-/// the same MyNAS asset ID and still refers to the current local source version.
-/// It deliberately does not infer a match from dates, filenames, or thumbnails.
+/// asset are joined when the current source has either a server-confirmed
+/// mapping or a persisted complete-resource proof awaiting that mapping. It
+/// deliberately does not infer a match from dates, filenames, or thumbnails.
 enum UnifiedPhotoTimelineAvailability: Equatable, Sendable {
     case localOnly
     case waitingForBackup
@@ -103,7 +103,9 @@ struct UnifiedPhotoTimelineItem: Identifiable, Sendable {
             let job = currentJobsByLocalIdentifier[localAsset.localIdentifier]
             let isCurrentSource = job?.matchesCurrentLocalAsset(localAsset) == true
             let currentJob = isCurrentSource ? job : nil
-            let remoteAsset = currentJob?.assetID.flatMap { remoteByID[$0] }
+            let linkedRemoteID = currentJob?.assetID
+                ?? currentJob?.pendingVerifiedRemoteAssetID
+            let remoteAsset = linkedRemoteID.flatMap { remoteByID[$0] }
             return CurrentLocalRecord(
                 localAsset: localAsset,
                 job: currentJob,

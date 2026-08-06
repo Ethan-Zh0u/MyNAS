@@ -297,6 +297,12 @@ struct PhotoBackupJob: Identifiable, Codable, Equatable, Sendable {
     var uploadedBytes: Int64
     var resourceCount: Int
     var assetID: String?
+    /// The MyNAS item whose complete original resource group was proven equal
+    /// to this Photos item before the server-side device mapping completed.
+    /// This proof may come only from a verified MyNAS download/import or a
+    /// role + byte-size + SHA-256 comparison. It is safe for presentation
+    /// de-duplication, but never grants deletion or completed-backup status.
+    var pendingVerifiedRemoteAssetID: String? = nil
     var sourceState: PhotoSourceState?
     var derivativeState: PhotoDerivativeState?
     var origin: PhotoBackupJobOrigin?

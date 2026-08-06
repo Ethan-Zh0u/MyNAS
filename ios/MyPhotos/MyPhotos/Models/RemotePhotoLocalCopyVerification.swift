@@ -51,6 +51,24 @@ nonisolated enum RemotePhotoLocalCopyVerification {
         return localProofs.sorted() == remoteProofs.sorted()
     }
 
+    /// Returns an identity only when the complete resource proof selects one
+    /// and only one MyNAS item. Equal resource groups under several remote IDs
+    /// are a server-side ambiguity and must not be resolved by client order.
+    static func uniqueCompleteResourceGroupMatch(
+        localResources: [PreparedPhotoResource],
+        among remoteAssets: [ServerPhotoAsset]
+    ) -> ServerPhotoAsset? {
+        var match: ServerPhotoAsset?
+        for remoteAsset in remoteAssets where hasSameCompleteResourceGroup(
+            localResources: localResources,
+            remoteResources: remoteAsset.resources
+        ) {
+            guard match == nil else { return nil }
+            match = remoteAsset
+        }
+        return match
+    }
+
     private struct ResourceProof: Comparable {
         private static let hexadecimalCharacters = CharacterSet(
             charactersIn: "0123456789abcdefABCDEF"

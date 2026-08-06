@@ -37,7 +37,7 @@
 | F | 本地/远程统一时间线与去重 | 已完成（F1–F4） | 进入阶段 G 的后台自动备份设计与真机策略验收 |
 | G | 后台自动备份 | 进行中（G1 已完成模拟器及 iPhone 16 Pro 的默认关闭、持久化、前台自动上传、低电量暂停/恢复、Wi‑Fi/蜂窝网络策略、一次锁屏后完成的受限观察，以及真实 App 终止/重新打开后的自动恢复；G2 已完成真实 212.1 MB 锁屏系统会话、开发终止后恢复、真机实时进度、传输中低电量暂停/续传完成，以及 Wi‑Fi 中断后等待、恢复并达到 MyNAS-confirmed 最终完成；服务重启、账号/卷、iCloud-only 与长队列仍未验收） | 验证服务重启，再完成账号/卷、iCloud-only 和长队列边界 |
 | H | 恢复、导出、删除与缓存管理 | 已完成（H0–H2 均已真机验收） | 返回阶段 G，从 MyNAS 服务重启边界继续 |
-| I | 端侧 AI 搜索、人物/物体分类 | 进行中（I1 v0.9.0、I2 v0.9.1 已发布；I3 v0.9.2 照片主页统一搜索候选已完成实现与 59 项模拟器回归） | 完成 I3 同一候选的树莓派、iPhone 与 GitHub 发布门槛；不得进入 I4 |
+| I | 端侧 AI 搜索、人物/物体分类 | I1 v0.9.0、I2 v0.9.1、I3 v0.9.2 均已发布；v0.9.3 是 H 维护候选，含远端预览布局与删除连通性误判修复，62 项模拟器回归已通过 | 完成 v0.9.3 同一候选的树莓派、iPhone 与 GitHub 发布门槛；随后回到阶段 G 的服务重启边界 |
 | J | 大规模、灾难恢复与版本升级 | 部分完成 | 通用卷/健康基础已有，Photos 专项韧性未做 |
 
 ## 阶段 A — 产品边界与工程基础
@@ -220,13 +220,15 @@
 - **明确不包含：** 把本机和单块 NAS 宣称为唯一灾备；不承诺未演练的 RPO/RTO。
 - **状态与证据：** **部分完成。** 通用 MyNAS 已有健康检查、稳定卷 ID、离线状态和 SQLite 单连接以降低 `SQLITE_BUSY`；Photos 专用 migration version、灾备扫描、断电恢复和大规模基准尚未实现。
 
-## 当前工作状态与下一优先级：阶段 I 的 I3 发布候选验收
+## 当前工作状态与下一优先级：v0.9.3 远端预览与删除连通性维护候选
 
 **I1 发布完成（2026-08-06）：** 候选提交 `85cd4f2` 已以 MyNAS `0.9.0` 原子部署到树莓派 release `20260806T032331Z`，systemd active、health 和 capabilities 精确回读 `0.9.0`，并保留 `photoDelete=true`、`backgroundTransfers=true`。该提交的签名 Debug App 已在 iPhone 16 Pro 安装、启动并通过最终验收；annotated tag `v0.9.0` 与公开 GitHub Release 已发布。因此 I1 完成，下一步才允许开始 I2 的端侧分析队列与独立像素分析许可。
 
 **I2 发布完成（2026-08-06）：** 提交 `bf75153` 已作为 `v0.9.1` 原子部署到树莓派 release `20260806T042351Z`，systemd active、health/capabilities 均精确回读 `0.9.1`，并保留 `photoDelete=true`、`backgroundTransfers=true`；同一提交已签名安装并在 iPhone 16 Pro 验收，annotated tag `v0.9.1` 与公开 GitHub Release 已发布。因此 I2 完成；只有用户明确进入后，才开始 I3 Vision OCR 的独立设计、实现和验收。
 
-**I3 候选（2026-08-06，待发布）：** `v0.9.2` 已统一写入 `VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与 README。早期候选的详情返回结果丢失已修复，但它们仍把 OCR 搜索放在“人物”栏，不符合照片主页统一搜索与人物栏单一职责的最新产品约束，均不得发布。替代提交 `f8352d2` 在“照片”主页的单一查询框合并 I1 和 I3 结果、按 asset ID 去重并以三列纯缩略图直达详情，同时将人物栏收敛到人物识别及对应照片；完整 59 项模拟器回归通过。该提交已部署到树莓派 `20260806T075201Z`，独立反读 systemd active、health/capabilities 均为 `0.9.2` 且保留 `photoDelete=true`、`backgroundTransfers=true`；签名 App 已安装并启动 iPhone 16 Pro。现在只待用户真机验收；完成前不得进入 I4 或创建 GitHub Release。
+**I3 发布前的候选历史记录（2026-08-06）：** `v0.9.2` 已统一写入 `VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与 README。早期候选的详情返回结果丢失已修复，但它们仍把 OCR 搜索放在“人物”栏，不符合照片主页统一搜索与人物栏单一职责的最新产品约束，均不得发布。替代提交 `f8352d2` 在“照片”主页的单一查询框合并 I1 和 I3 结果、按 asset ID 去重并以三列纯缩略图直达详情，同时将人物栏收敛到人物识别及对应照片；完整 59 项模拟器回归通过。该提交已部署到树莓派 `20260806T075201Z`，独立反读 systemd active、health/capabilities 均为 `0.9.2` 且保留 `photoDelete=true`、`backgroundTransfers=true`；签名 App 已安装并启动 iPhone 16 Pro。这一历史记录随后已完成用户验收、同提交的 annotated `v0.9.2` tag 与 GitHub Release，故 I3 已完成。
+
+**I3 发布完成与 v0.9.3 维护候选（2026-08-06）：** 用户已接受 `f8352d2` 的 iPhone 16 Pro 统一搜索验收，`v0.9.2` annotated tag 与公开 GitHub Release 已发布，I3 已完成。本轮不进入 I4。候选 `v0.9.3` 先修复远端预览比例和删除 health 建连预算，并把 `VERSION` 的 SemVer 以 linker 注入 health/capabilities。随后真机暴露 MyNAS 测试图下载进 Photos 后首页仍增加同图：PhotoKit 创建 identifier 原来只等待约 0.5 秒，且关联遇到其他备份或 mapping 恢复会被直接拒绝；历史自动修复又错误要求已有 committed mapping 作锚点，因此由其他设备/fixture 上传的 MyNAS-only 项目无法自愈。当前候选把已验证远端目标持久写入 job，等待 PhotoKit 最多 15 秒，忙碌时排队并可在重启后从全量元数据恢复；首页在服务端 mapping 完成前即可凭完整资源证明合并显示，但删除仍只接受 committed mapping。历史副本可在无锚点时核验，只有完整资源组唯一命中一个远端 ID 才登记，多个远端 ID 同时命中则拒绝猜选；服务器 outcome 与待登记 ID 不同会记为完整性失败。Xcode 27 beta iPhone 17 Pro 模拟器完整 66/66 通过，结果包为 `ios/MyPhotos/build/I3-v0.9.3-exact-uniqueness-final.xcresult`。当前提交尚待树莓派重新部署/readback、同提交签名安装和 iPhone 16 Pro 对现有孤儿副本及再次下载的验收；通过前不发布。
 
 ### I1 发布前历史验收记录
 

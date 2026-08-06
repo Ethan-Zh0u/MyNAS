@@ -35,7 +35,7 @@
 | `AccountContext` | `accountID`、server/user ID、URL、Tailscale identity、卷、capabilities；无 MyNAS 密码/token |
 | `LocalPhotoAsset` | local identifier、创建/修改时间、媒体种类、像素、时长、favorite；不承诺远端状态 |
 | `PreparedPhotoAsset` | 当前上传期的完整 resource group、每资源临时文件/大小/SHA-256 和 manifest fingerprint |
-| `PhotoBackupJob` | account、local ID、源修改日期、waiting/preparing/uploading/completed/failed、字节/资源数/asset ID、可选 source/derivative 状态，以及持久化的失败类别/详情/发生时间；H1 删除成功后仅将匹配的 completed proof 转为 `remoteDeleted` failed，保留 local ID 与源版本，等待用户明确手动重传；它明确记录本机照片是仍保留还是已由 iOS 移入“最近删除” |
+| `PhotoBackupJob` | account、local ID、源修改日期、waiting/preparing/uploading/completed/failed、字节/资源数/asset ID、可选 source/derivative 状态，以及持久化的失败类别/详情/发生时间。可选 `pendingVerifiedRemoteAssetID` 只在完整资源组经 MyNAS 下载校验或角色+字节数+SHA-256 唯一比对后写入，用于服务端 mapping 完成前的显示去重与重启恢复；它不能形成删除候选或 completed proof。H1 删除成功后仅将匹配 proof 转为 `remoteDeleted` failed并等待用户明确手动重传 |
 | `PhotoBackupBackgroundTransferRecord` | G2 的受保护任务登记册记录；绑定 `accountID + serverID + userID + volumeID`、当前 local identifier/source version、manifest fingerprint 与每资源 hash/相对暂存文件名，并最多绑定一个 future system task 的 ID、协议阶段、资源/分片范围、body/response 文件名、HTTP 状态和响应长度，以及只在完整响应验证后写入的上传 outcome。2026-08-03 的受控部署允许创建后台会话或任务；同日 iPhone 16 Pro 已完成一项 212.1 MB 的真实锁屏系统传输并得到 MyNAS outcome，终止/中断恢复等其余验收仍待完成。 |
 | `PhotoBackupProgressSnapshot` | **队列**完成数、失败数和总数；不是服务器完整图库数，也不是 browse-ready 计数 |
 | `ServerPhotoAsset` | 远端 asset/version、媒体元数据、source/derivative/browse-ready 状态、全部 resource 与 derivative 描述；与 `LocalPhotoAsset` 保持分离 |
@@ -43,7 +43,7 @@
 | `ServerAssetPage` | owner-scoped 稳定分页结果、opaque next cursor 与 has-more |
 | `CacheDirectoryProvider` | `AppCache/<serverID>/<userID>/<kind>` 的目录约定；E4 已用于带 ETag 的 metadata 以及经 SHA-256 校验的 grid/preview，尚未实现 LRU/缓存索引 |
 
-`PhotoBackupJob.completed` 仍表示上传协议返回 `completed`/`duplicate` 且原始资源已经校验；E1 已增加可选的 `sourceState`、`derivativeState` 和计算属性 `isBrowseReady`，以兼容旧的本地队列 JSON。不要把 job 的 completed 直接扩展成远程浏览/删除资格。
+`PhotoBackupJob.completed` 仍表示上传协议返回 `completed`/`duplicate` 且原始资源已经校验；E1 已增加可选的 `sourceState`、`derivativeState` 和计算属性 `isBrowseReady`。`pendingVerifiedRemoteAssetID` 同样是可选字段，旧队列缺失时解码为 `nil`；服务器返回的 asset ID 必须与它一致才可升级为 completed，否则记为完整性失败。不要把待登记目标或 job 的 completed 单独扩展成远程删除资格。
 
 G2 登记册与前台队列分开存放，使用同一等级的 Data Protection 原子写入。对应暂存器只会在逐资源复制后再次验证字节数和 SHA-256 均匹配时写入记录；失败会清理尚未登记的暂存目录。它使用与前台上传共享的 manifest 类型写入创建会话 request body，并写入空完成 request body；按需分片准备器只从已验证的暂存资源生成唯一、不覆盖既有文件的 part body，返回该文件的字节数和 SHA-256。每条记录至多登记一个 iOS 协议 task，且 task ID、请求阶段、资源/分片范围、相对 body/response 文件名和回调 HTTP 状态/响应长度均必须与记录形状相符；传输结束后只进入“等待 App 解析”，不能据此标记上传成功。客户端的 background engine 使用按网络策略分离的 file-backed session，回调只在完整响应被解析、来源/派生状态符合现有完整性契约后，才写入 outcome；中断或策略暂停会清除 session/offset 假设，重新用幂等 create-session 获得 MyNAS 权威 received bytes。仅当相关前台队列已成功原子写入同一完成 outcome 时，才可按记录 UUID、server/user 私有路径再次核验并删除该暂存目录及登记册；任一写入或清理失败都会保留记录。服务端续传会话也以 `owner + volume + device + local ID + fingerprint` 为唯一身份，旧库在启动迁移中保留所有行并升级该约束，因而切卷绝不复用 session 或 received bytes。App 的 BGProcessing handler 只读取这些持久记录，且每次再核验当前账号、卷、capability、用户策略和低电量条件；它不读取 PhotoKit 或创建新备份。它不保存凭据、服务器存储路径或完整 App 沙盒绝对路径；暂存目录由记录 UUID 推导，资源文件名只能是受限的单一路径组件。2026-08-03 的受控部署 capability 为 true，因此首次真实后台 `URLSession`/`BGTask` 验收可以创建记录；在回调、媒体完整性和终止恢复被观察前，仍不能把任一记录解释为已在系统后台完成。
 

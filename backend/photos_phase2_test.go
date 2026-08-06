@@ -68,6 +68,9 @@ func TestPhotosPhase2HandshakeUsesStableServerAndUserIDs(t *testing.T) {
 	if capabilities.ServerID == "" || capabilities.ServerID != app.serverID {
 		t.Fatalf("unexpected server id %q", capabilities.ServerID)
 	}
+	if capabilities.ServerVersion != photosServerVersion || strings.TrimSpace(capabilities.ServerVersion) == "" {
+		t.Fatalf("unexpected server version %q", capabilities.ServerVersion)
+	}
 	if !capabilities.Features.PhotoAssets || !capabilities.Features.LivePhotos {
 		t.Fatal("manual source backup must advertise photo assets and multi-resource Live Photo support")
 	}

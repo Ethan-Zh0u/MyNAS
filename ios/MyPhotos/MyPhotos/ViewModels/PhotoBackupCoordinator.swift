@@ -39,6 +39,17 @@ enum PhotoBackupVerifiedLocalAssociationResult: Equatable, Sendable {
     case unavailable(String)
 }
 
+private enum PhotoBackupVerifiedAssociationError: LocalizedError {
+    case unexpectedRemoteAsset(expected: String, received: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unexpectedRemoteAsset(let expected, let received):
+            "MyNAS 返回了不同的原件标识（预期 \(expected)，收到 \(received)），已拒绝建立关联。"
+        }
+    }
+}
+
 @MainActor
 final class PhotoBackupCoordinator: ObservableObject {
     @Published private(set) var jobs: [PhotoBackupJob] = []
@@ -73,6 +84,11 @@ final class PhotoBackupCoordinator: ObservableObject {
     private var activeRemoteCopyReconciliationAccountID: String?
     private var pendingRemoteCopyReconciliation: RemoteCopyReconciliationRequest?
     private var checkedRemoteCopyPairs: Set<RemoteCopyVerificationPair> = []
+    /// Exact association requests are never discarded merely because another
+    /// backup or mapping recovery is active. Their target is persisted on the
+    /// job; this in-memory snapshot only starts the foreground upload as soon
+    /// as the current coordinator work becomes idle.
+    private var pendingVerifiedAssociationRuns: [String: VerifiedAssociationRunRequest] = [:]
 
     private struct RemoteCopyReconciliationRequest {
         let remoteAssets: [ServerPhotoAsset]
@@ -87,6 +103,12 @@ final class PhotoBackupCoordinator: ObservableObject {
         let remoteVersion: String
         let localIdentifier: String
         let localModificationDate: Date?
+    }
+
+    private struct VerifiedAssociationRunRequest {
+        let assets: [LocalPhotoAsset]
+        let account: AccountContext
+        let client: PhotoLibraryClient
     }
 
     /// Keeps only the local snapshot needed to reconcile previously verified
@@ -401,12 +423,14 @@ final class PhotoBackupCoordinator: ObservableObject {
         var changed = false
         for index in jobs.indices where
             jobs[index].accountID == accountID
-                && jobs[index].assetID == normalizedAssetID {
+                && (jobs[index].assetID == normalizedAssetID
+                    || jobs[index].pendingVerifiedRemoteAssetID == normalizedAssetID) {
             jobs[index].status = .failed
             jobs[index].uploadedBytes = 0
             jobs[index].totalBytes = 0
             jobs[index].resourceCount = 0
             jobs[index].assetID = nil
+            jobs[index].pendingVerifiedRemoteAssetID = nil
             jobs[index].sourceState = nil
             jobs[index].derivativeState = nil
             jobs[index].origin = .manual
@@ -556,12 +580,6 @@ final class PhotoBackupCoordinator: ObservableObject {
         guard !normalizedRemoteID.isEmpty else {
             return .unavailable("MyNAS 项目无效，请刷新后重试。")
         }
-        guard !isRunning else {
-            return .unavailable("另一项备份正在进行，请完成后再关联。")
-        }
-        guard mappingRecoveryTasks[account.accountID] == nil else {
-            return .unavailable("正在核验已有备份，请稍后再试。")
-        }
         guard !account.isLocalOnly else {
             return .unavailable("请先连接 MyNAS。")
         }
@@ -588,7 +606,19 @@ final class PhotoBackupCoordinator: ObservableObject {
         }
 
         localCopiesNeedingAssociation.forEach {
-            enqueueVerifiedLocalAssociation($0, accountID: account.accountID)
+            enqueueVerifiedLocalAssociation(
+                $0,
+                expectedRemoteAssetID: normalizedRemoteID,
+                accountID: account.accountID
+            )
+        }
+        if isRunning || mappingRecoveryTasks[account.accountID] != nil {
+            mergePendingVerifiedAssociationRun(
+                assets: localCopiesNeedingAssociation,
+                account: account,
+                client: client
+            )
+            return .started
         }
         run(
             account: account,
@@ -599,12 +629,11 @@ final class PhotoBackupCoordinator: ObservableObject {
         return .started
     }
 
-    /// Repairs historical physical duplicates without requiring the user to
-    /// open every MyNAS item. A remote item is eligible only when this device
-    /// already has one current, server-committed mapping for it; that verified
-    /// mapping is the anchor that makes this a narrow duplicate-repair pass.
-    /// Every additional candidate still has to match every resource role,
-    /// byte count, and SHA-256 value before it is queued for association.
+    /// Repairs historical physical duplicates and MyNAS downloads whose first
+    /// device mapping was lost. No pre-existing mapping is required: a local
+    /// item is eligible only after every original resource role, byte count,
+    /// and SHA-256 value matches exactly one visible MyNAS item. Ambiguous
+    /// server duplicates are left separate instead of being guessed.
     func reconcileVerifiedRemoteCopies(
         remoteAssets: [ServerPhotoAsset],
         localAssets: [LocalPhotoAsset],
@@ -663,34 +692,51 @@ final class PhotoBackupCoordinator: ObservableObject {
         account: AccountContext,
         client: PhotoLibraryClient
     ) async {
-        let localAssetsByID = Dictionary(
-            uniqueKeysWithValues: localAssets.map { ($0.localIdentifier, $0) }
-        )
-        let anchoredRemoteIDs = Set(jobs.compactMap { job -> String? in
-            guard job.accountID == account.accountID,
-                  job.status == .completed,
-                  job.sourceState == .committed,
-                  let remoteAssetID = job.assetID,
-                  let localAsset = localAssetsByID[job.localIdentifier],
-                  job.matchesCurrentLocalAsset(localAsset) else {
-                return nil
+        // The exact target is persisted, while the run request intentionally
+        // is not. Rebuild that request from the complete PhotoKit metadata
+        // snapshot after an app restart so an older imported copy cannot stay
+        // permanently stuck merely because it is outside the paged home grid.
+        let interruptedVerifiedAssets = localAssets.filter { asset in
+            jobs.contains { job in
+                job.accountID == account.accountID
+                    && job.localIdentifier == asset.localIdentifier
+                    && job.status == .waiting
+                    && job.origin != .automatic
+                    && job.pendingVerifiedRemoteAssetID?.isEmpty == false
+                    && job.matchesCurrentLocalAsset(asset)
             }
-            return remoteAssetID
-        })
-        let anchoredRemoteAssets = remoteAssets.filter {
-            anchoredRemoteIDs.contains($0.id)
         }
-        guard !anchoredRemoteAssets.isEmpty else { return }
+        if !interruptedVerifiedAssets.isEmpty {
+            mergePendingVerifiedAssociationRun(
+                assets: interruptedVerifiedAssets,
+                account: account,
+                client: client
+            )
+            startPendingVerifiedAssociationRunIfPossible(
+                preferredAccountID: account.accountID
+            )
+        }
+
+        let verifiableRemoteAssets = remoteAssets.filter { !$0.resources.isEmpty }
+        guard !verifiableRemoteAssets.isEmpty else { return }
 
         var matchesByRemoteID: [String: [LocalPhotoAsset]] = [:]
         for localAsset in localAssets {
             guard !Task.isCancelled else { return }
+            let alreadyHasExactAssociation = jobs.contains { job in
+                job.accountID == account.accountID
+                    && job.localIdentifier == localAsset.localIdentifier
+                    && job.matchesCurrentLocalAsset(localAsset)
+                    && (job.assetID?.isEmpty == false
+                        || job.pendingVerifiedRemoteAssetID?.isEmpty == false)
+            }
+            guard !alreadyHasExactAssociation else { continue }
             while (isRunning || mappingRecoveryTasks[account.accountID] != nil),
                   !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
             }
             guard !Task.isCancelled else { return }
-            let uncheckedRemotes = anchoredRemoteAssets.filter { remoteAsset in
+            let uncheckedRemotes = verifiableRemoteAssets.filter { remoteAsset in
                 guard RemotePhotoLocalCopyVerification.isCandidate(
                     localAsset,
                     for: remoteAsset
@@ -725,22 +771,26 @@ final class PhotoBackupCoordinator: ObservableObject {
                 )
                 defer { prepared.removeTemporaryFiles() }
                 guard !Task.isCancelled else { return }
-                for remoteAsset in uncheckedRemotes {
-                    let pair = RemoteCopyVerificationPair(
+                let evaluatedPairs = uncheckedRemotes.map { remoteAsset in
+                    RemoteCopyVerificationPair(
                         accountID: account.accountID,
                         remoteAssetID: remoteAsset.id,
                         remoteVersion: remoteAsset.version,
                         localIdentifier: localAsset.localIdentifier,
                         localModificationDate: localAsset.modificationDate
                     )
-                    checkedRemoteCopyPairs.insert(pair)
-                    guard RemotePhotoLocalCopyVerification.hasSameCompleteResourceGroup(
+                }
+                let exactRemoteMatch = RemotePhotoLocalCopyVerification
+                    .uniqueCompleteResourceGroupMatch(
                         localResources: prepared.resources,
-                        remoteResources: remoteAsset.resources
-                    ) else {
-                        continue
-                    }
-                    matchesByRemoteID[remoteAsset.id, default: []].append(localAsset)
+                        among: uncheckedRemotes
+                    )
+                checkedRemoteCopyPairs.formUnion(evaluatedPairs)
+                // If the server itself exposes multiple logical items with an
+                // identical resource group, choosing one ID would be an
+                // identity guess. Leave all of them visible for repair.
+                if let exactRemote = exactRemoteMatch {
+                    matchesByRemoteID[exactRemote.id, default: []].append(localAsset)
                 }
             } catch {
                 // An iCloud-only or temporarily unavailable original remains
@@ -749,7 +799,7 @@ final class PhotoBackupCoordinator: ObservableObject {
             }
         }
 
-        for remoteAsset in anchoredRemoteAssets {
+        for remoteAsset in verifiableRemoteAssets {
             guard !Task.isCancelled,
                   let matches = matchesByRemoteID[remoteAsset.id],
                   !matches.isEmpty else {
@@ -814,6 +864,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                 jobs[index].totalBytes = 0
                 jobs[index].resourceCount = 0
                 jobs[index].assetID = nil
+                jobs[index].pendingVerifiedRemoteAssetID = nil
                 jobs[index].sourceState = nil
                 jobs[index].derivativeState = nil
             }
@@ -1019,14 +1070,16 @@ final class PhotoBackupCoordinator: ObservableObject {
         mappingRecoveryTasks[accountID] = nil
         recoveredMappingsByAccountID[accountID] = mappings
 
-        guard let request = mappingRecoveryRequests[accountID] else { return }
-        let recoveredCount = restoreDeviceMappings(
-            for: request.assets,
-            account: request.account
-        )
-        if recoveredCount > 0 {
-            headline = "已从 MyNAS 验证记录恢复 \(recoveredCount) 项备份状态"
+        if let request = mappingRecoveryRequests[accountID] {
+            let recoveredCount = restoreDeviceMappings(
+                for: request.assets,
+                account: request.account
+            )
+            if recoveredCount > 0 {
+                headline = "已从 MyNAS 验证记录恢复 \(recoveredCount) 项备份状态"
+            }
         }
+        startPendingVerifiedAssociationRunIfPossible(preferredAccountID: accountID)
         evaluateAutomaticBackup(for: accountID)
     }
 
@@ -1036,6 +1089,7 @@ final class PhotoBackupCoordinator: ObservableObject {
     private func failDeviceMappingRecovery(for accountID: String) {
         mappingRecoveryTasks[accountID] = nil
         recoveredMappingsByAccountID[accountID] = nil
+        startPendingVerifiedAssociationRunIfPossible(preferredAccountID: accountID)
         evaluateAutomaticBackup(for: accountID)
     }
 
@@ -1071,6 +1125,10 @@ final class PhotoBackupCoordinator: ObservableObject {
                 $0.accountID == account.accountID &&
                     $0.localIdentifier == mapping.localIdentifier
             }) {
+                if let expectedRemoteAssetID = jobs[index].pendingVerifiedRemoteAssetID,
+                   expectedRemoteAssetID != mapping.assetID {
+                    continue
+                }
                 let jobIsAlreadyRecovered = jobs[index].status == .completed &&
                     jobs[index].sourceModificationDate == asset.modificationDate &&
                     jobs[index].assetID == mapping.assetID &&
@@ -1087,6 +1145,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                 jobs[index].uploadedBytes = max(0, mapping.sourceBytes)
                 jobs[index].resourceCount = max(0, mapping.resourceCount)
                 jobs[index].assetID = mapping.assetID
+                jobs[index].pendingVerifiedRemoteAssetID = nil
                 jobs[index].sourceState = .committed
                 jobs[index].derivativeState = derivativeState
                 jobs[index].message = "已从 MyNAS 验证记录恢复"
@@ -1160,6 +1219,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                 jobs[index].totalBytes = 0
                 jobs[index].resourceCount = 0
                 jobs[index].assetID = nil
+                jobs[index].pendingVerifiedRemoteAssetID = nil
                 jobs[index].sourceState = nil
                 jobs[index].derivativeState = nil
                 jobs[index].origin = origin
@@ -1213,6 +1273,7 @@ final class PhotoBackupCoordinator: ObservableObject {
     /// thumbnail coincidence.
     private func enqueueVerifiedLocalAssociation(
         _ asset: LocalPhotoAsset,
+        expectedRemoteAssetID: String,
         accountID: String
     ) {
         if let index = jobs.firstIndex(where: {
@@ -1225,6 +1286,7 @@ final class PhotoBackupCoordinator: ObservableObject {
             jobs[index].totalBytes = 0
             jobs[index].resourceCount = 0
             jobs[index].assetID = nil
+            jobs[index].pendingVerifiedRemoteAssetID = expectedRemoteAssetID
             jobs[index].sourceState = nil
             jobs[index].derivativeState = nil
             jobs[index].origin = .manual
@@ -1246,6 +1308,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                     uploadedBytes: 0,
                     resourceCount: 0,
                     assetID: nil,
+                    pendingVerifiedRemoteAssetID: expectedRemoteAssetID,
                     sourceState: nil,
                     derivativeState: nil,
                     origin: .manual,
@@ -1257,6 +1320,60 @@ final class PhotoBackupCoordinator: ObservableObject {
         }
         headline = "正在登记已核验的本机原件"
         persist()
+    }
+
+    private func mergePendingVerifiedAssociationRun(
+        assets: [LocalPhotoAsset],
+        account: AccountContext,
+        client: PhotoLibraryClient
+    ) {
+        let existingAssets = pendingVerifiedAssociationRuns[account.accountID]?.assets ?? []
+        let merged = Dictionary(
+            (existingAssets + assets).map { ($0.localIdentifier, $0) },
+            uniquingKeysWith: { _, newest in newest }
+        )
+        pendingVerifiedAssociationRuns[account.accountID] = VerifiedAssociationRunRequest(
+            assets: Array(merged.values),
+            account: account,
+            client: client
+        )
+    }
+
+    @discardableResult
+    private func startPendingVerifiedAssociationRunIfPossible(
+        preferredAccountID: String? = nil
+    ) -> Bool {
+        guard !isRunning else { return false }
+        let accountIDs = pendingVerifiedAssociationRuns.keys.sorted { left, right in
+            if left == preferredAccountID { return true }
+            if right == preferredAccountID { return false }
+            return left < right
+        }
+        for accountID in accountIDs {
+            guard mappingRecoveryTasks[accountID] == nil,
+                  let request = pendingVerifiedAssociationRuns.removeValue(forKey: accountID) else {
+                continue
+            }
+            let runnableAssets = request.assets.filter { asset in
+                jobs.contains { job in
+                    job.accountID == accountID
+                        && job.localIdentifier == asset.localIdentifier
+                        && job.status == .waiting
+                        && job.origin != .automatic
+                        && job.pendingVerifiedRemoteAssetID?.isEmpty == false
+                        && job.matchesCurrentLocalAsset(asset)
+                }
+            }
+            guard !runnableAssets.isEmpty else { continue }
+            run(
+                account: request.account,
+                assets: runnableAssets,
+                client: request.client,
+                intent: .manual
+            )
+            return true
+        }
+        return false
     }
 
     private func run(
@@ -1282,6 +1399,9 @@ final class PhotoBackupCoordinator: ObservableObject {
                 self.activeRunAccountID = nil
                 self.activeRunIntent = nil
                 self.refreshHeadline(accountID: account.accountID)
+                self.startPendingVerifiedAssociationRunIfPossible(
+                    preferredAccountID: account.accountID
+                )
                 self.reevaluateAutomaticBackupRequests()
             }
 
@@ -1361,10 +1481,18 @@ final class PhotoBackupCoordinator: ObservableObject {
                 account: account,
                 jobID: jobID
             )
+            if let expectedRemoteAssetID = jobs.first(where: { $0.id == jobID })?.pendingVerifiedRemoteAssetID,
+               outcome.assetID != expectedRemoteAssetID {
+                throw PhotoBackupVerifiedAssociationError.unexpectedRemoteAsset(
+                    expected: expectedRemoteAssetID,
+                    received: outcome.assetID
+                )
+            }
             update(jobID) {
                 $0.status = .completed
                 $0.uploadedBytes = $0.totalBytes
                 $0.assetID = outcome.assetID
+                $0.pendingVerifiedRemoteAssetID = nil
                 $0.sourceState = outcome.sourceState
                 $0.derivativeState = outcome.derivativeState
                 $0.failure = nil
@@ -1440,8 +1568,27 @@ final class PhotoBackupCoordinator: ObservableObject {
                 continue
             }
             jobs[jobIndex].status = .completed
+            if let expectedRemoteAssetID = jobs[jobIndex].pendingVerifiedRemoteAssetID,
+               outcome.assetID != expectedRemoteAssetID {
+                let failure = PhotoBackupFailure(
+                    kind: .integrity,
+                    detail: PhotoBackupVerifiedAssociationError.unexpectedRemoteAsset(
+                        expected: expectedRemoteAssetID,
+                        received: outcome.assetID
+                    ).localizedDescription,
+                    occurredAt: Date()
+                )
+                jobs[jobIndex].status = .failed
+                jobs[jobIndex].failure = failure
+                jobs[jobIndex].message = failure.kind.title
+                jobs[jobIndex].updatedAt = Date()
+                changed = true
+                recordsToDiscard.append(record)
+                continue
+            }
             jobs[jobIndex].uploadedBytes = jobs[jobIndex].totalBytes
             jobs[jobIndex].assetID = outcome.assetID
+            jobs[jobIndex].pendingVerifiedRemoteAssetID = nil
             jobs[jobIndex].sourceState = outcome.sourceState
             jobs[jobIndex].derivativeState = outcome.derivativeState
             jobs[jobIndex].failure = nil
@@ -1620,6 +1767,8 @@ final class PhotoBackupCoordinator: ObservableObject {
 
         if error is URLError {
             kind = .network
+        } else if error is PhotoBackupVerifiedAssociationError {
+            kind = .integrity
         } else if let preparationError = error as? PhotoBackupPreparationError {
             switch preparationError {
             case .assetUnavailable, .noResources:

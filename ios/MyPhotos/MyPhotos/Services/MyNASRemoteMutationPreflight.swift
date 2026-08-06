@@ -43,16 +43,11 @@ struct MyNASRemoteMutationPreflight {
             self.connectionService = connectionService
             return
         }
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 4
-        configuration.timeoutIntervalForResource = 6
-        configuration.httpCookieStorage = nil
-        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        configuration.connectionProxyDictionary = [:]
-        self.connectionService = MyNASConnectionService(
-            session: URLSession(configuration: configuration)
-        )
+        // Use the same direct, private Tailscale session budget as connection
+        // and gallery requests. The former 4/6-second probe could fail while a
+        // healthy tailnet was still establishing a path, wrongly disabling a
+        // destructive control before any request reached MyNAS.
+        self.connectionService = MyNASConnectionService()
     }
 
     func availability(for account: AccountContext) async -> MyNASRemoteMutationAvailability {

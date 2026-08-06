@@ -2,6 +2,19 @@
 
 本项目遵循语义化版本规则，所有可识别的发布版本都记录在这里。
 
+## [0.9.3] - 2026-08-06
+
+### 修复
+
+- 修复 MyNAS 远端详情预览在服务端衍生 JPEG 的方向或尺寸与原始媒体元数据不一致时，按原始宽高预留出大片空白的问题。界面现在先采用服务端返回的 preview/grid 尺寸，并在解码完成后以实际位图尺寸重新布局。
+- 修复 Tailscale 已恢复、但删除前 health 探测仍处在建连窗口时被 4/6 秒短超时误判为“未连接”的问题。探测现在复用图库/连接请求的直连私网会话与 12/30 秒预算；不可达、检查中或最终动作时的失败关闭与服务端 owner/version/resource-group 校验保持不变。
+- 修复部署脚本只更新根目录 `VERSION`、但后端健康检查仍编译入旧字符串的问题。发布二进制现在在构建时从唯一的 `VERSION` SemVer 源注入 health/capabilities；不规范版本会在部署前失败。
+
+### 验证
+
+- Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 62/62 通过，新增 3 项回归覆盖衍生图优先、解码后尺寸校正及异常尺寸的有界回退。
+- `v0.9.3` 是维护候选，尚未部署到树莓派、安装到 iPhone 16 Pro 或发布 GitHub Release；必须完成同一提交的完整串行门槛后才可发布。
+
 ## [0.9.2] - 2026-08-06
 
 ### 新增
@@ -19,7 +32,7 @@
 ### 验证
 
 - Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 59 项通过，其中新增回归覆盖 I1/I3 交集去重、顺序与媒体类型；既有 7 项 I3 回归继续覆盖双重 opt-in、最小持久化字段、增量/不可本机读取项失效、账号隔离、父许可撤回、损坏/重复索引失败关闭与详情返回后的搜索状态保持。
-- 取代此前“人物页 OCR 搜索”候选的提交 `f8352d2` 已部署为树莓派 release `20260806T075201Z`；独立反读为 systemd active、health/capabilities `0.9.2`、`photoDelete=true`、`backgroundTransfers=true`，其签名 Debug App 已安装并启动 iPhone 16 Pro。尚待用户真机验收，随后才可创建同一提交的 GitHub annotated tag/Release；I3 仍不得标记为完成或进入 I4。
+- 取代此前“人物页 OCR 搜索”候选的提交 `f8352d2` 已部署为树莓派 release `20260806T075201Z`；独立反读为 systemd active、health/capabilities `0.9.2`、`photoDelete=true`、`backgroundTransfers=true`，其签名 Debug App 已在 iPhone 16 Pro 验收。该同一提交的 annotated `v0.9.2` tag 与 GitHub Release 已发布，I3 完成。
 
 ## [0.9.1] - 2026-08-06
 

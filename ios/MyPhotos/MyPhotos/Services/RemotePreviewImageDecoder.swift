@@ -3,6 +3,25 @@ import Foundation
 import ImageIO
 import UIKit
 
+/// Keeps a remote preview card aligned with the actual derivative that will be
+/// drawn. PhotoKit's source dimensions and the server's disposable JPEG can
+/// legitimately differ after rotation or a fallback derivative is selected.
+/// The view therefore starts with the advertised derivative dimensions and
+/// replaces them with the decoded bitmap dimensions as soon as it is ready.
+nonisolated enum RemotePreviewLayout {
+    static func aspectRatio(
+        preferredWidth: Int,
+        preferredHeight: Int,
+        fallbackWidth: Int,
+        fallbackHeight: Int
+    ) -> CGFloat {
+        let width = preferredWidth > 0 ? preferredWidth : fallbackWidth
+        let height = preferredHeight > 0 ? preferredHeight : fallbackHeight
+        guard width > 0, height > 0 else { return 1 }
+        return min(max(CGFloat(width) / CGFloat(height), 0.45), 2.4)
+    }
+}
+
 /// Decodes MyNAS JPEG derivatives away from SwiftUI's main executor.
 ///
 /// A remote derivative can be a 24-bit JPEG. Passing it straight to

@@ -42,6 +42,52 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
         )
     }
 
+    func testUniqueCompleteResourceGroupMatchSelectsOnlyExactRemote() {
+        let exactHash = String(repeating: "a", count: 64)
+        let otherHash = String(repeating: "b", count: 64)
+        let local = [
+            preparedResource(role: "photo", byteSize: 1_024, sha256: exactHash)
+        ]
+        let exact = remoteAsset(
+            id: "remote-exact",
+            resources: [serverResource(role: "photo", byteSize: 1_024, sha256: exactHash)]
+        )
+        let other = remoteAsset(
+            id: "remote-other",
+            resources: [serverResource(role: "photo", byteSize: 1_024, sha256: otherHash)]
+        )
+
+        XCTAssertEqual(
+            RemotePhotoLocalCopyVerification.uniqueCompleteResourceGroupMatch(
+                localResources: local,
+                among: [other, exact]
+            )?.id,
+            exact.id
+        )
+    }
+
+    func testUniqueCompleteResourceGroupMatchRejectsTwoRemoteIDsWithSameProof() {
+        let exactHash = String(repeating: "a", count: 64)
+        let local = [
+            preparedResource(role: "photo", byteSize: 1_024, sha256: exactHash)
+        ]
+        let first = remoteAsset(
+            id: "remote-first",
+            resources: [serverResource(role: "photo", byteSize: 1_024, sha256: exactHash)]
+        )
+        let second = remoteAsset(
+            id: "remote-second",
+            resources: [serverResource(role: "photo", byteSize: 1_024, sha256: exactHash)]
+        )
+
+        XCTAssertNil(
+            RemotePhotoLocalCopyVerification.uniqueCompleteResourceGroupMatch(
+                localResources: local,
+                among: [first, second]
+            )
+        )
+    }
+
     func testUnifiedTimelineMergesSeveralCurrentLocalCopiesOfOneRemoteAsset() {
         let modificationDate = Date(timeIntervalSinceReferenceDate: 123_456)
         let remote = ServerPhotoAsset(
@@ -186,6 +232,77 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
         XCTAssertEqual(items.first?.availability, .browseReady)
     }
 
+    func testUnifiedTimelineMergesPersistedExactAssociationBeforeServerMappingCompletes() {
+        let modificationDate = Date(timeIntervalSinceReferenceDate: 234_567)
+        let local = LocalPhotoAsset(
+            localIdentifier: "local-import-placeholder",
+            creationDate: modificationDate,
+            modificationDate: modificationDate,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 1_200,
+            pixelHeight: 800,
+            duration: 0,
+            isFavorite: false
+        )
+        let remote = ServerPhotoAsset(
+            id: "remote-downloaded",
+            volumeID: "volume-1",
+            mediaType: .photo,
+            captureDate: nil,
+            modificationDate: nil,
+            pixelWidth: 1_200,
+            pixelHeight: 800,
+            duration: 0,
+            favorite: false,
+            sourceState: PhotoSourceState.committed.rawValue,
+            derivativeState: PhotoDerivativeState.ready.rawValue,
+            derivativeRecipeVersion: "v1",
+            derivativeError: nil,
+            browseReady: true,
+            version: "1",
+            exactContentDeviceCount: 1,
+            exactContentMappingCount: 1,
+            previousVersionCount: 0,
+            nextVersionCount: 0,
+            resources: [],
+            derivatives: []
+        )
+        let pendingAssociation = PhotoBackupJob(
+            id: UUID(),
+            accountID: "account-1",
+            localIdentifier: local.localIdentifier,
+            mediaKind: local.mediaKind,
+            creationDate: local.creationDate,
+            sourceModificationDate: local.modificationDate,
+            status: .waiting,
+            totalBytes: 0,
+            uploadedBytes: 0,
+            resourceCount: 0,
+            assetID: nil,
+            pendingVerifiedRemoteAssetID: remote.id,
+            sourceState: nil,
+            derivativeState: nil,
+            origin: .manual,
+            message: "已核验同一原件，等待登记当前 iPhone",
+            failure: nil,
+            updatedAt: modificationDate
+        )
+
+        let items = UnifiedPhotoTimelineItem.merge(
+            localAssets: [local],
+            jobs: [pendingAssociation],
+            accountID: "account-1",
+            remoteAssets: [remote]
+        )
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.localAsset?.localIdentifier, local.localIdentifier)
+        XCTAssertEqual(items.first?.remoteAsset?.id, remote.id)
+        XCTAssertEqual(items.first?.availability, .waitingForBackup)
+        XCTAssertFalse(items.first?.availability.hasVerifiedOriginals == true)
+    }
+
     func testUnifiedTimelineDoesNotTrustUnclassifiedModifiedAsset() {
         let sourceDate = Date(timeIntervalSinceReferenceDate: 123_456)
         let editedDate = sourceDate.addingTimeInterval(60)
@@ -276,6 +393,35 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
             byteSize: byteSize,
             sha256: sha256,
             downloadURL: "https://example.invalid/original"
+        )
+    }
+
+    private func remoteAsset(
+        id: String,
+        resources: [ServerPhotoResource]
+    ) -> ServerPhotoAsset {
+        ServerPhotoAsset(
+            id: id,
+            volumeID: "volume-1",
+            mediaType: .photo,
+            captureDate: nil,
+            modificationDate: nil,
+            pixelWidth: 1_200,
+            pixelHeight: 800,
+            duration: 0,
+            favorite: false,
+            sourceState: PhotoSourceState.committed.rawValue,
+            derivativeState: PhotoDerivativeState.ready.rawValue,
+            derivativeRecipeVersion: "v1",
+            derivativeError: nil,
+            browseReady: true,
+            version: "1",
+            exactContentDeviceCount: 1,
+            exactContentMappingCount: 1,
+            previousVersionCount: 0,
+            nextVersionCount: 0,
+            resources: resources,
+            derivatives: []
         )
     }
 }

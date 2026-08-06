@@ -51,6 +51,8 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
 
     private let imageView = UIImageView()
     private let previewContainer = UIView()
+    private var previewAspectConstraint: NSLayoutConstraint?
+    private var previewAspectRatio: CGFloat = 1
     private let previewButton = UIButton(type: .system)
     private let playbackButton = UIButton(type: .system)
     private let downloadButton = UIButton(type: .system)
@@ -270,14 +272,15 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         playbackButton.isHidden = true
         previewContainer.addSubview(playbackButton)
 
-        let width = max(asset.pixelWidth, 1)
-        let height = max(asset.pixelHeight, 1)
-        let aspectRatio = min(max(CGFloat(width) / CGFloat(height), 0.45), 2.4)
-        let aspectConstraint = previewContainer.widthAnchor.constraint(
-            equalTo: previewContainer.heightAnchor,
-            multiplier: aspectRatio
+        let derivative = asset.derivative("preview") ?? asset.derivative("grid")
+        previewAspectRatio = RemotePreviewLayout.aspectRatio(
+            preferredWidth: derivative?.pixelWidth ?? 0,
+            preferredHeight: derivative?.pixelHeight ?? 0,
+            fallbackWidth: asset.pixelWidth,
+            fallbackHeight: asset.pixelHeight
         )
-        aspectConstraint.priority = .defaultHigh
+        let aspectConstraint = makePreviewAspectConstraint(ratio: previewAspectRatio)
+        previewAspectConstraint = aspectConstraint
 
         NSLayoutConstraint.activate([
             aspectConstraint,
@@ -790,6 +793,7 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
                     imageView.preferredSymbolConfiguration = nil
                     imageView.contentMode = .scaleAspectFit
                     imageView.image = image
+                    updatePreviewAspectRatio(for: image)
                 } else {
                     showPreviewPlaceholder(systemName: "exclamationmark.icloud")
                 }
@@ -814,6 +818,36 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
             weight: .regular
         )
         imageView.image = UIImage(systemName: systemName)
+    }
+
+    private func makePreviewAspectConstraint(ratio: CGFloat) -> NSLayoutConstraint {
+        let constraint = previewContainer.widthAnchor.constraint(
+            equalTo: previewContainer.heightAnchor,
+            multiplier: ratio
+        )
+        constraint.priority = .defaultHigh
+        return constraint
+    }
+
+    /// The thumbnail decoder may apply orientation transforms that were not
+    /// present in the source metadata. Replacing the high-priority ratio keeps
+    /// the full preview visible instead of creating a tall white letterbox.
+    private func updatePreviewAspectRatio(for image: UIImage) {
+        let width = Int((image.size.width * image.scale).rounded())
+        let height = Int((image.size.height * image.scale).rounded())
+        let ratio = RemotePreviewLayout.aspectRatio(
+            preferredWidth: width,
+            preferredHeight: height,
+            fallbackWidth: asset.pixelWidth,
+            fallbackHeight: asset.pixelHeight
+        )
+        guard abs(previewAspectRatio - ratio) > 0.001 else { return }
+        previewAspectConstraint?.isActive = false
+        let constraint = makePreviewAspectConstraint(ratio: ratio)
+        previewAspectConstraint = constraint
+        previewAspectRatio = ratio
+        constraint.isActive = true
+        view.setNeedsLayout()
     }
 
     private var previewKind: String? {
@@ -1269,13 +1303,17 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
               let onVerifiedLocalCopies else {
             return nil
         }
-        for attempt in 0..<3 {
+        // PhotoKit can publish the creation placeholder before a subsequent
+        // PHAsset fetch sees it, especially while photolibraryd is reconciling
+        // an iCloud library. Keep the exact placeholder identity alive long
+        // enough to persist the association instead of silently dropping it.
+        for attempt in 0..<60 {
             if let importedLocalAsset = localClient.accessibleAsset(
                 localIdentifier: localIdentifier
             ) {
                 return onVerifiedLocalCopies(asset, [importedLocalAsset])
             }
-            guard attempt < 2 else { break }
+            guard attempt < 59 else { break }
             try? await Task.sleep(for: .milliseconds(250))
         }
         return nil

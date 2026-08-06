@@ -15,10 +15,15 @@ import (
 
 const (
 	photosAPIVersion       = "v1"
-	photosServerVersion    = "0.9.2"
 	photosMinimumApp       = "1.0"
 	photosServerSettingKey = "photos.server_id"
 )
+
+// The release deployer injects this from the repository VERSION file with
+// `-ldflags -X`. Keeping a non-empty development fallback lets local builds
+// remain diagnosable, while release health and capabilities have one version
+// source instead of a manually edited duplicate.
+var photosServerVersion = "0.0.0-dev"
 
 type photosCapabilitiesResponse struct {
 	ServerID             string                `json:"serverID"`
