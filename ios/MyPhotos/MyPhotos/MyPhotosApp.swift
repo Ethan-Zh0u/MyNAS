@@ -70,9 +70,19 @@ final class MyPhotosBackgroundTransferAppDelegate: NSObject, UIApplicationDelega
 
 private struct MyPhotosProductionRoot: View {
     @StateObject private var accountStore = AccountStore()
+    private let remotePhotoCacheManager = RemotePhotoCacheManager()
 
     var body: some View {
         ContentView()
             .environmentObject(accountStore)
+            .task {
+                // Import/share work cannot outlive a cold process launch.
+                // Recover only abandoned account-scoped temporary originals;
+                // all reusable cache classes remain available.
+                for account in accountStore.accounts where !account.isLocalOnly {
+                    _ = try? await remotePhotoCacheManager
+                        .discardOrphanedTemporaryDownloads(account: account)
+                }
+            }
     }
 }

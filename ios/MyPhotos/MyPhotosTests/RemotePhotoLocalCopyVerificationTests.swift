@@ -115,6 +115,146 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
         XCTAssertEqual(items.first?.availability, .browseReady)
     }
 
+    func testUnifiedTimelineKeepsCommittedRemoteLinkAcrossMetadataOnlyRevision() {
+        let sourceDate = Date(timeIntervalSinceReferenceDate: 123_456)
+        let metadataDate = sourceDate.addingTimeInterval(60)
+        let local = LocalPhotoAsset(
+            localIdentifier: "local-favourite",
+            creationDate: sourceDate,
+            modificationDate: metadataDate,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 4_032,
+            pixelHeight: 3_024,
+            duration: 0,
+            isFavorite: true
+        )
+        let remote = ServerPhotoAsset(
+            id: "remote-favourite",
+            volumeID: "volume-1",
+            mediaType: .photo,
+            captureDate: nil,
+            modificationDate: PhotoBackupSourceVersion.string(from: sourceDate),
+            pixelWidth: 4_032,
+            pixelHeight: 3_024,
+            duration: 0,
+            favorite: false,
+            sourceState: PhotoSourceState.committed.rawValue,
+            derivativeState: PhotoDerivativeState.ready.rawValue,
+            derivativeRecipeVersion: "v1",
+            derivativeError: nil,
+            browseReady: true,
+            version: "1",
+            exactContentDeviceCount: 1,
+            exactContentMappingCount: 1,
+            previousVersionCount: 0,
+            nextVersionCount: 0,
+            resources: [],
+            derivatives: []
+        )
+        let job = PhotoBackupJob(
+            id: UUID(),
+            accountID: "account-1",
+            localIdentifier: local.localIdentifier,
+            mediaKind: local.mediaKind,
+            creationDate: local.creationDate,
+            sourceModificationDate: sourceDate,
+            lastKnownLocalModificationDate: metadataDate,
+            status: .completed,
+            totalBytes: 1,
+            uploadedBytes: 1,
+            resourceCount: 1,
+            assetID: remote.id,
+            sourceState: .committed,
+            derivativeState: .ready,
+            origin: .manual,
+            message: nil,
+            failure: nil,
+            updatedAt: metadataDate
+        )
+
+        let items = UnifiedPhotoTimelineItem.merge(
+            localAssets: [local],
+            jobs: [job],
+            accountID: "account-1",
+            remoteAssets: [remote]
+        )
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.localAsset?.localIdentifier, local.localIdentifier)
+        XCTAssertEqual(items.first?.remoteAsset?.id, remote.id)
+        XCTAssertEqual(items.first?.availability, .browseReady)
+    }
+
+    func testUnifiedTimelineDoesNotTrustUnclassifiedModifiedAsset() {
+        let sourceDate = Date(timeIntervalSinceReferenceDate: 123_456)
+        let editedDate = sourceDate.addingTimeInterval(60)
+        let local = LocalPhotoAsset(
+            localIdentifier: "local-edited",
+            creationDate: sourceDate,
+            modificationDate: editedDate,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 4_032,
+            pixelHeight: 3_024,
+            duration: 0,
+            isFavorite: false
+        )
+        let remote = ServerPhotoAsset(
+            id: "remote-original",
+            volumeID: "volume-1",
+            mediaType: .photo,
+            captureDate: nil,
+            modificationDate: PhotoBackupSourceVersion.string(from: sourceDate),
+            pixelWidth: 4_032,
+            pixelHeight: 3_024,
+            duration: 0,
+            favorite: false,
+            sourceState: PhotoSourceState.committed.rawValue,
+            derivativeState: PhotoDerivativeState.ready.rawValue,
+            derivativeRecipeVersion: "v1",
+            derivativeError: nil,
+            browseReady: true,
+            version: "1",
+            exactContentDeviceCount: 1,
+            exactContentMappingCount: 1,
+            previousVersionCount: 0,
+            nextVersionCount: 0,
+            resources: [],
+            derivatives: []
+        )
+        let job = PhotoBackupJob(
+            id: UUID(),
+            accountID: "account-1",
+            localIdentifier: local.localIdentifier,
+            mediaKind: local.mediaKind,
+            creationDate: local.creationDate,
+            sourceModificationDate: sourceDate,
+            status: .completed,
+            totalBytes: 1,
+            uploadedBytes: 1,
+            resourceCount: 1,
+            assetID: remote.id,
+            sourceState: .committed,
+            derivativeState: .ready,
+            origin: .manual,
+            message: nil,
+            failure: nil,
+            updatedAt: sourceDate
+        )
+
+        let items = UnifiedPhotoTimelineItem.merge(
+            localAssets: [local],
+            jobs: [job],
+            accountID: "account-1",
+            remoteAssets: [remote]
+        )
+
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items.filter { $0.localAsset != nil }.count, 1)
+        XCTAssertEqual(items.filter { $0.remoteAsset != nil }.count, 1)
+    }
+
     private func preparedResource(role: String, byteSize: Int64, sha256: String) -> PreparedPhotoResource {
         PreparedPhotoResource(
             clientResourceID: UUID().uuidString,

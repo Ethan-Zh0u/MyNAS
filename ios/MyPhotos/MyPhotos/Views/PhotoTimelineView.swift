@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PhotoTimelineView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var accountStore: AccountStore
     @ObservedObject var viewModel: LocalPhotoLibraryViewModel
     @ObservedObject var backupCoordinator: PhotoBackupCoordinator
@@ -12,6 +13,8 @@ struct PhotoTimelineView: View {
     @State private var deletionRequest: PhotoDeletionRequest?
     @State private var deletionErrorMessage: String?
     @State private var isDeleting = false
+    @State private var remoteMutationAvailability: MyNASRemoteMutationAvailability = .checking
+    private let remoteMutationPreflight = MyNASRemoteMutationPreflight()
     /// The local picker is intentionally paged for the plain “本机” grid.
     /// “全部” needs a metadata-only complete snapshot, otherwise an older
     /// physical duplicate cannot be joined to its verified MyNAS mapping.
@@ -127,6 +130,7 @@ struct PhotoTimelineView: View {
             PhotoDeletionConfirmationSheet(
                 request: request,
                 isDeleting: isDeleting,
+                remoteMutationAvailability: remoteMutationAvailability,
                 confirm: { alsoDeleteMyNASBackups in
                     Task {
                         await delete(
@@ -172,6 +176,26 @@ struct PhotoTimelineView: View {
         }
         .onChange(of: backupCoordinator.jobs) { _, jobs in
             synchronizeUnifiedTimeline(jobs: jobs)
+            guard usesUnifiedTimeline else { return }
+            backupCoordinator.reconcileVerifiedRemoteCopies(
+                remoteAssets: unifiedTimeline.currentRemoteAssets,
+                localAssets: timelineLocalAssets,
+                account: accountStore.current,
+                client: viewModel.imageClient
+            )
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active,
+                  deletionRequest != nil,
+                  !accountStore.current.isLocalOnly else {
+                return
+            }
+            let account = accountStore.current
+            Task {
+                remoteMutationAvailability = await remoteMutationPreflight.availability(
+                    for: account
+                )
+            }
         }
         .onChange(of: showsUnifiedTimeline) { _, shouldShowUnified in
             guard shouldShowUnified, !accountStore.current.isLocalOnly else { return }
@@ -357,6 +381,17 @@ struct PhotoTimelineView: View {
             isConnectedToMyNAS: !accountStore.current.isLocalOnly,
             isMyNASDeletionAvailable: accountStore.current.serverCapabilities.supportsPhotoDeletion == true
         )
+        remoteMutationAvailability = accountStore.current.isLocalOnly
+            ? .tailscaleUnavailable
+            : .checking
+        if !accountStore.current.isLocalOnly {
+            let account = accountStore.current
+            Task {
+                remoteMutationAvailability = await remoteMutationPreflight.availability(
+                    for: account
+                )
+            }
+        }
     }
 
     private func delete(
@@ -365,6 +400,18 @@ struct PhotoTimelineView: View {
     ) async {
         isDeleting = true
         defer { isDeleting = false }
+        if alsoDeleteMyNASBackups {
+            let availability = await remoteMutationPreflight.availability(
+                for: accountStore.current
+            )
+            remoteMutationAvailability = availability
+            guard availability.allowsRemoteMutation else {
+                deletionRequest = nil
+                deletionErrorMessage = MyNASRemoteMutationPreflightError
+                    .tailscaleUnavailable.localizedDescription
+                return
+            }
+        }
         let localIdentifiers = request.assets.map(\.localIdentifier)
         do {
             try await viewModel.imageClient.deleteAssets(localIdentifiers: localIdentifiers)
@@ -379,7 +426,7 @@ struct PhotoTimelineView: View {
                 synchronizeUnifiedTimeline()
             }
             guard alsoDeleteMyNASBackups else { return }
-            guard request.canAlsoDeleteMyNASBackups else {
+            guard request.canAlsoDeleteMyNASBackups(when: remoteMutationAvailability) else {
                 deletionErrorMessage = PhotoDeletionFlowError.backupVerificationUnavailable.errorDescription
                 return
             }
@@ -731,12 +778,32 @@ private extension View {
 }
 
 struct PhotoThumbnailView: View {
-    let asset: LocalPhotoAsset
+    let localIdentifier: String
+    let mediaKind: LocalMediaKind
     let targetSize: CGSize
     let client: PhotoLibraryClient
     @State private var image: UIImage?
     @State private var isCloudOnly = false
     @State private var didFail = false
+
+    init(asset: LocalPhotoAsset, targetSize: CGSize, client: PhotoLibraryClient) {
+        localIdentifier = asset.localIdentifier
+        mediaKind = asset.mediaKind
+        self.targetSize = targetSize
+        self.client = client
+    }
+
+    init(
+        localIdentifier: String,
+        mediaKind: LocalMediaKind,
+        targetSize: CGSize,
+        client: PhotoLibraryClient
+    ) {
+        self.localIdentifier = localIdentifier
+        self.mediaKind = mediaKind
+        self.targetSize = targetSize
+        self.client = client
+    }
 
     var body: some View {
         ZStack {
@@ -765,8 +832,11 @@ struct PhotoThumbnailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
-        .task(id: "\(asset.id)-\(Int(targetSize.width))") {
-            let result = await client.thumbnail(for: asset.localIdentifier, targetSize: targetSize)
+        .task(id: "\(localIdentifier)-\(Int(targetSize.width))") {
+            image = nil
+            isCloudOnly = false
+            didFail = false
+            let result = await client.thumbnail(for: localIdentifier, targetSize: targetSize)
             guard !Task.isCancelled else { return }
             image = result.image
             isCloudOnly = result.isCloudOnly
@@ -778,11 +848,11 @@ struct PhotoThumbnailView: View {
     private var placeholderSymbol: String {
         if isCloudOnly { return "icloud" }
         if didFail { return "arrow.clockwise" }
-        return asset.mediaKind.systemImage
+        return mediaKind.systemImage
     }
 
     private var accessibilityDescription: String {
-        if isCloudOnly { return "\(asset.mediaKind.displayName)，仅在 iCloud 中，未自动下载" }
-        return asset.mediaKind.displayName
+        if isCloudOnly { return "\(mediaKind.displayName)，仅在 iCloud 中，未自动下载" }
+        return mediaKind.displayName
     }
 }

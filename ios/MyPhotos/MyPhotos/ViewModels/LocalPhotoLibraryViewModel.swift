@@ -83,6 +83,13 @@ final class LocalPhotoLibraryViewModel: ObservableObject {
         client.presentLimitedLibraryPicker()
     }
 
+    /// The backup coordinator consumes this immediately after the value-only
+    /// asset snapshot refreshes. It contains only PhotoKit-proven
+    /// metadata-only changes; all other library changes remain unclassified.
+    func consumeMetadataOnlyChangedAssetIdentifiers() -> Set<String> {
+        client.consumeMetadataOnlyChangedAssetIdentifiers()
+    }
+
     func prefetch(assets: [LocalPhotoAsset], targetSize: CGSize) {
         client.startCachingThumbnails(for: assets.prefix(80).map(\.localIdentifier), targetSize: targetSize)
     }

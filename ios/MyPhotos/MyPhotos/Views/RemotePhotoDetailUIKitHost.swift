@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -49,19 +50,46 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     private let onDismiss: () -> Void
 
     private let imageView = UIImageView()
+    private let previewContainer = UIView()
     private let previewButton = UIButton(type: .system)
+    private let playbackButton = UIButton(type: .system)
     private let downloadButton = UIButton(type: .system)
+    private let exportButton = UIButton(type: .system)
     private let downloadProgressContainer = UIView()
     private let downloadProgressView = UIProgressView(progressViewStyle: .default)
     private let downloadProgressLabel = UILabel()
     private let associateButton = UIButton(type: .system)
     private let deleteButton = UIButton(type: .system)
+    private let deletionAvailabilityIcon = UIImageView()
+    private let deletionAvailabilityLabel = UILabel()
+    private let deletionAvailabilityNotice = UIView()
+    private let remoteMutationPreflight = MyNASRemoteMutationPreflight()
+    private var connectionRefreshTask: Task<Void, Never>?
+    private weak var activeDeletionAlert: UIAlertController?
+    private var activeDeletionAlertConnectedMessage: String?
+    private var remoteMutationAvailability: MyNASRemoteMutationAvailability = .checking {
+        didSet {
+            guard isViewLoaded else { return }
+            updateDeletionAvailabilityNotice()
+            updatePresentedDeletionAlertAvailability()
+            updateActionAvailability()
+        }
+    }
     private var completionToast: UIView?
+    /// The share activity receives files, not network URLs. Retain their
+    /// verified temporary group until iOS reports that the activity finished.
+    private var activeExportDownload: RemotePhotoOriginalDownload?
     private var isPerformingAction = false {
         didSet { updateActionAvailability() }
     }
     private var isLoadingPreview = false
     private var hasRequestedPreview = false
+    private var isPreparingPlayback = false
+    private var player: AVPlayer?
+    private var playerViewController: AVPlayerViewController?
+    private var mediaResourceLoader: MyNASMediaResourceLoader?
+    private var automaticVerificationCompleted = false
+    private var automaticallyVerifiedLocalCopy = false
 
     init(
         asset: ServerPhotoAsset,
@@ -91,6 +119,12 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         fatalError("init(coder:) has not been implemented")
     }
 
+    deinit {
+        connectionRefreshTask?.cancel()
+        NotificationCenter.default.removeObserver(self)
+        activeExportDownload?.removeTemporaryFiles()
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "远端详情"
@@ -103,12 +137,43 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
             action: #selector(close)
         )
         configureLayout()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        updateDeletionAvailabilityNotice()
+        updateActionAvailability()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        guard !hasRequestedPreview else { return }
-        loadPreview()
+        refreshRemoteMutationAvailability()
+        // UIActivityViewController normally invokes its completion handler.
+        // If iOS dismisses it through an interruption without doing so, the
+        // detail becoming visible again is proof that no activity still owns
+        // these temporary originals.
+        if let activeExportDownload,
+           presentedViewController == nil {
+            activeExportDownload.removeTemporaryFiles()
+            self.activeExportDownload = nil
+            updateActionAvailability()
+        }
+        if !hasRequestedPreview {
+            loadPreview()
+        }
+        if asset.mediaType == .video || asset.mediaType == .livePhoto {
+            startRemotePlayback()
+        }
+        if canAssociateLocalCopy && !hasConfirmedLocalCopy {
+            verifyAndAssociateLocalCopy(presentsResult: false)
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        stopRemotePlayback()
+        super.viewWillDisappear(animated)
     }
 
     private func configureLayout() {
@@ -158,20 +223,23 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     }
 
     private func makePreviewCard() -> UIView {
-        let container = UIView()
-        container.backgroundColor = .black
-        container.layer.cornerCurve = .continuous
-        container.layer.cornerRadius = 24
-        container.clipsToBounds = true
+        previewContainer.backgroundColor = .secondarySystemGroupedBackground
+        previewContainer.layer.cornerCurve = .continuous
+        previewContainer.layer.cornerRadius = 18
+        previewContainer.clipsToBounds = true
 
-        imageView.contentMode = .scaleAspectFit
-        imageView.tintColor = .systemGray3
+        imageView.contentMode = .center
+        imageView.tintColor = .tertiaryLabel
+        imageView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+            pointSize: 28,
+            weight: .regular
+        )
         imageView.image = UIImage(systemName: asset.mediaType.systemImage)
         imageView.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(imageView)
+        previewContainer.addSubview(imageView)
 
         let badge = makePreviewBadge()
-        container.addSubview(badge)
+        previewContainer.addSubview(badge)
 
         var configuration = UIButton.Configuration.tinted()
         configuration.title = "正在加载预览…"
@@ -183,20 +251,49 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         previewButton.configuration = configuration
         previewButton.addTarget(self, action: #selector(loadPreview), for: .touchUpInside)
         previewButton.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(previewButton)
+        previewContainer.addSubview(previewButton)
+
+        var playbackConfiguration = UIButton.Configuration.filled()
+        playbackConfiguration.title = asset.mediaType == .livePhoto ? "播放实况" : "播放视频"
+        playbackConfiguration.image = UIImage(
+            systemName: asset.mediaType == .livePhoto ? "livephoto.play" : "play.fill"
+        )
+        playbackConfiguration.imagePadding = 8
+        playbackConfiguration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+            pointSize: 14,
+            weight: .semibold
+        )
+        playbackConfiguration.cornerStyle = .capsule
+        playbackButton.configuration = playbackConfiguration
+        playbackButton.addTarget(self, action: #selector(startRemotePlayback), for: .touchUpInside)
+        playbackButton.translatesAutoresizingMaskIntoConstraints = false
+        playbackButton.isHidden = true
+        previewContainer.addSubview(playbackButton)
+
+        let width = max(asset.pixelWidth, 1)
+        let height = max(asset.pixelHeight, 1)
+        let aspectRatio = min(max(CGFloat(width) / CGFloat(height), 0.45), 2.4)
+        let aspectConstraint = previewContainer.widthAnchor.constraint(
+            equalTo: previewContainer.heightAnchor,
+            multiplier: aspectRatio
+        )
+        aspectConstraint.priority = .defaultHigh
 
         NSLayoutConstraint.activate([
-            container.heightAnchor.constraint(equalToConstant: 330),
-            imageView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            imageView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            imageView.topAnchor.constraint(equalTo: container.topAnchor, constant: 14),
-            imageView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -14),
-            badge.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            badge.topAnchor.constraint(equalTo: container.topAnchor, constant: 14),
-            previewButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            previewButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18)
+            aspectConstraint,
+            previewContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            imageView.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor),
+            imageView.topAnchor.constraint(equalTo: previewContainer.topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor),
+            badge.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor, constant: 12),
+            badge.topAnchor.constraint(equalTo: previewContainer.topAnchor, constant: 12),
+            previewButton.centerXAnchor.constraint(equalTo: previewContainer.centerXAnchor),
+            previewButton.centerYAnchor.constraint(equalTo: previewContainer.centerYAnchor),
+            playbackButton.centerXAnchor.constraint(equalTo: previewContainer.centerXAnchor),
+            playbackButton.centerYAnchor.constraint(equalTo: previewContainer.centerYAnchor)
         ])
-        return container
+        return previewContainer
     }
 
     private func makePreviewBadge() -> UIView {
@@ -398,20 +495,21 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
             style: .primary,
             action: #selector(downloadOriginals)
         )
+        configureButton(
+            exportButton,
+            title: "导出已核验原件…",
+            image: "square.and.arrow.up",
+            style: .secondary,
+            action: #selector(exportOriginals)
+        )
         if hasConfirmedLocalCopy {
             stack.addArrangedSubview(makeConfirmedLocalCopyNotice())
         } else if canAssociateLocalCopy {
             stack.addArrangedSubview(makeLocalCandidateNotice())
         }
         if canAssociateLocalCopy {
-            configureButton(
-                associateButton,
-                title: "核验并关联本机原件",
-                image: "link.badge.plus",
-                style: .secondary,
-                action: #selector(verifyAndAssociateLocalCopy)
-            )
-            stack.addArrangedSubview(associateButton)
+            // Exact comparison is automatic. There is intentionally no action
+            // that asks the user to repair every historical duplicate by hand.
         }
         configureButton(
             deleteButton,
@@ -422,8 +520,79 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         )
         stack.addArrangedSubview(downloadButton)
         stack.addArrangedSubview(makeDownloadProgress())
+        stack.addArrangedSubview(exportButton)
+        stack.addArrangedSubview(makeDeletionAvailabilityNotice())
         stack.addArrangedSubview(deleteButton)
         return stack
+    }
+
+    private func makeDeletionAvailabilityNotice() -> UIView {
+        deletionAvailabilityNotice.backgroundColor = .secondarySystemFill
+        deletionAvailabilityNotice.layer.cornerCurve = .continuous
+        deletionAvailabilityNotice.layer.cornerRadius = 12
+
+        deletionAvailabilityIcon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+            pointSize: 15,
+            weight: .semibold
+        )
+        deletionAvailabilityIcon.setContentHuggingPriority(.required, for: .horizontal)
+
+        deletionAvailabilityLabel.font = .preferredFont(forTextStyle: .footnote)
+        deletionAvailabilityLabel.numberOfLines = 0
+
+        let row = UIStackView(arrangedSubviews: [deletionAvailabilityIcon, deletionAvailabilityLabel])
+        row.alignment = .top
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        deletionAvailabilityNotice.addSubview(row)
+        NSLayoutConstraint.activate(pin(row, to: deletionAvailabilityNotice, inset: 11))
+        return deletionAvailabilityNotice
+    }
+
+    private func updateDeletionAvailabilityNotice() {
+        switch remoteMutationAvailability {
+        case .checking:
+            deletionAvailabilityIcon.image = UIImage(systemName: "network")
+            deletionAvailabilityIcon.tintColor = .secondaryLabel
+            deletionAvailabilityLabel.textColor = .secondaryLabel
+            deletionAvailabilityNotice.backgroundColor = .secondarySystemFill
+            deletionAvailabilityNotice.isHidden = false
+        case .available:
+            deletionAvailabilityNotice.isHidden = true
+        case .tailscaleUnavailable:
+            deletionAvailabilityIcon.image = UIImage(systemName: "wifi.exclamationmark")
+            deletionAvailabilityIcon.tintColor = .systemOrange
+            deletionAvailabilityLabel.textColor = .systemOrange
+            deletionAvailabilityNotice.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.12)
+            deletionAvailabilityNotice.isHidden = false
+        }
+        deletionAvailabilityLabel.text = remoteMutationAvailability.statusText
+    }
+
+    private func trackDeletionAlert(
+        _ alert: UIAlertController,
+        connectedMessage: String
+    ) {
+        activeDeletionAlert = alert
+        activeDeletionAlertConnectedMessage = connectedMessage
+        updatePresentedDeletionAlertAvailability()
+    }
+
+    private func updatePresentedDeletionAlertAvailability() {
+        guard let alert = activeDeletionAlert else { return }
+        let isEnabled = remoteMutationAvailability.allowsRemoteMutation
+        for action in alert.actions where action.style != .cancel {
+            action.isEnabled = isEnabled
+        }
+        switch remoteMutationAvailability {
+        case .available:
+            alert.message = activeDeletionAlertConnectedMessage
+        case .checking:
+            alert.message = "正在检查 Tailscale 连接；确认完成前不能删除 MyNAS 文件。"
+        case .tailscaleUnavailable:
+            alert.message = MyNASRemoteMutationPreflightError
+                .tailscaleUnavailable.localizedDescription
+        }
     }
 
     private func makeConfirmedLocalCopyNotice() -> UIView {
@@ -471,7 +640,7 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         title.text = "发现 \(candidateCount) 个本机候选原件"
         title.font = preferredFont(.footnote, weight: .semibold)
         let subtitle = UILabel()
-        subtitle.text = "点按“核验并关联本机原件”后会比对完整资源的大小和 SHA-256。"
+        subtitle.text = "正在后台比对完整资源的角色、大小和 SHA-256；无需逐项操作。"
         subtitle.font = .preferredFont(forTextStyle: .caption2)
         subtitle.textColor = .secondaryLabel
         subtitle.numberOfLines = 0
@@ -545,6 +714,7 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     }
 
     private var hasConfirmedLocalCopy: Bool {
+        if automaticallyVerifiedLocalCopy { return true }
         guard let confirmedLocalCopy else { return false }
         return localClient.hasAccessibleAsset(localIdentifier: confirmedLocalCopy.localIdentifier)
     }
@@ -574,6 +744,31 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         onDismiss()
     }
 
+    @objc private func applicationDidBecomeActive() {
+        refreshRemoteMutationAvailability()
+    }
+
+    private func refreshRemoteMutationAvailability() {
+        connectionRefreshTask?.cancel()
+        remoteMutationAvailability = .checking
+        connectionRefreshTask = Task { [weak self, account, remoteMutationPreflight] in
+            let availability = await remoteMutationPreflight.availability(for: account)
+            guard !Task.isCancelled, let self else { return }
+            self.remoteMutationAvailability = availability
+        }
+    }
+
+    private func confirmRemoteMutationAvailability() async -> Bool {
+        let availability = await remoteMutationPreflight.availability(for: account)
+        guard !Task.isCancelled else { return false }
+        remoteMutationAvailability = availability
+        guard availability.allowsRemoteMutation else {
+            showMessage(MyNASRemoteMutationPreflightError.tailscaleUnavailable.localizedDescription)
+            return false
+        }
+        return true
+    }
+
     @objc private func loadPreview() {
         guard !isLoadingPreview else { return }
         hasRequestedPreview = true
@@ -591,7 +786,13 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
                 guard !Task.isCancelled else { return }
                 let image = await RemotePreviewImageDecoder.decode(result.data, maximumPixelSize: 1_920)
                 guard !Task.isCancelled else { return }
-                imageView.image = image ?? UIImage(systemName: "exclamationmark.icloud")
+                if let image {
+                    imageView.preferredSymbolConfiguration = nil
+                    imageView.contentMode = .scaleAspectFit
+                    imageView.image = image
+                } else {
+                    showPreviewPlaceholder(systemName: "exclamationmark.icloud")
+                }
                 previewButton.isHidden = image != nil
                 if image == nil {
                     previewButton.setTitle("预览无法显示，点按重试", for: .normal)
@@ -606,16 +807,113 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         }
     }
 
+    private func showPreviewPlaceholder(systemName: String) {
+        imageView.contentMode = .center
+        imageView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+            pointSize: 28,
+            weight: .regular
+        )
+        imageView.image = UIImage(systemName: systemName)
+    }
+
     private var previewKind: String? {
         if asset.derivative("preview") != nil { return "preview" }
         if asset.derivative("grid") != nil { return "grid" }
         return asset.derivatives.first?.kind
     }
 
+    @objc private func startRemotePlayback() {
+        guard !isPreparingPlayback, player == nil else { return }
+        let resource = asset.mediaType == .livePhoto
+            ? asset.pairedVideoResource
+            : asset.videoResource
+        guard let resource else {
+            updatePlaybackButton(title: "远端视频资源不可用", showsActivity: false)
+            playbackButton.isHidden = false
+            playbackButton.isEnabled = false
+            return
+        }
+
+        isPreparingPlayback = true
+        playbackButton.isHidden = false
+        playbackButton.isEnabled = false
+        updatePlaybackButton(
+            title: asset.mediaType == .livePhoto ? "正在加载实况…" : "正在流式加载…",
+            showsActivity: true
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isPreparingPlayback = false }
+            do {
+                let sourceURL = try await client.streamingURL(
+                    for: resource,
+                    in: asset,
+                    account: account
+                )
+                let loader = MyNASMediaResourceLoader(
+                    sourceURL: sourceURL,
+                    resource: resource,
+                    asset: asset,
+                    account: account,
+                    client: client
+                )
+                let urlAsset = try loader.makeAsset()
+                guard !Task.isCancelled else {
+                    loader.invalidate()
+                    return
+                }
+
+                let newPlayer = AVPlayer(playerItem: AVPlayerItem(asset: urlAsset))
+                let playerController = AVPlayerViewController()
+                playerController.player = newPlayer
+                playerController.showsPlaybackControls = true
+                playerController.videoGravity = .resizeAspect
+                addChild(playerController)
+                playerController.view.translatesAutoresizingMaskIntoConstraints = false
+                previewContainer.addSubview(playerController.view)
+                NSLayoutConstraint.activate(pin(playerController.view, to: previewContainer, inset: 0))
+                playerController.didMove(toParent: self)
+
+                mediaResourceLoader = loader
+                player = newPlayer
+                playerViewController = playerController
+                playbackButton.isHidden = true
+                newPlayer.play()
+            } catch {
+                guard !Task.isCancelled else { return }
+                playbackButton.isHidden = false
+                playbackButton.isEnabled = true
+                updatePlaybackButton(
+                    title: asset.mediaType == .livePhoto ? "重试播放实况" : "重试播放视频",
+                    showsActivity: false
+                )
+            }
+        }
+    }
+
+    private func updatePlaybackButton(title: String, showsActivity: Bool) {
+        var configuration = playbackButton.configuration
+        configuration?.title = title
+        configuration?.showsActivityIndicator = showsActivity
+        playbackButton.configuration = configuration
+    }
+
+    private func stopRemotePlayback() {
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+        playerViewController?.willMove(toParent: nil)
+        playerViewController?.view.removeFromSuperview()
+        playerViewController?.removeFromParent()
+        playerViewController = nil
+        mediaResourceLoader?.invalidate()
+        mediaResourceLoader = nil
+    }
+
     /// Candidate type and dimensions only constrain PhotoKit work. A candidate
     /// becomes eligible for association exclusively after all original
     /// resources have matching roles, byte counts, and SHA-256 values.
-    @objc private func verifyAndAssociateLocalCopy() {
+    private func verifyAndAssociateLocalCopy(presentsResult: Bool) {
         guard !isPerformingAction,
               let onVerifiedLocalCopies else {
             return
@@ -625,7 +923,7 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
             in: localAssets
         )
         guard !candidates.isEmpty else {
-            showMessage("没有找到类型和尺寸相符的本机候选原件。")
+            automaticVerificationCompleted = true
             return
         }
 
@@ -635,6 +933,10 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
             defer {
                 self.isPerformingAction = false
                 self.restoreAssociationButtonTitle()
+                self.updateDownloadButton(
+                    title: self.restingDownloadButtonTitle,
+                    showsActivity: false
+                )
             }
             do {
                 var matchedCandidates: [LocalPhotoAsset] = []
@@ -654,26 +956,34 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
                     matchedCandidates.append(candidate)
                 }
                 guard !matchedCandidates.isEmpty else {
-                    showMessage("没有找到资源角色、大小和 SHA-256 均一致的本机原件，因此没有建立关联。")
+                    automaticVerificationCompleted = true
+                    automaticallyVerifiedLocalCopy = false
+                    if presentsResult {
+                        showMessage("没有找到资源角色、大小和 SHA-256 均一致的本机原件，因此没有建立关联。")
+                    }
                     return
                 }
 
+                automaticVerificationCompleted = true
+                automaticallyVerifiedLocalCopy = true
                 switch onVerifiedLocalCopies(asset, matchedCandidates) {
                 case .started:
-                    let copyDescription = matchedCandidates.count == 1
-                        ? "这张本机照片"
-                        : "这 \(matchedCandidates.count) 张本机副本"
-                    showMessage(
-                        "已逐项核验原始资源的角色、大小和 SHA-256。正在向 MyNAS 登记\(copyDescription)；服务器确认后会合并到同一 MyNAS 原件。"
-                    )
+                    showDownloadCompletionToast("已自动核验；正在关联本机原件")
                 case .alreadyAssociated:
-                    showMessage("所有已核验的本机照片都已与当前 MyNAS 项目完成关联。")
+                    if presentsResult {
+                        showDownloadCompletionToast("本机原件已经自动关联")
+                    }
                 case .unavailable(let reason):
-                    showMessage("已确认原件一致，但暂时无法登记：\n\n\(reason)")
+                    if presentsResult {
+                        showMessage("已确认原件一致，但暂时无法登记：\n\n\(reason)")
+                    }
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                showMessage("核验本机原件未完成：\n\n\(error.localizedDescription)")
+                automaticVerificationCompleted = false
+                if presentsResult {
+                    showMessage("核验本机原件未完成：\n\n\(error.localizedDescription)")
+                }
             }
         }
     }
@@ -730,7 +1040,9 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
 
     private var restingDownloadButtonTitle: String {
         if hasConfirmedLocalCopy { return "仍然下载一份副本" }
-        if canAssociateLocalCopy { return "先核验本机原件" }
+        if canAssociateLocalCopy && !automaticVerificationCompleted {
+            return "正在自动核验本机原件…"
+        }
         return "下载并导入原件"
     }
 
@@ -798,8 +1110,8 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
             presentDuplicateDownloadConfirmation()
             return
         }
-        if canAssociateLocalCopy {
-            presentCandidateVerificationDecision()
+        if canAssociateLocalCopy && !automaticVerificationCompleted {
+            verifyAndAssociateLocalCopy(presentsResult: false)
             return
         }
         isPerformingAction = true
@@ -830,29 +1142,60 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         }
     }
 
-    /// Dimensions and media type are not an identity check, but they are
-    /// enough to require an explicit choice before importing another physical
-    /// Photos item. This closes the earlier path that created duplicate local
-    /// originals whenever a mapping had not yet been registered.
-    private func presentCandidateVerificationDecision() {
-        let candidateCount = RemotePhotoLocalCopyVerification.candidates(
-            for: asset,
-            in: localAssets
-        ).count
-        let alert = UIAlertController(
-            title: "先核验本机候选原件",
-            message: "发现 \(candidateCount) 个类型和尺寸相符的本机项目。为避免再创建重复照片，请先比对完整资源的角色、大小和 SHA-256；只有完全一致才会关联。",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "核验并关联", style: .default) { [weak self] _ in
-            self?.verifyAndAssociateLocalCopy()
-        })
-        alert.addAction(UIAlertAction(title: "仍然下载一份副本", style: .default) { [weak self] _ in
-            guard let self else { return }
-            Task { await self.downloadOriginalsToPhotos() }
-        })
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        present(alert, animated: true)
+    /// H2 export intentionally shares the byte-for-byte verified originals
+    /// from the H1 download path. A preview, an unverified cache hit, or a
+    /// remote URL is never handed to the system share sheet.
+    @objc private func exportOriginals() {
+        guard !isPerformingAction, activeExportDownload == nil else { return }
+        Task { [weak self] in
+            await self?.exportVerifiedOriginals()
+        }
+    }
+
+    private func exportVerifiedOriginals() async {
+        guard !isPerformingAction, activeExportDownload == nil else { return }
+        isPerformingAction = true
+        beginDownloadProgress()
+        defer { isPerformingAction = false }
+
+        do {
+            let download = try await client.downloadOriginalResources(
+                for: asset,
+                account: account
+            ) { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.updateDownloadProgress(progress)
+                }
+            }
+            guard !Task.isCancelled else {
+                download.removeTemporaryFiles()
+                return
+            }
+            finishDownloadProgress()
+            activeExportDownload = download
+            updateActionAvailability()
+
+            let activity = UIActivityViewController(
+                activityItems: download.resources.map(\.fileURL),
+                applicationActivities: nil
+            )
+            activity.completionWithItemsHandler = { [weak self, download] _, didComplete, _, _ in
+                download.removeTemporaryFiles()
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.activeExportDownload = nil
+                    self.updateActionAvailability()
+                    if didComplete {
+                        self.showDownloadCompletionToast("已将 \(download.resources.count) 个原件交给系统分享")
+                    }
+                }
+            }
+            present(activity, animated: true)
+        } catch {
+            finishDownloadProgress()
+            guard !Task.isCancelled else { return }
+            showMessage("导出未完成：\n\n\(error.localizedDescription)")
+        }
     }
 
     private func presentDuplicateDownloadConfirmation() {
@@ -939,11 +1282,17 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     }
 
     @objc private func prepareRemoteDeletion() {
-        guard !isPerformingAction else { return }
+        guard !isPerformingAction, remoteMutationAvailability.allowsRemoteMutation else {
+            if remoteMutationAvailability == .tailscaleUnavailable {
+                showMessage(MyNASRemoteMutationPreflightError.tailscaleUnavailable.localizedDescription)
+            }
+            return
+        }
         isPerformingAction = true
         Task { [weak self] in
             guard let self else { return }
             defer { isPerformingAction = false }
+            guard await confirmRemoteMutationAvailability() else { return }
             do {
                 let mapping = try await client.fetchDeviceAssetMapping(
                     account: account,
@@ -973,28 +1322,75 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     }
 
     private func presentDeleteConfirmation(candidate: PhotoBackupDeletionCandidate?) {
+        let connectedMessage = candidate == nil
+            ? "这会永久删除 MyNAS 项目；本机照片不会被删除。"
+            : "可仅删除 MyNAS，或同时将已验证的本机原件移入系统“最近删除”。"
         let alert = UIAlertController(
             title: "选择删除范围",
-            message: candidate == nil
-                ? "这会永久删除 MyNAS 项目；本机照片不会被删除。"
-                : "可仅删除 MyNAS，或同时将已验证的本机原件移入系统“最近删除”。",
+            message: connectedMessage,
             preferredStyle: .actionSheet
         )
         if let candidate {
-            alert.addAction(UIAlertAction(title: "同时删除本机照片", style: .destructive) { [weak self] _ in
-                guard let self else { return }
-                Task { await self.deleteLocalAndRemoteAsset(candidate) }
+            alert.addAction(UIAlertAction(title: "同时删除本机照片", style: .default) { [weak self] _ in
+                self?.activeDeletionAlert = nil
+                self?.presentFinalPairedDeletionConfirmation(candidate: candidate)
             })
         }
-        alert.addAction(UIAlertAction(title: "仅删除 MyNAS 项目", style: .destructive) { [weak self] _ in
-            guard let self else { return }
-            Task { await self.deleteRemoteAsset() }
+        alert.addAction(UIAlertAction(title: "仅删除 MyNAS 项目", style: .default) { [weak self] _ in
+            self?.activeDeletionAlert = nil
+            self?.presentFinalMyNASDeletionConfirmation()
         })
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            self?.activeDeletionAlert = nil
+        })
         if let popover = alert.popoverPresentationController {
             popover.sourceView = deleteButton
             popover.sourceRect = deleteButton.bounds
         }
+        trackDeletionAlert(alert, connectedMessage: connectedMessage)
+        present(alert, animated: true)
+    }
+
+    /// Scope selection is deliberately non-destructive. A separate alert is
+    /// required before the first permanent remote mutation, preventing a
+    /// delayed second tap from both choosing a scope and executing deletion.
+    private func presentFinalMyNASDeletionConfirmation() {
+        let connectedMessage = "MyNAS 中的原件、预览和备份记录将永久删除，不能撤销。本机照片不会被删除。"
+        let alert = UIAlertController(
+            title: "永久删除 MyNAS 项目？",
+            message: connectedMessage,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "永久删除 MyNAS 项目", style: .destructive) { [weak self] _ in
+            guard let self else { return }
+            activeDeletionAlert = nil
+            Task { await self.deleteRemoteAsset() }
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            self?.activeDeletionAlert = nil
+        })
+        trackDeletionAlert(alert, connectedMessage: connectedMessage)
+        present(alert, animated: true)
+    }
+
+    private func presentFinalPairedDeletionConfirmation(
+        candidate: PhotoBackupDeletionCandidate
+    ) {
+        let connectedMessage = "本机照片会先移入系统“最近删除”，随后 MyNAS 原件会被永久删除。请确认这是你要删除的项目。"
+        let alert = UIAlertController(
+            title: "同时删除本机与 MyNAS？",
+            message: connectedMessage,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "继续删除", style: .destructive) { [weak self] _ in
+            guard let self else { return }
+            activeDeletionAlert = nil
+            Task { await self.deleteLocalAndRemoteAsset(candidate) }
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            self?.activeDeletionAlert = nil
+        })
+        trackDeletionAlert(alert, connectedMessage: connectedMessage)
         present(alert, animated: true)
     }
 
@@ -1002,6 +1398,7 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         guard !isPerformingAction else { return }
         isPerformingAction = true
         defer { isPerformingAction = false }
+        guard await confirmRemoteMutationAvailability() else { return }
         do {
             let result = try await client.deleteRemoteAsset(asset, account: account)
             guard !Task.isCancelled else { return }
@@ -1017,6 +1414,10 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         guard !isPerformingAction else { return }
         isPerformingAction = true
         defer { isPerformingAction = false }
+        // Recheck before PhotoKit changes anything. If Tailscale dropped while
+        // the confirmation alert was open, neither the local nor remote copy
+        // is deleted.
+        guard await confirmRemoteMutationAvailability() else { return }
         do {
             try await localClient.deleteAssets(localIdentifiers: [candidate.localIdentifier])
             let result = try await client.deleteBackups(candidates: [candidate], account: account)
@@ -1034,8 +1435,10 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
 
     private func updateActionAvailability() {
         downloadButton.isEnabled = !isPerformingAction
+        exportButton.isEnabled = !isPerformingAction && activeExportDownload == nil
         associateButton.isEnabled = !isPerformingAction
         deleteButton.isEnabled = !isPerformingAction
+            && remoteMutationAvailability.allowsRemoteMutation
     }
 
     private func showMessage(_ message: String) {

@@ -239,6 +239,7 @@ actor RemotePhotoLibraryClient {
             let (data, response) = try await session.data(for: request)
             let httpResponse = try validatedHTTPResponse(response, data: data)
             if httpResponse.statusCode == 304, let cachedEnvelope {
+                touchCachedFile(at: cacheURL)
                 return RemotePhotoPageResult(
                     page: cachedEnvelope.page,
                     isUsingOfflineCache: false
@@ -262,6 +263,7 @@ actor RemotePhotoLibraryClient {
             return RemotePhotoPageResult(page: page, isUsingOfflineCache: false)
         } catch {
             if let cachedEnvelope, Self.canUseOfflineCache(after: error) {
+                touchCachedFile(at: cacheURL)
                 return RemotePhotoPageResult(
                     page: cachedEnvelope.page,
                     isUsingOfflineCache: true
@@ -491,6 +493,7 @@ actor RemotePhotoLibraryClient {
            let cachedData,
            let cachedEnvelope,
            Date().timeIntervalSince(cachedEnvelope.fetchedAt) < imageFreshness {
+            touchCachedFiles(cache.data, cache.metadata)
             return RemotePhotoImageResult(
                 data: cachedData,
                 isUsingOfflineCache: false
@@ -514,6 +517,7 @@ actor RemotePhotoLibraryClient {
                     fetchedAt: Date()
                 )
                 try persist(refreshed, to: cache.metadata)
+                touchCachedFile(at: cache.data)
                 return RemotePhotoImageResult(
                     data: cachedData,
                     isUsingOfflineCache: false
@@ -538,6 +542,7 @@ actor RemotePhotoLibraryClient {
             if cachedIsValid,
                let cachedData,
                Self.canUseOfflineCache(after: error) {
+                touchCachedFiles(cache.data, cache.metadata)
                 return RemotePhotoImageResult(
                     data: cachedData,
                     isUsingOfflineCache: true
@@ -705,6 +710,7 @@ actor RemotePhotoLibraryClient {
             }
             let httpResponse = try validatedHTTPResponse(response, data: data)
             if httpResponse.statusCode == 304 {
+                touchCachedFile(at: cacheURL)
                 return RemotePhotoChangeSyncResult(
                     changeCount: 0,
                     changedAssetIDs: [],
@@ -967,6 +973,20 @@ actor RemotePhotoLibraryClient {
 
     private func persist(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// Cache eviction uses modification date as its access timestamp because
+    /// iOS may not update access time. A read that successfully serves this
+    /// app's verified cache therefore refreshes both files in its entry.
+    private func touchCachedFiles(_ urls: URL...) {
+        urls.forEach(touchCachedFile(at:))
+    }
+
+    private func touchCachedFile(at url: URL) {
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()],
+            ofItemAtPath: url.path
+        )
     }
 
     private static func sha256Hex(_ data: Data) -> String {

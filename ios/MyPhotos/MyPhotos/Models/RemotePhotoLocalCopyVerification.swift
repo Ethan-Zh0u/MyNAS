@@ -9,23 +9,28 @@ nonisolated enum RemotePhotoLocalCopyVerification {
         for remoteAsset: ServerPhotoAsset,
         in localAssets: [LocalPhotoAsset]
     ) -> [LocalPhotoAsset] {
-        localAssets.filter { localAsset in
-            let hasCompatibleKind: Bool
-            switch remoteAsset.mediaType {
-            case .unknown:
-                hasCompatibleKind = localAsset.mediaKind == .photo
-            default:
-                hasCompatibleKind = localAsset.mediaKind.rawValue == remoteAsset.mediaType.rawValue
-            }
-            guard hasCompatibleKind else { return false }
+        localAssets.filter { isCandidate($0, for: remoteAsset) }
+    }
 
-            let hasKnownPixelSize = remoteAsset.pixelWidth > 0 && remoteAsset.pixelHeight > 0
-            guard !hasKnownPixelSize else {
-                return localAsset.pixelWidth == remoteAsset.pixelWidth
-                    && localAsset.pixelHeight == remoteAsset.pixelHeight
-            }
-            return true
+    static func isCandidate(
+        _ localAsset: LocalPhotoAsset,
+        for remoteAsset: ServerPhotoAsset
+    ) -> Bool {
+        let hasCompatibleKind: Bool
+        switch remoteAsset.mediaType {
+        case .unknown:
+            hasCompatibleKind = localAsset.mediaKind == .photo
+        default:
+            hasCompatibleKind = localAsset.mediaKind.rawValue == remoteAsset.mediaType.rawValue
         }
+        guard hasCompatibleKind else { return false }
+
+        let hasKnownPixelSize = remoteAsset.pixelWidth > 0 && remoteAsset.pixelHeight > 0
+        guard !hasKnownPixelSize else {
+            return localAsset.pixelWidth == remoteAsset.pixelWidth
+                && localAsset.pixelHeight == remoteAsset.pixelHeight
+        }
+        return true
     }
 
     static func hasSameCompleteResourceGroup(

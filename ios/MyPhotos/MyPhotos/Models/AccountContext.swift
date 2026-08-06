@@ -86,7 +86,7 @@ nonisolated struct MyNASVolume: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
-nonisolated enum CacheDirectoryKind: String, CaseIterable, Sendable {
+nonisolated enum CacheDirectoryKind: String, CaseIterable, Hashable, Sendable {
     case thumbnails
     case previews
     case livePhotos = "live-photo"
@@ -98,6 +98,14 @@ nonisolated enum CacheDirectoryKind: String, CaseIterable, Sendable {
 /// Owns the account-isolated directory convention. Cache eviction and downloads arrive in stage H.
 nonisolated struct CacheDirectoryProvider {
     private let fileManager = FileManager.default
+    private let applicationSupportRootOverride: URL?
+
+    /// Tests inject an isolated root. Production continues to use the app's
+    /// Application Support directory, so no cache is ever shared with another
+    /// app or account namespace.
+    init(applicationSupportRootOverride: URL? = nil) {
+        self.applicationSupportRootOverride = applicationSupportRootOverride
+    }
 
     func directory(for account: AccountContext, kind: CacheDirectoryKind) throws -> URL {
         let root = try applicationSupportRoot()
@@ -112,16 +120,36 @@ nonisolated struct CacheDirectoryProvider {
     }
 
     func rootDirectory(for account: AccountContext) throws -> URL {
-        let root = try applicationSupportRoot()
-        let directory = root
-            .appendingPathComponent("AppCache", isDirectory: true)
-            .appendingPathComponent(account.serverID.cachePathComponent, isDirectory: true)
-            .appendingPathComponent(account.userID.cachePathComponent, isDirectory: true)
+        let directory = try accountRootDirectory(for: account)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
 
+    /// Unlike `rootDirectory(for:)`, this never creates a cache directory. It
+    /// lets Settings report a genuine zero-size cache before the first remote
+    /// read, rather than manufacturing an empty namespace while inspecting it.
+    func existingRootDirectory(for account: AccountContext) throws -> URL? {
+        let directory = try accountRootDirectory(for: account)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return nil
+        }
+        return directory
+    }
+
+    private func accountRootDirectory(for account: AccountContext) throws -> URL {
+        let root = try applicationSupportRoot()
+        return root
+            .appendingPathComponent("AppCache", isDirectory: true)
+            .appendingPathComponent(account.serverID.cachePathComponent, isDirectory: true)
+            .appendingPathComponent(account.userID.cachePathComponent, isDirectory: true)
+    }
+
     private func applicationSupportRoot() throws -> URL {
+        if let applicationSupportRootOverride {
+            return applicationSupportRootOverride
+        }
         guard let root = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw CocoaError(.fileNoSuchFile)
         }

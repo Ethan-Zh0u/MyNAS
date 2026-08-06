@@ -101,8 +101,16 @@ struct PhotoTimelineVisibleDateOverlay: View {
                 guard frame.intersects(viewport) else { return nil }
                 return (anchor.date, frame)
             }
+            // The first photos are fully below the viewport while the timeline
+            // is at its initial position. Do not place a floating date badge
+            // over that first row; show it only after a photo has begun to
+            // scroll underneath the top edge.
+            let hasScrolledPastInitialPosition = visible.contains {
+                $0.frame.minY < viewport.minY
+            }
 
-            if let oldest = visible.map(\.date).min(),
+            if hasScrolledPastInitialPosition,
+               let oldest = visible.map(\.date).min(),
                let newest = visible.map(\.date).max() {
                 PhotoTimelineVisibleDateBadge(oldest: oldest, newest: newest)
                     .padding(.leading, 12)

@@ -281,7 +281,17 @@ struct PhotoBackupJob: Identifiable, Codable, Equatable, Sendable {
     let localIdentifier: String
     let mediaKind: LocalMediaKind
     let creationDate: Date?
+    /// The modification date MyNAS received with the committed source
+    /// resource group. This remains the deletion-proof version even when a
+    /// later PhotoKit change is explicitly known to be metadata-only.
     var sourceModificationDate: Date?
+    /// The newest PhotoKit modification date that is known to describe the
+    /// same source bytes. `PHObjectChangeDetails.assetContentChanged == false`
+    /// is the only way this may advance beyond `sourceModificationDate`.
+    ///
+    /// Older persisted jobs omit this optional field and conservatively fall
+    /// back to `sourceModificationDate`.
+    var lastKnownLocalModificationDate: Date? = nil
     var status: PhotoBackupJobStatus
     var totalBytes: Int64
     var uploadedBytes: Int64
@@ -296,6 +306,13 @@ struct PhotoBackupJob: Identifiable, Codable, Equatable, Sendable {
 
     var isBrowseReady: Bool {
         sourceState == .committed && derivativeState == .ready
+    }
+
+    /// A backup remains current across a PhotoKit metadata-only change (for
+    /// example, toggling Favourite), but never across an unclassified or
+    /// content-bearing modification.
+    func matchesCurrentLocalAsset(_ asset: LocalPhotoAsset) -> Bool {
+        (lastKnownLocalModificationDate ?? sourceModificationDate) == asset.modificationDate
     }
 
     var progress: Double {

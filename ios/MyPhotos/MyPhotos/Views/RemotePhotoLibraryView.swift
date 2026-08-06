@@ -58,7 +58,7 @@ struct RemotePhotoLibraryView: View {
                 guard let localAsset = localClient.accessibleAsset(
                     localIdentifier: job.localIdentifier
                 ),
-                      job.sourceModificationDate == localAsset.modificationDate else {
+                      job.matchesCurrentLocalAsset(localAsset) else {
                     return nil
                 }
                 return localAsset
@@ -80,13 +80,19 @@ struct RemotePhotoLibraryView: View {
                       let localAsset = localClient.accessibleAsset(
                         localIdentifier: job.localIdentifier
                       ),
-                      job.sourceModificationDate == localAsset.modificationDate else {
+                      job.matchesCurrentLocalAsset(localAsset) else {
                     return nil
                 }
                 return remoteAssetID
             }
         )
         verificationLocalAssets = await localClient.allAccessibleAssets()
+        backupCoordinator.reconcileVerifiedRemoteCopies(
+            remoteAssets: viewModel.assets,
+            localAssets: verificationLocalAssets,
+            account: viewModel.account,
+            client: localClient
+        )
     }
 
     var body: some View {
@@ -167,6 +173,14 @@ struct RemotePhotoLibraryView: View {
                 guard !Task.isCancelled else { return }
                 await viewModel.checkForRemoteChanges()
             }
+        }
+        .onChange(of: viewModel.assets) { _, assets in
+            backupCoordinator.reconcileVerifiedRemoteCopies(
+                remoteAssets: assets,
+                localAssets: localAssetsForVerification,
+                account: viewModel.account,
+                client: localClient
+            )
         }
     }
 
@@ -487,7 +501,7 @@ private struct RemotePhotoImageView: View {
                 Rectangle()
                     .fill(Color.secondary.opacity(0.16))
                 Image(systemName: didFail ? "exclamationmark.icloud" : asset.mediaType.systemImage)
-                    .font(.title2)
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(.secondary)
             }
         }
@@ -521,6 +535,7 @@ private struct RemotePhotoImageView: View {
 
 struct RemotePhotoDetailView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     let asset: ServerPhotoAsset
     let account: AccountContext
     let client: RemotePhotoLibraryClient
@@ -533,15 +548,22 @@ struct RemotePhotoDetailView: View {
     @State private var isCheckingDeletionTarget = false
     @State private var isDownloading = false
     @State private var isImportingDownloadedResources = false
+    @State private var isExportingOriginals = false
     @State private var downloadProgress: RemotePhotoDownloadProgress?
+    @State private var exportDownload: RemotePhotoOriginalDownload?
+    @State private var showsOriginalExportSheet = false
     @State private var isDeleting = false
     @State private var showsDuplicateDownloadConfirmation = false
     @State private var showsRemoteDeleteConfirmation = false
+    @State private var showsFinalRemoteDeleteConfirmation = false
+    @State private var showsFinalPairedDeleteConfirmation = false
     @State private var localDeletionCandidate: PhotoBackupDeletionCandidate?
     @State private var localDeletionUnavailableReason: String?
     @State private var resultMessage: String?
     @State private var completionToastMessage: String?
     @State private var shouldLoadMediaPreview = false
+    @State private var remoteMutationAvailability: MyNASRemoteMutationAvailability = .checking
+    private let remoteMutationPreflight = MyNASRemoteMutationPreflight()
 
     /// `Body == AnyView` is deliberate. The former statically composed body
     /// contains media, dialogs, and action branches; iOS 27 crashes while
@@ -630,6 +652,25 @@ struct RemotePhotoDetailView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: completionToastMessage)
+        .sheet(
+            isPresented: $showsOriginalExportSheet,
+            onDismiss: releaseExportDownload
+        ) {
+            if let exportDownload {
+                RemotePhotoOriginalExportSheet(
+                    fileURLs: exportDownload.resources.map(\.fileURL)
+                ) { didComplete in
+                    Task { @MainActor in
+                        if didComplete {
+                            showDownloadCompletionToast(
+                                "已将 \(exportDownload.resources.count) 个原件交给系统分享"
+                            )
+                        }
+                        showsOriginalExportSheet = false
+                    }
+                }
+            }
+        }
         .confirmationDialog(
             "本机已有这张照片",
             isPresented: $showsDuplicateDownloadConfirmation,
@@ -647,14 +688,16 @@ struct RemotePhotoDetailView: View {
             isPresented: $showsRemoteDeleteConfirmation,
             titleVisibility: .visible
         ) {
-            if let localDeletionCandidate {
-                Button("同时删除本机照片（移入“最近删除”）", role: .destructive) {
-                    Task { await deleteLocalAndRemoteAsset(localDeletionCandidate) }
+            if localDeletionCandidate != nil {
+                Button("同时删除本机照片（移入“最近删除”）") {
+                    showsFinalPairedDeleteConfirmation = true
                 }
+                .disabled(!remoteMutationAvailability.allowsRemoteMutation)
             }
-            Button("仅删除 MyNAS 项目", role: .destructive) {
-                Task { await deleteRemoteAsset() }
+            Button("仅删除 MyNAS 项目") {
+                showsFinalRemoteDeleteConfirmation = true
             }
+            .disabled(!remoteMutationAvailability.allowsRemoteMutation)
             Button("取消", role: .cancel) {}
         } message: {
             if localDeletionCandidate != nil {
@@ -664,6 +707,31 @@ struct RemotePhotoDetailView: View {
             } else {
                 Text("这会永久删除 MyNAS 中的原件、预览和备份记录，不能撤销。本机照片不会被删除。")
             }
+        }
+        .alert(
+            "永久删除 MyNAS 项目？",
+            isPresented: $showsFinalRemoteDeleteConfirmation
+        ) {
+            Button("永久删除 MyNAS 项目", role: .destructive) {
+                Task { await deleteRemoteAsset() }
+            }
+            .disabled(!remoteMutationAvailability.allowsRemoteMutation)
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("MyNAS 中的原件、预览和备份记录将永久删除，不能撤销。本机照片不会被删除。")
+        }
+        .alert(
+            "同时删除本机与 MyNAS？",
+            isPresented: $showsFinalPairedDeleteConfirmation
+        ) {
+            Button("继续删除", role: .destructive) {
+                guard let localDeletionCandidate else { return }
+                Task { await deleteLocalAndRemoteAsset(localDeletionCandidate) }
+            }
+            .disabled(!remoteMutationAvailability.allowsRemoteMutation)
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("本机照片会先移入系统“最近删除”，随后 MyNAS 原件会被永久删除。请确认这是你要删除的项目。")
         }
         .alert(
             "MyNAS 图库",
@@ -676,10 +744,17 @@ struct RemotePhotoDetailView: View {
         } message: {
             Text(resultMessage ?? "")
         }
+        .task(id: account.accountID) {
+            await refreshRemoteMutationAvailability()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await refreshRemoteMutationAvailability() }
+        }
     }
 
     private var isPerformingAction: Bool {
-        isCheckingForDuplicate || isCheckingDeletionTarget || isDownloading || isDeleting
+        isCheckingForDuplicate || isCheckingDeletionTarget || isDownloading || isExportingOriginals || isDeleting
     }
 
     private var hasConfirmedLocalCopy: Bool {
@@ -720,7 +795,19 @@ struct RemotePhotoDetailView: View {
             .disabled(isPerformingAction)
             remotePrimaryActionStyle()
 
-            if isDownloading {
+            Button {
+                Task { await exportVerifiedOriginals() }
+            } label: {
+                Label(
+                    isExportingOriginals ? "正在准备导出…" : "导出已核验原件…",
+                    systemImage: "square.and.arrow.up"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .disabled(isPerformingAction || exportDownload != nil)
+            .buttonStyle(.bordered)
+
+            if isDownloading || isExportingOriginals {
                 VStack(alignment: .leading, spacing: 6) {
                     ProgressView(value: downloadProgress?.fractionCompleted ?? 0)
                         .tint(.accentColor)
@@ -740,9 +827,52 @@ struct RemotePhotoDetailView: View {
                 )
                 .frame(maxWidth: .infinity)
             }
-            .disabled(isPerformingAction)
+            .disabled(
+                isPerformingAction
+                    || !remoteMutationAvailability.allowsRemoteMutation
+            )
             .buttonStyle(.bordered)
+
+            if let statusText = remoteMutationAvailability.statusText {
+                Label(
+                    statusText,
+                    systemImage: remoteMutationAvailability == .tailscaleUnavailable
+                        ? "wifi.exclamationmark"
+                        : "network"
+                )
+                .font(.footnote)
+                .foregroundStyle(
+                    remoteMutationAvailability == .tailscaleUnavailable
+                        ? Color.orange
+                        : Color.secondary
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(11)
+                .background(
+                    (remoteMutationAvailability == .tailscaleUnavailable
+                        ? Color.orange
+                        : Color.secondary).opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+            }
         }
+    }
+
+    private func refreshRemoteMutationAvailability() async {
+        remoteMutationAvailability = .checking
+        remoteMutationAvailability = await remoteMutationPreflight.availability(for: account)
+    }
+
+    private func confirmRemoteMutationAvailability() async -> Bool {
+        let availability = await remoteMutationPreflight.availability(for: account)
+        guard !Task.isCancelled else { return false }
+        remoteMutationAvailability = availability
+        guard availability.allowsRemoteMutation else {
+            resultMessage = MyNASRemoteMutationPreflightError
+                .tailscaleUnavailable.localizedDescription
+            return false
+        }
+        return true
     }
 
     private func prepareOriginalDownload() async {
@@ -807,6 +937,39 @@ struct RemotePhotoDetailView: View {
         }
     }
 
+    /// The same original-resource download used by import performs same-origin,
+    /// size, and SHA-256 validation before iOS receives a shareable file URL.
+    private func exportVerifiedOriginals() async {
+        guard !isPerformingAction, exportDownload == nil else { return }
+        isExportingOriginals = true
+        downloadProgress = nil
+        defer { isExportingOriginals = false }
+        do {
+            let download = try await client.downloadOriginalResources(
+                for: asset,
+                account: account
+            ) { progress in
+                Task { @MainActor in
+                    downloadProgress = progress
+                }
+            }
+            guard !Task.isCancelled else {
+                download.removeTemporaryFiles()
+                return
+            }
+            exportDownload = download
+            showsOriginalExportSheet = true
+        } catch {
+            guard !Task.isCancelled else { return }
+            resultMessage = "导出未完成：\n\n\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+        }
+    }
+
+    private func releaseExportDownload() {
+        exportDownload?.removeTemporaryFiles()
+        exportDownload = nil
+    }
+
     private var downloadActionTitle: String {
         if isCheckingForDuplicate { return "正在准备下载…" }
         if isImportingDownloadedResources { return "正在导入系统照片…" }
@@ -818,6 +981,9 @@ struct RemotePhotoDetailView: View {
     private var downloadProgressDescription: String {
         if isImportingDownloadedResources {
             return "原件已核验，正在导入系统照片…"
+        }
+        if isExportingOriginals, downloadProgress == nil {
+            return "正在准备可导出的已核验原件…"
         }
         guard let downloadProgress else {
             return "正在准备下载原件…"
@@ -852,8 +1018,14 @@ struct RemotePhotoDetailView: View {
     /// to keep the local and remote choices understandable and safe.
     private func prepareRemoteDeletion() async {
         guard !isPerformingAction else { return }
+        guard remoteMutationAvailability.allowsRemoteMutation else {
+            resultMessage = MyNASRemoteMutationPreflightError
+                .tailscaleUnavailable.localizedDescription
+            return
+        }
         isCheckingDeletionTarget = true
         defer { isCheckingDeletionTarget = false }
+        guard await confirmRemoteMutationAvailability() else { return }
         localDeletionCandidate = nil
         localDeletionUnavailableReason = nil
 
@@ -902,6 +1074,7 @@ struct RemotePhotoDetailView: View {
         guard !isPerformingAction else { return }
         isDeleting = true
         defer { isDeleting = false }
+        guard await confirmRemoteMutationAvailability() else { return }
         do {
             let result = try await client.deleteRemoteAsset(asset, account: account)
             guard !Task.isCancelled else { return }
@@ -921,6 +1094,10 @@ struct RemotePhotoDetailView: View {
         guard !isPerformingAction else { return }
         isDeleting = true
         defer { isDeleting = false }
+
+        // Never move the local item to Recently Deleted unless the remote
+        // mutation is still reachable at the final action boundary.
+        guard await confirmRemoteMutationAvailability() else { return }
 
         do {
             try await localClient.deleteAssets(localIdentifiers: [candidate.localIdentifier])
@@ -1000,7 +1177,7 @@ private struct RemoteMediaPreviewPlaceholder: View {
             Color.black.opacity(0.06)
             VStack(spacing: 12) {
                 Image(systemName: asset.mediaType.systemImage)
-                    .font(.system(size: 34, weight: .medium))
+                    .font(.system(size: 24, weight: .medium))
                     .foregroundStyle(.secondary)
                 Text("远端预览尚未加载")
                     .font(.subheadline.weight(.semibold))

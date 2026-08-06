@@ -9,12 +9,21 @@ struct SettingsView: View {
     @ObservedObject var backupCoordinator: PhotoBackupCoordinator
     @AppStorage("photoTimelineShowsUnified") private var showsUnifiedTimeline = true
     private let cacheDirectories = CacheDirectoryProvider()
+    private let cacheManager = RemotePhotoCacheManager()
     private let connectionService = MyNASConnectionService()
     @State private var isConnectionPresented = false
     @State private var serverTemperatureC: Double?
     @State private var isTemperatureLoading = false
     @State private var isRefreshingConnection = false
     @State private var connectionRefreshError: String?
+    @State private var cacheUsage: RemotePhotoCacheUsage = .empty
+    @State private var isLoadingCacheUsage = false
+    @State private var isManagingCache = false
+    @State private var showsClearCacheConfirmation = false
+    @State private var cacheStatusMessage: String?
+    @State private var cacheError: String?
+
+    private let retainedCacheLimit: Int64 = 256 * 1024 * 1024
 
     var body: some View {
         NavigationStack {
@@ -190,14 +199,53 @@ struct SettingsView: View {
                     Text(cachePathText)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Text("缓存统计、清理和 LRU 会在 MyNAS 连接与下载阶段提供。")
+
+                    LabeledContent("缓存占用", value: cacheUsageText)
+                    LabeledContent("缓存条目", value: "\(cacheUsage.entryCount)")
+
+                    if isLoadingCacheUsage || isManagingCache {
+                        HStack(spacing: 9) {
+                            ProgressView()
+                            Text(isManagingCache ? "正在管理当前账号缓存…" : "正在统计当前账号缓存…")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Button {
+                        Task { await refreshCacheUsage() }
+                    } label: {
+                        Label("刷新缓存统计", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isLoadingCacheUsage || isManagingCache)
+
+                    Button {
+                        Task { await trimCacheToRetainedLimit() }
+                    } label: {
+                        Label("按最近使用清理至 256 MB", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                    }
+                    .disabled(isLoadingCacheUsage || isManagingCache || cacheUsage.totalByteCount <= retainedCacheLimit)
+
+                    Button(role: .destructive) {
+                        showsClearCacheConfirmation = true
+                    } label: {
+                        Label("清除当前账号缓存", systemImage: "trash")
+                    }
+                    .disabled(isLoadingCacheUsage || isManagingCache || cacheUsage.totalByteCount == 0)
+
+                    if let cacheStatusMessage {
+                        Text(cacheStatusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("只会清理这个账号的应用缓存：先处理临时下载，再按最近使用顺序处理预览、缩略图和元数据；不会删除系统照片或 MyNAS 原件。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
 
                 Section("关于") {
                     LabeledContent("应用", value: "MyNAS Photos")
-                    LabeledContent("当前开发目标", value: "阶段 G · 自动备份策略与后台能力")
+                    LabeledContent("当前开发目标", value: "阶段 I · 本地可删除搜索索引")
                 }
             }
             .navigationTitle("设置")
@@ -205,8 +253,34 @@ struct SettingsView: View {
                 MyNASConnectionView()
                     .environmentObject(accountStore)
             }
+            .confirmationDialog(
+                "清除当前账号缓存？",
+                isPresented: $showsClearCacheConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("清除缓存", role: .destructive) {
+                    Task { await clearCurrentAccountCache() }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("这会清除当前账号的临时下载、预览、缩略图和元数据缓存。系统照片和 MyNAS 原件不会受到影响。")
+            }
+            .alert(
+                "无法管理缓存",
+                isPresented: Binding(
+                    get: { cacheError != nil },
+                    set: { if !$0 { cacheError = nil } }
+                )
+            ) {
+                Button("好", role: .cancel) { cacheError = nil }
+            } message: {
+                Text(cacheError ?? "")
+            }
             .task(id: accountStore.current.accountID) {
                 await monitorServerTemperature()
+            }
+            .task(id: "cache-\(accountStore.current.accountID)") {
+                await refreshCacheUsage()
             }
         }
     }
@@ -239,8 +313,88 @@ struct SettingsView: View {
     }
 
     private var cachePathText: String {
-        let path = try? cacheDirectories.rootDirectory(for: accountStore.current).path
-        return path ?? "将在首次写入缓存时创建"
+        do {
+            return try cacheDirectories.existingRootDirectory(for: accountStore.current)?.path
+                ?? "将在首次写入缓存时创建"
+        } catch {
+            return "缓存目录暂不可用"
+        }
+    }
+
+    private var cacheUsageText: String {
+        ByteCountFormatter.string(
+            fromByteCount: cacheUsage.totalByteCount,
+            countStyle: .file
+        )
+    }
+
+    private func refreshCacheUsage() async {
+        guard !isLoadingCacheUsage, !isManagingCache else { return }
+        let account = accountStore.current
+        isLoadingCacheUsage = true
+        cacheStatusMessage = nil
+        defer {
+            if account.accountID == accountStore.current.accountID {
+                isLoadingCacheUsage = false
+            }
+        }
+        do {
+            let usage = try await cacheManager.usage(for: account)
+            guard account.accountID == accountStore.current.accountID else { return }
+            cacheUsage = usage
+        } catch {
+            guard account.accountID == accountStore.current.accountID else { return }
+            cacheError = error.localizedDescription
+        }
+    }
+
+    private func trimCacheToRetainedLimit() async {
+        guard !isManagingCache, !isLoadingCacheUsage else { return }
+        let account = accountStore.current
+        isManagingCache = true
+        cacheStatusMessage = nil
+        defer {
+            if account.accountID == accountStore.current.accountID {
+                isManagingCache = false
+            }
+        }
+        do {
+            let result = try await cacheManager.trim(
+                account: account,
+                maximumByteCount: retainedCacheLimit
+            )
+            guard account.accountID == accountStore.current.accountID else { return }
+            cacheUsage = result.remainingUsage
+            cacheStatusMessage = result.removedEntryCount == 0
+                ? "缓存已在 256 MB 保留范围内。"
+                : "已清理 \(result.removedEntryCount) 项旧缓存，释放 \(ByteCountFormatter.string(fromByteCount: result.removedByteCount, countStyle: .file))。"
+        } catch {
+            guard account.accountID == accountStore.current.accountID else { return }
+            cacheError = error.localizedDescription
+        }
+    }
+
+    private func clearCurrentAccountCache() async {
+        guard !isManagingCache, !isLoadingCacheUsage else { return }
+        let account = accountStore.current
+        isManagingCache = true
+        cacheStatusMessage = nil
+        defer {
+            if account.accountID == accountStore.current.accountID {
+                isManagingCache = false
+            }
+        }
+        do {
+            let result = try await cacheManager.clear(account: account)
+            guard account.accountID == accountStore.current.accountID else { return }
+            cacheUsage = result.remainingUsage
+            cacheStatusMessage = result.removedEntryCount == 0
+                ? "当前账号没有可清理的缓存。"
+                : "已清除 \(result.removedEntryCount) 项缓存，释放 \(ByteCountFormatter.string(fromByteCount: result.removedByteCount, countStyle: .file))。"
+        } catch {
+            guard account.accountID == accountStore.current.accountID else { return }
+            cacheError = error.localizedDescription
+        }
     }
 
     private func monitorServerTemperature() async {

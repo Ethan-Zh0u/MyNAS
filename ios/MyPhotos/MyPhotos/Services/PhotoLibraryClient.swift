@@ -45,6 +45,10 @@ enum PhotoLibraryImportError: LocalizedError {
 final class PhotoLibraryClient: NSObject {
     private let imageManager = PHCachingImageManager()
     private var fetchResult: PHFetchResult<PHAsset>?
+    /// Identifiers observed by PhotoKit to have changed without changing image
+    /// or video bytes. They are consumed by the backup coordinator after the
+    /// library view has refreshed its value snapshot.
+    private var metadataOnlyChangedAssetIdentifiers = Set<String>()
     private var isObserving = false
 
     var libraryDidChange: (() -> Void)?
@@ -88,6 +92,15 @@ final class PhotoLibraryClient: NSObject {
     func resetFetch() {
         fetchResult = nil
         imageManager.stopCachingImagesForAllAssets()
+    }
+
+    /// Returns PhotoKit changes for which `assetContentChanged` was explicitly
+    /// false. A missing identifier or a broad/nonincremental notification is
+    /// deliberately not treated as metadata-only: callers must then preserve
+    /// the normal content-version safety check.
+    func consumeMetadataOnlyChangedAssetIdentifiers() -> Set<String> {
+        defer { metadataOnlyChangedAssetIdentifiers.removeAll() }
+        return metadataOnlyChangedAssetIdentifiers
     }
 
     /// Requests one atomic Photos-library change for the selected assets. iOS
@@ -144,22 +157,14 @@ final class PhotoLibraryClient: NSObject {
     /// complete-resource verification before describing a candidate as equal.
     func allAccessibleAssets() async -> [LocalPhotoAsset] {
         guard authorizationState().canReadLibrary else { return [] }
-        let assets = photoAssets()
-        var result: [LocalPhotoAsset] = []
-        result.reserveCapacity(assets.count)
-        for index in 0..<assets.count {
-            guard !Task.isCancelled else { return result }
-            let asset = assets.object(at: index)
-            if let localAsset = self.localAsset(from: asset) {
-                result.append(localAsset)
-            }
-            // This inspection reads only PhotoKit metadata. Yield regularly so
-            // a large library cannot block scrolling or the close button.
-            if index > 0 && index.isMultiple(of: 120) {
-                await Task.yield()
-            }
-        }
-        return result
+        // PHAssetResource metadata is not always prefetched. Reading it from
+        // this @MainActor client makes PhotoKit synchronously fault original
+        // metadata on the UI thread, which becomes visible on large libraries.
+        // Fetch and flatten a separate snapshot on a utility worker; only the
+        // value-only, Sendable LocalPhotoAsset records return to the UI actor.
+        return await Task.detached(priority: .utility) {
+            Self.fetchAllAccessibleAssetMetadata()
+        }.value
     }
 
     /// Imports an already verified complete original-resource group. PhotoKit
@@ -425,7 +430,10 @@ final class PhotoLibraryClient: NSObject {
         }
     }
 
-    func prepareBackupAsset(_ localAsset: LocalPhotoAsset) async throws -> PreparedPhotoAsset {
+    func prepareBackupAsset(
+        _ localAsset: LocalPhotoAsset,
+        allowsNetworkAccess: Bool = true
+    ) async throws -> PreparedPhotoAsset {
         guard let asset = photoAsset(localAsset.localIdentifier) else {
             throw PhotoBackupPreparationError.assetUnavailable
         }
@@ -456,7 +464,11 @@ final class PhotoLibraryClient: NSObject {
                     String(format: "%03d-%@", index, originalFilename),
                     isDirectory: false
                 )
-                try await export(resource: resource, to: fileURL)
+                try await export(
+                    resource: resource,
+                    to: fileURL,
+                    allowsNetworkAccess: allowsNetworkAccess
+                )
                 let values = try await Task.detached(priority: .utility) {
                     let size = try FileManager.default.attributesOfItem(
                         atPath: fileURL.path
@@ -520,11 +532,63 @@ final class PhotoLibraryClient: NSObject {
         return result
     }
 
+    /// Records only a narrow, PhotoKit-proven subset of changes. We retain the
+    /// pre-change objects from the cached fetch result because PhotoKit's
+    /// object-level detail is defined relative to the object it previously
+    /// handed us. If it cannot provide an incremental diff, no identifier is
+    /// accepted as metadata-only and the coordinator will fail closed.
+    private func recordMetadataOnlyChanges(from change: PHChange) {
+        guard let previousFetchResult = fetchResult,
+              let fetchDetails = change.changeDetails(for: previousFetchResult),
+              fetchDetails.hasIncrementalChanges else {
+            return
+        }
+
+        var previousAssetsByIdentifier: [String: PHAsset] = [:]
+        previousAssetsByIdentifier.reserveCapacity(previousFetchResult.count)
+        previousFetchResult.enumerateObjects { asset, _, _ in
+            previousAssetsByIdentifier[asset.localIdentifier] = asset
+        }
+
+        for changedAsset in fetchDetails.changedObjects {
+            guard let previousAsset = previousAssetsByIdentifier[changedAsset.localIdentifier],
+                  let objectDetails = change.changeDetails(for: previousAsset),
+                  !objectDetails.objectWasDeleted,
+                  objectDetails.objectAfterChanges != nil,
+                  !objectDetails.assetContentChanged else {
+                continue
+            }
+            metadataOnlyChangedAssetIdentifiers.insert(changedAsset.localIdentifier)
+        }
+    }
+
     private func photoAsset(_ localIdentifier: String) -> PHAsset? {
         PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
     }
 
     private func localAsset(from asset: PHAsset) -> LocalPhotoAsset? {
+        Self.localAssetValue(from: asset)
+    }
+
+    private nonisolated static func fetchAllAccessibleAssetMetadata() -> [LocalPhotoAsset] {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.includeHiddenAssets = false
+        options.includeAllBurstAssets = false
+        let assets = PHAsset.fetchAssets(with: options)
+
+        var result: [LocalPhotoAsset] = []
+        result.reserveCapacity(assets.count)
+        for index in 0..<assets.count {
+            guard !Task.isCancelled else { return result }
+            if let localAsset = localAssetValue(from: assets.object(at: index)) {
+                result.append(localAsset)
+            }
+        }
+        return result
+    }
+
+    private nonisolated static func localAssetValue(from asset: PHAsset) -> LocalPhotoAsset? {
         let mediaKind: LocalMediaKind
         switch asset.mediaType {
         case .image:
@@ -548,7 +612,7 @@ final class PhotoLibraryClient: NSObject {
 
     /// PhotoKit has no `PHAssetMediaSubtype` dedicated to RAW. Inspecting the
     /// original resource metadata identifies ProRAW/DNG without decoding it.
-    private func isRAWAsset(_ asset: PHAsset) -> Bool {
+    private nonisolated static func isRAWAsset(_ asset: PHAsset) -> Bool {
         let rawFilenameExtensions: Set<String> = [
             "3fr", "arw", "cr2", "cr3", "dng", "erf", "fff", "iiq",
             "kdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "pef",
@@ -579,10 +643,16 @@ final class PhotoLibraryClient: NSObject {
         return options
     }
 
-    private func export(resource: PHAssetResource, to fileURL: URL) async throws {
+    private func export(
+        resource: PHAssetResource,
+        to fileURL: URL,
+        allowsNetworkAccess: Bool
+    ) async throws {
         let options = PHAssetResourceRequestOptions()
-        // Manual backup is an explicit request for originals, so iCloud downloads are allowed.
-        options.isNetworkAccessAllowed = true
+        // Manual backup and an explicitly opened detail may read an iCloud
+        // original. The automatic duplicate-repair sweep passes false so it
+        // never creates an unexpected background iCloud transfer.
+        options.isNetworkAccessAllowed = allowsNetworkAccess
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             PHAssetResourceManager.default().writeData(
                 for: resource,
@@ -691,6 +761,7 @@ final class PhotoLibraryClient: NSObject {
 extension PhotoLibraryClient: PHPhotoLibraryChangeObserver {
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
         Task { @MainActor [weak self] in
+            self?.recordMetadataOnlyChanges(from: changeInstance)
             self?.resetFetch()
             self?.libraryDidChange?()
         }

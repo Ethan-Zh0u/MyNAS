@@ -85,6 +85,75 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
         XCTAssertEqual(try persistence.load(), [restoredJob])
     }
 
+    func testMetadataOnlyLibraryChangeKeepsCompletedProofAndDeletionVersion() throws {
+        let account = connectedAccount()
+        let queueURL = temporaryRoot.appendingPathComponent("metadata-change-jobs.json", isDirectory: false)
+        let policyURL = temporaryRoot.appendingPathComponent("metadata-change-policies.json", isDirectory: false)
+        let persistence = PhotoBackupPersistenceStore(explicitURL: queueURL)
+        let sourceDate = Date(timeIntervalSince1970: 1_700_000_100)
+        let favouriteDate = sourceDate.addingTimeInterval(60)
+        let completedJob = PhotoBackupJob(
+            id: UUID(),
+            accountID: account.accountID,
+            localIdentifier: "metadata-only-local-photo",
+            mediaKind: .photo,
+            creationDate: Date(timeIntervalSince1970: 1_700_000_000),
+            sourceModificationDate: sourceDate,
+            status: .completed,
+            totalBytes: 2_048,
+            uploadedBytes: 2_048,
+            resourceCount: 1,
+            assetID: "remote-metadata-only",
+            sourceState: .committed,
+            derivativeState: .ready,
+            origin: .manual,
+            message: "原件和浏览预览均已就绪",
+            failure: nil,
+            updatedAt: sourceDate
+        )
+        try persistence.save([completedJob])
+        let defaultsSuite = "MyPhotosTests.metadata-only-change.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { userDefaults.removePersistentDomain(forName: defaultsSuite) }
+
+        let coordinator = PhotoBackupCoordinator(
+            persistence: persistence,
+            automationPersistence: PhotoBackupAutomationPolicyStore(explicitURL: policyURL),
+            userDefaults: userDefaults
+        )
+        let favouriteAsset = LocalPhotoAsset(
+            localIdentifier: completedJob.localIdentifier,
+            creationDate: completedJob.creationDate,
+            modificationDate: favouriteDate,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 1_200,
+            pixelHeight: 900,
+            duration: 0,
+            isFavorite: true
+        )
+
+        coordinator.reconcileMetadataOnlyLibraryChanges(
+            assetIdentifiers: [favouriteAsset.localIdentifier],
+            assets: [favouriteAsset],
+            accountID: account.accountID
+        )
+
+        let updated = try XCTUnwrap(coordinator.jobs(for: account.accountID).first)
+        XCTAssertEqual(updated.status, .completed)
+        XCTAssertEqual(updated.assetID, completedJob.assetID)
+        XCTAssertEqual(updated.sourceModificationDate, sourceDate)
+        XCTAssertEqual(updated.lastKnownLocalModificationDate, favouriteDate)
+        XCTAssertTrue(updated.matchesCurrentLocalAsset(favouriteAsset))
+        XCTAssertTrue(coordinator.hasCurrentVerifiedBackup(for: favouriteAsset, accountID: account.accountID))
+        XCTAssertEqual(coordinator.pendingCount(for: [favouriteAsset], accountID: account.accountID), 0)
+        XCTAssertEqual(
+            coordinator.deletionCandidates(for: [favouriteAsset], accountID: account.accountID).first?.sourceModificationDate,
+            PhotoBackupSourceVersion.string(from: sourceDate)
+        )
+        XCTAssertEqual(try persistence.load(), [updated])
+    }
+
     func testRemoteOnlyDeletionKeepsLocalPhotoButRequiresExplicitManualRebackup() throws {
         let account = connectedAccount()
         let queueURL = temporaryRoot.appendingPathComponent("remote-delete-jobs.json", isDirectory: false)
@@ -417,6 +486,8 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
                 )
             ]
         )
+        record.uploadSessionID = "progress-session"
+        record.transition(to: .sessionCreated)
         try record.registerPendingSystemTask(
             PhotoBackupBackgroundTransferTask(
                 taskIdentifier: 44,
@@ -1042,7 +1113,7 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
             duration: 1,
             isFavorite: false
         )
-        return try PhotoBackupBackgroundTransferRecord(
+        var record = try PhotoBackupBackgroundTransferRecord(
             account: account,
             localAsset: localAsset,
             fingerprint: String(repeating: "a", count: 64),
@@ -1062,6 +1133,9 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
                 )
             ]
         )
+        record.uploadSessionID = "session-\(localIdentifier)"
+        record.transition(to: .sessionCreated)
+        return record
     }
 
     private func backgroundPartTask(

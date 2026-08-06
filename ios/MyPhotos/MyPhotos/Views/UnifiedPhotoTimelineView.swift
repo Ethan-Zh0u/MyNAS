@@ -11,9 +11,9 @@ struct UnifiedPhotoTimelineView: View {
     let columns: [GridItem]
     let thumbnailTargetSize: CGSize
     @State private var presentedRemoteAsset: ServerPhotoAsset?
-    /// The visible local grid is paged, but duplicate prevention must also see
-    /// older Photos items. This reads metadata only; resource export starts
-    /// solely after the user explicitly chooses verification in remote detail.
+    /// The visible local grid is paged, but automatic duplicate repair must
+    /// also see older Photos items. This first reads metadata only; exact
+    /// candidate resource groups are then verified serially in the background.
     @State private var verificationLocalAssets: [LocalPhotoAsset] = []
 
     private var localAssetsForVerification: [LocalPhotoAsset] {
@@ -82,6 +82,20 @@ struct UnifiedPhotoTimelineView: View {
         }
         .task(id: account.accountID) {
             verificationLocalAssets = await localClient.allAccessibleAssets()
+            backupCoordinator.reconcileVerifiedRemoteCopies(
+                remoteAssets: viewModel.currentRemoteAssets,
+                localAssets: verificationLocalAssets,
+                account: account,
+                client: localClient
+            )
+        }
+        .onChange(of: viewModel.currentRemoteAssets) { _, _ in
+            backupCoordinator.reconcileVerifiedRemoteCopies(
+                remoteAssets: viewModel.currentRemoteAssets,
+                localAssets: localAssetsForVerification,
+                account: account,
+                client: localClient
+            )
         }
     }
 

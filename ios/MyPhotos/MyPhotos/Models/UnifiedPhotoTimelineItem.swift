@@ -101,7 +101,7 @@ struct UnifiedPhotoTimelineItem: Identifiable, Sendable {
 
         let currentLocalRecords = localAssets.map { localAsset -> CurrentLocalRecord in
             let job = currentJobsByLocalIdentifier[localAsset.localIdentifier]
-            let isCurrentSource = job?.sourceModificationDate == localAsset.modificationDate
+            let isCurrentSource = job?.matchesCurrentLocalAsset(localAsset) == true
             let currentJob = isCurrentSource ? job : nil
             let remoteAsset = currentJob?.assetID.flatMap { remoteByID[$0] }
             return CurrentLocalRecord(

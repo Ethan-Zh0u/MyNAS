@@ -69,6 +69,25 @@ final class PhotoBackupCoordinator: ObservableObject {
     private var automaticRequests: [String: AutomaticBackupRequest] = [:]
     private var isAppInForeground = false
     private var activeAutomaticAccountID: String?
+    private var remoteCopyReconciliationTask: Task<Void, Never>?
+    private var activeRemoteCopyReconciliationAccountID: String?
+    private var pendingRemoteCopyReconciliation: RemoteCopyReconciliationRequest?
+    private var checkedRemoteCopyPairs: Set<RemoteCopyVerificationPair> = []
+
+    private struct RemoteCopyReconciliationRequest {
+        let remoteAssets: [ServerPhotoAsset]
+        let localAssets: [LocalPhotoAsset]
+        let account: AccountContext
+        let client: PhotoLibraryClient
+    }
+
+    private struct RemoteCopyVerificationPair: Hashable {
+        let accountID: String
+        let remoteAssetID: String
+        let remoteVersion: String
+        let localIdentifier: String
+        let localModificationDate: Date?
+    }
 
     /// Keeps only the local snapshot needed to reconcile previously verified
     /// mappings after an account becomes available. It is deliberately not an
@@ -172,7 +191,7 @@ final class PhotoBackupCoordinator: ObservableObject {
         )
         let currentJobs = assets.compactMap { asset -> PhotoBackupJob? in
             guard let job = jobsByIdentifier[asset.localIdentifier],
-                  job.sourceModificationDate == asset.modificationDate else {
+                  job.matchesCurrentLocalAsset(asset) else {
                 return nil
             }
             return job
@@ -239,7 +258,7 @@ final class PhotoBackupCoordinator: ObservableObject {
         return assets.reduce(into: 0) { count, asset in
             guard let job = jobsByIdentifier[asset.localIdentifier],
                   job.status == .completed,
-                  job.sourceModificationDate == asset.modificationDate else {
+                  job.matchesCurrentLocalAsset(asset) else {
                 count += 1
                 return
             }
@@ -335,7 +354,7 @@ final class PhotoBackupCoordinator: ObservableObject {
         }
         return job.status == .completed
             && job.sourceState == .committed
-            && job.sourceModificationDate == asset.modificationDate
+            && job.matchesCurrentLocalAsset(asset)
             && job.assetID?.isEmpty == false
     }
 
@@ -352,17 +371,17 @@ final class PhotoBackupCoordinator: ObservableObject {
             }),
             job.status == .completed,
             job.sourceState == .committed,
-            job.sourceModificationDate == asset.modificationDate,
+            job.matchesCurrentLocalAsset(asset),
             let assetID = job.assetID,
             !assetID.isEmpty,
-            let modificationDate = asset.modificationDate else {
+            let sourceModificationDate = job.sourceModificationDate else {
                 return nil
             }
             return PhotoBackupDeletionCandidate(
                 assetID: assetID,
                 deviceID: deviceID,
                 localIdentifier: asset.localIdentifier,
-                sourceModificationDate: PhotoBackupSourceVersion.string(from: modificationDate)
+                sourceModificationDate: PhotoBackupSourceVersion.string(from: sourceModificationDate)
             )
         }
     }
@@ -427,6 +446,53 @@ final class PhotoBackupCoordinator: ObservableObject {
         if recoveredCount > 0 {
             headline = "已从 MyNAS 验证记录恢复 \(recoveredCount) 项备份状态"
         }
+    }
+
+    /// Accepts a PhotoKit revision only when its own change detail proved that
+    /// image/video bytes did not change. This keeps a committed MyNAS resource
+    /// group linked across favourite, album or other metadata edits while the
+    /// stored `sourceModificationDate` remains the server-side deletion proof.
+    /// Any identifier omitted from this set stays on the existing fail-closed
+    /// path and must be backed up again when its modification date differs.
+    func reconcileMetadataOnlyLibraryChanges(
+        assetIdentifiers: Set<String>,
+        assets: [LocalPhotoAsset],
+        accountID: String,
+        client: PhotoLibraryClient? = nil
+    ) {
+        guard !assetIdentifiers.isEmpty else { return }
+        var assetsByIdentifier = Dictionary(
+            uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) }
+        )
+        // The timeline is paged, so a changed item can sit outside the loaded
+        // grid slice. Resolve only the PhotoKit-proven identifiers rather than
+        // forcing another full-library metadata fetch on the UI actor.
+        for identifier in assetIdentifiers {
+            if assetsByIdentifier[identifier] == nil,
+               let asset = client?.accessibleAsset(localIdentifier: identifier) {
+                assetsByIdentifier[identifier] = asset
+            }
+        }
+        var changed = false
+
+        for index in jobs.indices where
+            jobs[index].accountID == accountID &&
+                assetIdentifiers.contains(jobs[index].localIdentifier) {
+            guard let asset = assetsByIdentifier[jobs[index].localIdentifier],
+                  jobs[index].status == .completed,
+                  jobs[index].sourceState == .committed,
+                  jobs[index].assetID?.isEmpty == false,
+                  !jobs[index].matchesCurrentLocalAsset(asset) else {
+                continue
+            }
+            jobs[index].lastKnownLocalModificationDate = asset.modificationDate
+            jobs[index].updatedAt = Date()
+            changed = true
+        }
+
+        guard changed else { return }
+        persist()
+        refreshHeadline(accountID: accountID)
     }
 
     func startManualBackup(
@@ -512,7 +578,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                 job.accountID == account.accountID
                     && job.localIdentifier == localAsset.localIdentifier
                     && job.status == .completed
-                    && job.sourceModificationDate == localAsset.modificationDate
+                    && job.matchesCurrentLocalAsset(localAsset)
                     && job.assetID == normalizedRemoteID
                     && job.sourceState == .committed
             })
@@ -531,6 +597,181 @@ final class PhotoBackupCoordinator: ObservableObject {
             intent: .manual
         )
         return .started
+    }
+
+    /// Repairs historical physical duplicates without requiring the user to
+    /// open every MyNAS item. A remote item is eligible only when this device
+    /// already has one current, server-committed mapping for it; that verified
+    /// mapping is the anchor that makes this a narrow duplicate-repair pass.
+    /// Every additional candidate still has to match every resource role,
+    /// byte count, and SHA-256 value before it is queued for association.
+    func reconcileVerifiedRemoteCopies(
+        remoteAssets: [ServerPhotoAsset],
+        localAssets: [LocalPhotoAsset],
+        account: AccountContext,
+        client: PhotoLibraryClient
+    ) {
+        guard !account.isLocalOnly,
+              account.selectedVolumeID != nil,
+              !remoteAssets.isEmpty,
+              !localAssets.isEmpty else {
+            return
+        }
+
+        let request = RemoteCopyReconciliationRequest(
+            remoteAssets: remoteAssets,
+            localAssets: localAssets,
+            account: account,
+            client: client
+        )
+        if remoteCopyReconciliationTask != nil {
+            if activeRemoteCopyReconciliationAccountID == account.accountID {
+                pendingRemoteCopyReconciliation = request
+                return
+            }
+            remoteCopyReconciliationTask?.cancel()
+            remoteCopyReconciliationTask = nil
+        }
+        startRemoteCopyReconciliation(request)
+    }
+
+    private func startRemoteCopyReconciliation(
+        _ request: RemoteCopyReconciliationRequest
+    ) {
+        activeRemoteCopyReconciliationAccountID = request.account.accountID
+        remoteCopyReconciliationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performVerifiedRemoteCopyReconciliation(
+                remoteAssets: request.remoteAssets,
+                localAssets: request.localAssets,
+                account: request.account,
+                client: request.client
+            )
+            guard !Task.isCancelled else { return }
+            self.remoteCopyReconciliationTask = nil
+            self.activeRemoteCopyReconciliationAccountID = nil
+            if let pending = self.pendingRemoteCopyReconciliation {
+                self.pendingRemoteCopyReconciliation = nil
+                self.startRemoteCopyReconciliation(pending)
+            }
+        }
+    }
+
+    private func performVerifiedRemoteCopyReconciliation(
+        remoteAssets: [ServerPhotoAsset],
+        localAssets: [LocalPhotoAsset],
+        account: AccountContext,
+        client: PhotoLibraryClient
+    ) async {
+        let localAssetsByID = Dictionary(
+            uniqueKeysWithValues: localAssets.map { ($0.localIdentifier, $0) }
+        )
+        let anchoredRemoteIDs = Set(jobs.compactMap { job -> String? in
+            guard job.accountID == account.accountID,
+                  job.status == .completed,
+                  job.sourceState == .committed,
+                  let remoteAssetID = job.assetID,
+                  let localAsset = localAssetsByID[job.localIdentifier],
+                  job.matchesCurrentLocalAsset(localAsset) else {
+                return nil
+            }
+            return remoteAssetID
+        })
+        let anchoredRemoteAssets = remoteAssets.filter {
+            anchoredRemoteIDs.contains($0.id)
+        }
+        guard !anchoredRemoteAssets.isEmpty else { return }
+
+        var matchesByRemoteID: [String: [LocalPhotoAsset]] = [:]
+        for localAsset in localAssets {
+            guard !Task.isCancelled else { return }
+            while (isRunning || mappingRecoveryTasks[account.accountID] != nil),
+                  !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard !Task.isCancelled else { return }
+            let uncheckedRemotes = anchoredRemoteAssets.filter { remoteAsset in
+                guard RemotePhotoLocalCopyVerification.isCandidate(
+                    localAsset,
+                    for: remoteAsset
+                ) else {
+                    return false
+                }
+                let isAlreadyAssociated = jobs.contains { job in
+                    job.accountID == account.accountID
+                        && job.localIdentifier == localAsset.localIdentifier
+                        && job.status == .completed
+                        && job.sourceState == .committed
+                        && job.matchesCurrentLocalAsset(localAsset)
+                        && job.assetID == remoteAsset.id
+                }
+                guard !isAlreadyAssociated else { return false }
+                return !checkedRemoteCopyPairs.contains(
+                    RemoteCopyVerificationPair(
+                        accountID: account.accountID,
+                        remoteAssetID: remoteAsset.id,
+                        remoteVersion: remoteAsset.version,
+                        localIdentifier: localAsset.localIdentifier,
+                        localModificationDate: localAsset.modificationDate
+                    )
+                )
+            }
+            guard !uncheckedRemotes.isEmpty else { continue }
+
+            do {
+                let prepared = try await client.prepareBackupAsset(
+                    localAsset,
+                    allowsNetworkAccess: false
+                )
+                defer { prepared.removeTemporaryFiles() }
+                guard !Task.isCancelled else { return }
+                for remoteAsset in uncheckedRemotes {
+                    let pair = RemoteCopyVerificationPair(
+                        accountID: account.accountID,
+                        remoteAssetID: remoteAsset.id,
+                        remoteVersion: remoteAsset.version,
+                        localIdentifier: localAsset.localIdentifier,
+                        localModificationDate: localAsset.modificationDate
+                    )
+                    checkedRemoteCopyPairs.insert(pair)
+                    guard RemotePhotoLocalCopyVerification.hasSameCompleteResourceGroup(
+                        localResources: prepared.resources,
+                        remoteResources: remoteAsset.resources
+                    ) else {
+                        continue
+                    }
+                    matchesByRemoteID[remoteAsset.id, default: []].append(localAsset)
+                }
+            } catch {
+                // An iCloud-only or temporarily unavailable original remains
+                // unchecked so a later foreground reconciliation can retry it.
+                continue
+            }
+        }
+
+        for remoteAsset in anchoredRemoteAssets {
+            guard !Task.isCancelled,
+                  let matches = matchesByRemoteID[remoteAsset.id],
+                  !matches.isEmpty else {
+                continue
+            }
+            while (isRunning || mappingRecoveryTasks[account.accountID] != nil),
+                  !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard !Task.isCancelled else { return }
+            let result = registerVerifiedLocalCopies(
+                matches,
+                expectedRemoteAssetID: remoteAsset.id,
+                account: account,
+                client: client
+            )
+            if case .started = result {
+                while isRunning, !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+        }
     }
 
     func resumeInterruptedBackupIfNeeded(
@@ -565,8 +806,10 @@ final class PhotoBackupCoordinator: ObservableObject {
         for index in jobs.indices where
             jobs[index].accountID == account.accountID && jobs[index].status == .failed {
             guard let asset = assetsByID[jobs[index].localIdentifier] else { continue }
-            if jobs[index].sourceModificationDate != asset.modificationDate {
+            if jobs[index].failure?.kind == .remoteDeleted ||
+                !jobs[index].matchesCurrentLocalAsset(asset) {
                 jobs[index].sourceModificationDate = asset.modificationDate
+                jobs[index].lastKnownLocalModificationDate = asset.modificationDate
                 jobs[index].uploadedBytes = 0
                 jobs[index].totalBytes = 0
                 jobs[index].resourceCount = 0
@@ -838,6 +1081,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                 guard !jobIsAlreadyRecovered else { continue }
 
                 jobs[index].sourceModificationDate = asset.modificationDate
+                jobs[index].lastKnownLocalModificationDate = asset.modificationDate
                 jobs[index].status = .completed
                 jobs[index].totalBytes = max(0, mapping.sourceBytes)
                 jobs[index].uploadedBytes = max(0, mapping.sourceBytes)
@@ -857,6 +1101,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                         mediaKind: asset.mediaKind,
                         creationDate: asset.creationDate,
                         sourceModificationDate: asset.modificationDate,
+                        lastKnownLocalModificationDate: asset.modificationDate,
                         status: .completed,
                         totalBytes: max(0, mapping.sourceBytes),
                         uploadedBytes: max(0, mapping.sourceBytes),
@@ -893,7 +1138,7 @@ final class PhotoBackupCoordinator: ObservableObject {
             if let index = jobs.firstIndex(where: {
                 $0.accountID == accountID && $0.localIdentifier == asset.localIdentifier
             }) {
-                let sourceChanged = jobs[index].sourceModificationDate != asset.modificationDate
+                let sourceChanged = !jobs[index].matchesCurrentLocalAsset(asset)
                 if jobs[index].status == .completed, !sourceChanged {
                     continue
                 }
@@ -909,6 +1154,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                     continue
                 }
                 jobs[index].sourceModificationDate = asset.modificationDate
+                jobs[index].lastKnownLocalModificationDate = asset.modificationDate
                 jobs[index].status = .waiting
                 jobs[index].uploadedBytes = 0
                 jobs[index].totalBytes = 0
@@ -931,6 +1177,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                         mediaKind: asset.mediaKind,
                         creationDate: asset.creationDate,
                         sourceModificationDate: asset.modificationDate,
+                        lastKnownLocalModificationDate: asset.modificationDate,
                         status: .waiting,
                         totalBytes: 0,
                         uploadedBytes: 0,
@@ -972,6 +1219,7 @@ final class PhotoBackupCoordinator: ObservableObject {
             $0.accountID == accountID && $0.localIdentifier == asset.localIdentifier
         }) {
             jobs[index].sourceModificationDate = asset.modificationDate
+            jobs[index].lastKnownLocalModificationDate = asset.modificationDate
             jobs[index].status = .waiting
             jobs[index].uploadedBytes = 0
             jobs[index].totalBytes = 0
@@ -992,6 +1240,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                     mediaKind: asset.mediaKind,
                     creationDate: asset.creationDate,
                     sourceModificationDate: asset.modificationDate,
+                    lastKnownLocalModificationDate: asset.modificationDate,
                     status: .waiting,
                     totalBytes: 0,
                     uploadedBytes: 0,
@@ -1182,12 +1431,12 @@ final class PhotoBackupCoordinator: ObservableObject {
         for record in backgroundTransferEngine.completedTransfers(for: account) {
             guard let outcome = record.outcome,
                   let asset = assetsByIdentifier[record.localIdentifier],
-                  asset.modificationDate == record.sourceModificationDate,
                   let jobIndex = jobs.firstIndex(where: {
                       $0.accountID == account.accountID
                           && $0.localIdentifier == record.localIdentifier
                           && $0.sourceModificationDate == record.sourceModificationDate
-                  }) else {
+                  }),
+                  jobs[jobIndex].matchesCurrentLocalAsset(asset) else {
                 continue
             }
             jobs[jobIndex].status = .completed
@@ -1240,19 +1489,20 @@ final class PhotoBackupCoordinator: ObservableObject {
         account: AccountContext,
         assets: [LocalPhotoAsset]
     ) {
-        let availableSources = Set(assets.map {
-            PhotoBackupBackgroundTransferSourceKey(
-                localIdentifier: $0.localIdentifier,
-                sourceModificationDate: $0.modificationDate
-            )
+        let assetsByIdentifier = Dictionary(uniqueKeysWithValues: assets.map {
+            ($0.localIdentifier, $0)
         })
         let next: [UUID: PhotoBackupBackgroundTransferProgress] = Dictionary(
             backgroundTransferEngine.activeTransferProgress(for: account).compactMap { progress in
-                let key = PhotoBackupBackgroundTransferSourceKey(
-                    localIdentifier: progress.localIdentifier,
-                    sourceModificationDate: progress.sourceModificationDate
-                )
-                guard availableSources.contains(key) else { return nil }
+                guard let asset = assetsByIdentifier[progress.localIdentifier],
+                      jobs.contains(where: { job in
+                          job.accountID == account.accountID
+                              && job.localIdentifier == progress.localIdentifier
+                              && job.sourceModificationDate == progress.sourceModificationDate
+                              && job.matchesCurrentLocalAsset(asset)
+                      }) else {
+                    return nil
+                }
                 return (progress.recordID, progress)
             },
             uniquingKeysWith: { _, latest in latest }
