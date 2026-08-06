@@ -226,7 +226,7 @@
 
 **I2 发布完成（2026-08-06）：** 提交 `bf75153` 已作为 `v0.9.1` 原子部署到树莓派 release `20260806T042351Z`，systemd active、health/capabilities 均精确回读 `0.9.1`，并保留 `photoDelete=true`、`backgroundTransfers=true`；同一提交已签名安装并在 iPhone 16 Pro 验收，annotated tag `v0.9.1` 与公开 GitHub Release 已发布。因此 I2 完成；只有用户明确进入后，才开始 I3 Vision OCR 的独立设计、实现和验收。
 
-**I3 候选（2026-08-06，待发布）：** `v0.9.2` 已统一写入 `VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与 README 的候选说明。早期候选的详情返回结果丢失已修复，且已完成树莓派部署/readback 与签名安装，但它们仍把 OCR 搜索放在“人物”栏，不符合照片主页统一搜索与人物栏单一职责的最新产品约束，均不得发布。下一候选须在“照片”主页的单一查询框合并 I1 和 I3 结果、按 asset ID 去重并以三列纯缩略图直达详情，同时将人物栏收敛到人物识别及对应照片；随后重新跑完整回归、树莓派部署/readback 和 iPhone 验收。完成前不得进入 I4 或创建 GitHub Release。
+**I3 候选（2026-08-06，待发布）：** `v0.9.2` 已统一写入 `VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与 README。早期候选的详情返回结果丢失已修复，但它们仍把 OCR 搜索放在“人物”栏，不符合照片主页统一搜索与人物栏单一职责的最新产品约束，均不得发布。替代提交 `f8352d2` 在“照片”主页的单一查询框合并 I1 和 I3 结果、按 asset ID 去重并以三列纯缩略图直达详情，同时将人物栏收敛到人物识别及对应照片；完整 59 项模拟器回归通过。该提交已部署到树莓派 `20260806T075201Z`，独立反读 systemd active、health/capabilities 均为 `0.9.2` 且保留 `photoDelete=true`、`backgroundTransfers=true`；签名 App 已安装并启动 iPhone 16 Pro。现在只待用户真机验收；完成前不得进入 I4 或创建 GitHub Release。
 
 ### I1 发布前历史验收记录
 

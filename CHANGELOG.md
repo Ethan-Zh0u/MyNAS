@@ -19,7 +19,7 @@
 ### 验证
 
 - Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 59 项通过，其中新增回归覆盖 I1/I3 交集去重、顺序与媒体类型；既有 7 项 I3 回归继续覆盖双重 opt-in、最小持久化字段、增量/不可本机读取项失效、账号隔离、父许可撤回、损坏/重复索引失败关闭与详情返回后的搜索状态保持。
-- 这是取代此前“人物页 OCR 搜索”候选的 `v0.9.2` 新候选；必须重新使用同一候选完成树莓派部署/readback、iPhone 16 Pro 验收和 GitHub annotated tag/Release，I3 仍不得标记为完成或进入 I4。
+- 取代此前“人物页 OCR 搜索”候选的提交 `f8352d2` 已部署为树莓派 release `20260806T075201Z`；独立反读为 systemd active、health/capabilities `0.9.2`、`photoDelete=true`、`backgroundTransfers=true`，其签名 Debug App 已安装并启动 iPhone 16 Pro。尚待用户真机验收，随后才可创建同一提交的 GitHub annotated tag/Release；I3 仍不得标记为完成或进入 I4。
 
 ## [0.9.1] - 2026-08-06
 
