@@ -92,9 +92,9 @@ nonisolated enum CacheDirectoryKind: String, CaseIterable, Hashable, Sendable {
     case livePhotos = "live-photo"
     case metadata
     case searchIndex = "search-index"
-    /// Consent-bound queue metadata for a future on-device pixel-analysis
-    /// worker. It deliberately contains no rendered image, video, thumbnail,
-    /// OCR, embedding or model result.
+    /// Consent-bound local analysis state. I2 stores only queue metadata here;
+    /// later explicitly enabled stages can store account-scoped derived data
+    /// here so revoking the parent pixel-analysis consent removes it all.
     case analysisQueue = "analysis-queue"
     case temporaryDownloads = "temporary-downloads"
 }

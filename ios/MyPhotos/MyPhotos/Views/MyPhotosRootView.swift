@@ -130,7 +130,10 @@ struct MyPhotosRootView: View {
                 systemImage: MainSection.people.symbol,
                 value: MainSection.people
             ) {
-                LocalAnalysisQueueView(photoClient: library.imageClient)
+                LocalAnalysisQueueView(
+                    photoClient: library.imageClient,
+                    backupCoordinator: backupCoordinator
+                )
             }
 
             Tab(
@@ -162,13 +165,19 @@ struct MyPhotosRootView: View {
     }
 }
 
-/// I2 is deliberately a consent and queue screen, not a person-recognition
-/// screen. No Vision/Core ML processor is linked from this view.
+/// The People tab hosts Phase I's explicitly consented local analysis stages.
+/// I3 only adds Vision text recognition; it is not person recognition,
+/// object classification, embedding generation or a MyNAS service request.
 private struct LocalAnalysisQueueView: View {
     @EnvironmentObject private var accountStore: AccountStore
     let photoClient: PhotoLibraryClient
+    @ObservedObject var backupCoordinator: PhotoBackupCoordinator
     @StateObject private var queue = PhotoAnalysisQueueViewModel()
+    @StateObject private var textIndex = PhotoTextIndexViewModel()
     @State private var showsDisableConfirmation = false
+    @State private var showsClearTextIndexConfirmation = false
+    @State private var showsDisableTextIndexConfirmation = false
+    @State private var textQuery = ""
 
     var body: some View {
         NavigationStack {
@@ -180,7 +189,7 @@ private struct LocalAnalysisQueueView: View {
                         Text("I2 只会读取当前 Photos 权限范围内的元数据，以建立待分析项目清单；不会读取照片或视频像素、不会下载 iCloud 原件、不会调用 Vision/Core ML，也不会上传到 MyNAS 或其他服务。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                        Text("明确允许后，许可和队列只属于当前 MyNAS 账号；关闭许可或清理当前账号缓存会删除它们。OCR、物体、人物和语义结果仍未交付。")
+                        Text("明确允许后，许可和队列只属于当前 MyNAS 账号；关闭许可或清理当前账号缓存会删除它们。I3 OCR 仍需单独允许；物体、人物和语义结果仍未交付。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                         Button {
@@ -220,16 +229,129 @@ private struct LocalAnalysisQueueView: View {
 
                     Section("I2 当前边界") {
                         Label("仅保存标识符和源版本", systemImage: "list.bullet.rectangle")
-                        Text("本阶段的队列不会读取、缓存或上传像素，也没有 OCR、物体标签、人物聚类、embedding 或搜索结果。后续每项能力都会单独进入阶段并重新验收。")
+                        Text("I2 的队列本身不会读取、缓存或上传像素。I3 OCR 有独立许可和可删除文字索引；物体标签、人物聚类、embedding 和语义结果仍未交付。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                    }
+
+                    if !textIndex.status.isEnabled {
+                        Section("阶段 I · I3 本地 OCR 文字索引") {
+                            Label("默认关闭", systemImage: "text.viewfinder")
+                                .foregroundStyle(.secondary)
+                            Text("这是独立于 I2 的文字保留许可。明确允许后，只对本机可取得的静态图片调用 Apple Vision；不会读取视频、不会下载 iCloud 原件、不会上传到 MyNAS 或其他服务。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Text("识别出的文字会仅保存在当前 MyNAS 账号的受保护本地索引中，可随时清空或关闭删除。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Button {
+                                Task { await enableAndIndexText() }
+                            } label: {
+                                Label("允许本地 OCR 并建立文字索引", systemImage: "text.badge.checkmark")
+                            }
+                            .disabled(queue.isWorking || textIndex.isWorking)
+                        }
+                    } else {
+                        Section("I3 本地 OCR 文字索引") {
+                            LabeledContent("状态", value: "已允许")
+                            LabeledContent("当前账号", value: accountStore.current.displayName)
+                            LabeledContent("已处理静态图片", value: "\(textIndex.status.indexedAssetCount)")
+                            LabeledContent("最近更新", value: lastTextIndexUpdatedText)
+
+                            if textIndex.isWorking {
+                                HStack(spacing: 9) {
+                                    ProgressView()
+                                    Text("正在本机识别图片文字…")
+                                        .foregroundStyle(.secondary)
+                                }
+                            } else {
+                                Button {
+                                    Task { await indexText() }
+                                } label: {
+                                    Label("更新 OCR 文字索引", systemImage: "arrow.clockwise")
+                                }
+                                .disabled(queue.isWorking)
+                            }
+
+                            if let statusMessage = textIndex.statusMessage {
+                                Text(statusMessage)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Section("OCR 文字搜索") {
+                            TextField("搜索已识别的本地文字", text: $textQuery)
+                                .textInputAutocapitalization(.never)
+                                .onChange(of: textQuery) { _, query in
+                                    Task { await textIndex.updateQuery(query, account: accountStore.current) }
+                                }
+
+                            if !textQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                if textIndex.results.isEmpty {
+                                    ContentUnavailableView {
+                                        Label("没有找到文字结果", systemImage: "text.magnifyingglass")
+                                    } description: {
+                                        Text("没有与“\(textQuery)”匹配的已识别本地文字。")
+                                    }
+                                } else {
+                                    ForEach(textIndex.results) { record in
+                                        NavigationLink {
+                                            textSearchResultDestination(for: record)
+                                        } label: {
+                                            textSearchResultRow(for: record)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Section("OCR 索引控制") {
+                            Button(role: .destructive) {
+                                showsClearTextIndexConfirmation = true
+                            } label: {
+                                Label("清空 OCR 文字索引", systemImage: "trash")
+                            }
+                            .disabled(queue.isWorking || textIndex.isWorking || textIndex.status.indexedAssetCount == 0)
+                            .confirmationDialog(
+                                "清空 OCR 文字索引？",
+                                isPresented: $showsClearTextIndexConfirmation,
+                                titleVisibility: .visible
+                            ) {
+                                Button("清空索引", role: .destructive) {
+                                    Task { await textIndex.clear(account: accountStore.current) }
+                                }
+                                Button("取消", role: .cancel) {}
+                            } message: {
+                                Text("只删除当前账号的本地 OCR 文字记录；端侧像素分析许可、系统照片和 MyNAS 原件不会受到影响。")
+                            }
+
+                            Button(role: .destructive) {
+                                showsDisableTextIndexConfirmation = true
+                            } label: {
+                                Label("关闭并删除 OCR 文字索引", systemImage: "text.badge.xmark")
+                            }
+                            .disabled(queue.isWorking || textIndex.isWorking)
+                            .confirmationDialog(
+                                "关闭本地 OCR 文字索引？",
+                                isPresented: $showsDisableTextIndexConfirmation,
+                                titleVisibility: .visible
+                            ) {
+                                Button("关闭并删除", role: .destructive) {
+                                    Task { await textIndex.disableAndDelete(account: accountStore.current) }
+                                }
+                                Button("取消", role: .cancel) {}
+                            } message: {
+                                Text("会删除当前账号的全部本地 OCR 文字记录；I2 的端侧像素分析许可、系统照片和 MyNAS 原件不会受到影响。")
+                            }
+                        }
                     }
 
                     Section("许可控制") {
                         Button(role: .destructive) {
                             showsDisableConfirmation = true
                         } label: {
-                            Label("关闭许可并删除本地队列", systemImage: "hand.raised.slash")
+                            Label("关闭许可并删除本地队列与 OCR 索引", systemImage: "hand.raised.slash")
                         }
                         .disabled(queue.isWorking)
                         .confirmationDialog(
@@ -238,11 +360,14 @@ private struct LocalAnalysisQueueView: View {
                             titleVisibility: .visible
                         ) {
                             Button("关闭并删除", role: .destructive) {
-                                Task { await queue.disableAndDelete(account: accountStore.current) }
+                                Task {
+                                    await queue.disableAndDelete(account: accountStore.current)
+                                    await textIndex.load(account: accountStore.current)
+                                }
                             }
                             Button("取消", role: .cancel) {}
                         } message: {
-                            Text("会撤回当前账号的端侧像素分析许可并删除待分析队列。不会删除系统照片、MyNAS 原件或 I1 本地搜索索引。")
+                            Text("会撤回当前账号的端侧像素分析许可，并删除待分析队列和 OCR 文字索引。不会删除系统照片、MyNAS 原件或 I1 本地搜索索引。")
                         }
                     }
                 }
@@ -250,6 +375,7 @@ private struct LocalAnalysisQueueView: View {
             .navigationTitle("人物")
             .task(id: accountIdentity) {
                 await queue.load(account: accountStore.current)
+                await textIndex.load(account: accountStore.current)
             }
             .alert(
                 "端侧分析队列不可用",
@@ -265,6 +391,20 @@ private struct LocalAnalysisQueueView: View {
             } message: {
                 Text(queue.errorMessage ?? "")
             }
+            .alert(
+                "OCR 文字索引不可用",
+                isPresented: Binding(
+                    get: { textIndex.errorMessage != nil },
+                    set: { if !$0 { textIndex.errorMessage = nil } }
+                )
+            ) {
+                Button("删除不可读 OCR 索引", role: .destructive) {
+                    Task { await textIndex.resetCorruptedIndex(account: accountStore.current) }
+                }
+                Button("取消", role: .cancel) { textIndex.errorMessage = nil }
+            } message: {
+                Text(textIndex.errorMessage ?? "")
+            }
         }
     }
 
@@ -274,6 +414,10 @@ private struct LocalAnalysisQueueView: View {
 
     private var lastPreparedText: String {
         queue.status.lastPreparedAt.map { Self.timestampFormatter.string(from: $0) } ?? "尚未建立"
+    }
+
+    private var lastTextIndexUpdatedText: String {
+        textIndex.status.lastSynchronizedAt.map { Self.timestampFormatter.string(from: $0) } ?? "尚未建立"
     }
 
     private func enableAndPrepareQueue() async {
@@ -288,6 +432,79 @@ private struct LocalAnalysisQueueView: View {
         let assets = await photoClient.allAccessibleAssets()
         guard accountIdentity == "\(account.accountID)|\(account.serverID)|\(account.userID)" else { return }
         await queue.prepare(assets: assets, account: account)
+    }
+
+    private func enableAndIndexText() async {
+        let account = accountStore.current
+        let assets = await photoClient.allAccessibleAssets()
+        guard accountIdentity == "\(account.accountID)|\(account.serverID)|\(account.userID)" else { return }
+        await textIndex.enableAndSynchronize(
+            assets: assets,
+            account: account,
+            photoClient: photoClient
+        )
+    }
+
+    private func indexText() async {
+        let account = accountStore.current
+        let assets = await photoClient.allAccessibleAssets()
+        guard accountIdentity == "\(account.accountID)|\(account.serverID)|\(account.userID)" else { return }
+        await textIndex.synchronize(
+            assets: assets,
+            account: account,
+            photoClient: photoClient
+        )
+    }
+
+    @ViewBuilder
+    private func textSearchResultDestination(for record: PhotoTextIndexRecord) -> some View {
+        if let asset = photoClient.accessibleAsset(localIdentifier: record.assetID) {
+            PhotoDetailView(
+                asset: asset,
+                isBackedUp: backupCoordinator.hasCurrentVerifiedBackup(
+                    for: asset,
+                    accountID: accountStore.current.accountID
+                ),
+                client: photoClient
+            )
+        } else {
+            ContentUnavailableView(
+                "照片已不可访问",
+                systemImage: "photo.badge.exclamationmark",
+                description: Text("它可能已被删除或不再属于当前 Photos 权限范围；更新 OCR 索引后会从结果中移除。")
+            )
+        }
+    }
+
+    private func textSearchResultRow(for record: PhotoTextIndexRecord) -> some View {
+        HStack(spacing: 12) {
+            PhotoThumbnailView(
+                localIdentifier: record.assetID,
+                mediaKind: .photo,
+                targetSize: CGSize(width: 180, height: 180),
+                client: photoClient
+            )
+            .frame(width: 72, height: 72)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("本地 OCR 文字")
+                    .font(.headline)
+                Text(textSnippet(record.recognizedText))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func textSnippet(_ text: String) -> String {
+        let compact = text
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .joined(separator: " ")
+        return compact.isEmpty ? "未识别到可检索文字" : compact
     }
 
     private static let timestampFormatter: DateFormatter = {
@@ -377,7 +594,7 @@ private struct LocalSearchView: View {
 
                     Section("I1 搜索范围") {
                         Label("媒体类型、日期、收藏与尺寸", systemImage: "text.magnifyingglass")
-                        Text("人物、OCR 文字、物体与语义模型将在 I2 接入；人物结果不会自动命名。")
+                        Text("OCR 文字索引在 I3 独立启用；人物、物体与语义模型仍未交付，人物结果不会自动命名。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }

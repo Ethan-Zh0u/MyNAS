@@ -59,7 +59,7 @@ final class PhotoAnalysisQueueViewModel: ObservableObject {
             let disabled = try await self.store.disableAndDelete(for: account)
             guard self.activeAccountIdentity == identity else { return }
             self.status = disabled
-            self.statusMessage = "已撤回当前账号的端侧像素分析许可并删除本地队列。"
+            self.statusMessage = "已撤回当前账号的端侧像素分析许可，并删除本地队列及其依赖数据。"
         }
     }
 
@@ -70,7 +70,7 @@ final class PhotoAnalysisQueueViewModel: ObservableObject {
             guard self.activeAccountIdentity == identity else { return }
             self.status = disabled
             self.errorMessage = nil
-            self.statusMessage = "不可读的端侧分析队列已删除，像素分析仍保持关闭。"
+            self.statusMessage = "不可读的端侧分析数据已删除，像素分析仍保持关闭。"
         }
     }
 

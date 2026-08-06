@@ -52,18 +52,20 @@ actor PhotoAnalysisQueueStore {
         return status(for: snapshot)
     }
 
-    /// Revoking consent removes the only I2 artefact for this account. It
-    /// never reaches into the system photo library or MyNAS storage.
+    /// Revoking consent removes every account-local artefact below this
+    /// consent namespace, including dependent OCR data added by later Phase I
+    /// work. It never reaches into the system photo library or MyNAS storage.
     @discardableResult
     func disableAndDelete(for account: AccountContext) throws -> PhotoAnalysisQueueStatus {
-        try removeQueueFile(for: account)
+        try removeAnalysisArtifacts(for: account)
         return .disabled
     }
 
-    /// Removes unreadable state without trusting any data in it.
+    /// Removes unreadable consent state and every dependent pixel-derived
+    /// artefact without trusting any data in it.
     @discardableResult
     func resetCorruptedQueue(for account: AccountContext) throws -> PhotoAnalysisQueueStatus {
-        try removeQueueFile(for: account)
+        try removeAnalysisArtifacts(for: account)
         return .disabled
     }
 
@@ -203,10 +205,20 @@ actor PhotoAnalysisQueueStore {
         return url
     }
 
-    private func removeQueueFile(for account: AccountContext) throws {
-        guard let url = try existingStorageURL(for: account) else { return }
-        try rejectSymbolicLink(at: url)
-        try fileManager.removeItem(at: url)
+    private func removeAnalysisArtifacts(for account: AccountContext) throws {
+        guard let root = try directories.existingRootDirectory(for: account) else { return }
+        try rejectSymbolicLink(at: root)
+        let directory = root.appendingPathComponent(
+            CacheDirectoryKind.analysisQueue.rawValue,
+            isDirectory: true
+        )
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory) else { return }
+        guard isDirectory.boolValue else {
+            throw PhotoAnalysisQueueError.unsafeStoragePath
+        }
+        try rejectSymbolicLink(at: directory)
+        try fileManager.removeItem(at: directory)
     }
 
     private func rejectSymbolicLink(at url: URL) throws {

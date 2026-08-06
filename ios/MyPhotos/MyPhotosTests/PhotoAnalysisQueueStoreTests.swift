@@ -188,6 +188,12 @@ final class PhotoAnalysisQueueStoreTests: XCTestCase {
         let resetStatus = try await store.resetCorruptedQueue(for: account)
         XCTAssertEqual(resetStatus, .disabled)
 
+        // Reset now removes the whole consent namespace so later pixel-derived
+        // artefacts, such as I3's OCR index, cannot outlive a corrupted or
+        // revoked I2 consent. Recreate the isolated test directory before
+        // writing the next independent corrupt fixture.
+        _ = try provider.directory(for: account, kind: .analysisQueue)
+
         let duplicate = PhotoAnalysisQueueItem(
             assetID: "duplicate",
             sourceVersion: "source-v1",

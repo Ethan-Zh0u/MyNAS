@@ -2,6 +2,23 @@
 
 本项目遵循语义化版本规则，所有可识别的发布版本都记录在这里。
 
+## [0.9.2] - 2026-08-06
+
+### 新增
+
+- I3 新增独立、默认关闭的本地 OCR 文字索引。用户必须先保留 I2 的端侧像素分析许可，再明确允许 OCR；人物页可建立、更新、搜索、清空或关闭删除当前账号的文字索引。
+- 仅对当前 Photos 权限范围内、本机可取得的静态图片调用 Apple Vision；一次只处理一张、渲染上限为 2,048 px。视频和 Live Photo 被排除；iCloud-only 图片保持未索引，不触发原件下载。
+
+### 安全
+
+- OCR 原文仅以 Data Protection 原子 JSON 保存于当前账号的 `AppCache/<server>/<user>/analysis-queue`，绑定 schema、OCR 许可 revision、Vision processor revision 和 `accountID + serverID + userID`。错账号复制、损坏、重复标识和不支持版本均失败关闭。
+- 单独关闭 OCR 只删除文字索引；撤回 I2 父许可、修复不可读父许可或清理当前账号缓存会删除全部 OCR 派生数据。OCR 不上传 MyNAS 或任何中心化服务，也不包含人物、物体、embedding 或语义结果。
+
+### 验证
+
+- Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 57 项通过，其中 6 项 I3 回归覆盖双重 opt-in、最小持久化字段、增量/不可本机读取项失效、账号隔离、父许可撤回和损坏/重复索引失败关闭。
+- 这是 `v0.9.2` 发布候选；树莓派部署/readback、iPhone 16 Pro 验收和 GitHub annotated tag/Release 尚未完成，I3 仍不得标记为完成或进入 I4。
+
 ## [0.9.1] - 2026-08-06
 
 ### 新增
