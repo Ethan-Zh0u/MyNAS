@@ -10,7 +10,7 @@
 
 ### 验证
 
-- Xcode 27 beta 的 iPhone 17 Pro 模拟器已通过远端预览布局回归 4/4；完整 iOS App 编译通过。树莓派同版本部署与 iPhone 16 Pro 真机视觉验收待完成。
+- 干净候选提交 `a70f577f` 在 Xcode 27 beta 的 iPhone 17 Pro 模拟器通过完整 `MyPhotosTests` 76/76、0 失败；后端 `go test ./...`、`go vet`、Linux ARM64 构建，以及 Web 端 23 项测试、TypeScript 检查和生产构建全部通过。该提交已原子部署为树莓派 release `20260811T064616Z`，health/capabilities 精确回读 `0.9.6`、`backgroundTransfers=true` 与 `photoDelete=true`；同一签名 App 已安装并在 iPhone 16 Pro 通过宽幅远端图片白边真机验收。
 
 ## [0.9.5] - 2026-08-11
 

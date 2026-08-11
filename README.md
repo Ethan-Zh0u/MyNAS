@@ -11,14 +11,11 @@ MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和�
 > 从准备设备、连接网线和硬盘，到写入 Raspberry Pi OS、开启 SSH、安装 Tailscale、接入硬盘和打开网页，全部按顺序说明。第一次接触树莓派也可以照着操作。
 
 > [!IMPORTANT]
-> **当前版本：v0.9.3** · [查看 GitHub Release](https://github.com/Ethan-Zh0u/MyNAS/releases/tag/v0.9.3)
+> **当前稳定版：v0.9.6** · [查看 GitHub Release](https://github.com/Ethan-Zh0u/MyNAS/releases/tag/v0.9.6)
 >
-> - **本版修复：**远端预览白边、Tailnet 建连时删除误禁用、相同原件误建远端副本，以及失败重试卡住。
-> - **验收结果：**树莓派 `0.9.3` 在线；iPhone 16 Pro 为 19/19、0 失败；自动化回归 73/73。
-> - **已知问题：**重试后的同一运行期可能短暂沿用旧的本机关联显示；服务端映射正确，重开 App 可恢复，补丁正在处理。
-> - **能力边界：**尚不保证服务重启、账号/卷、真实 iCloud-only 和长队列下的完整后台备份；请勿把 MyNAS 作为重要文件的唯一副本。
+> 远端详情预览、完整资源备份/下载/导出与受限删除均已完成对应真机验收；树莓派与 iPhone 16 Pro 当前使用同一 0.9.6 版本。系统后台上传在服务重启、账号/卷、真实 iCloud-only 与长队列边界仍未完全验收，请勿将 MyNAS 作为重要文件的唯一副本。
 >
-> 完整说明见 [更新日志](CHANGELOG.md) 和 [MyNAS Photos 路线图](docs/myphotos/IMPLEMENTATION_PLAN.md)。
+> 详见 [更新日志](CHANGELOG.md) 和 [MyNAS Photos 路线图](docs/myphotos/IMPLEMENTATION_PLAN.md)。
 
 ## MyNAS 网页地址（重要）
 
