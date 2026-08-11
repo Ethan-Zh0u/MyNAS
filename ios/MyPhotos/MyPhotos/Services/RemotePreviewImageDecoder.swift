@@ -9,6 +9,13 @@ import UIKit
 /// The view therefore starts with the advertised derivative dimensions and
 /// replaces them with the decoded bitmap dimensions as soon as it is ready.
 nonisolated enum RemotePreviewLayout {
+    /// A loading or failed preview needs a stable, tappable surface. Once an
+    /// actual JPEG has been decoded, its own geometry must be the only height
+    /// rule so a wide image is not left inside a tall letterboxed card.
+    static func minimumHeight(hasDecodedImage: Bool) -> CGFloat? {
+        hasDecodedImage ? nil : 180
+    }
+
     static func aspectRatio(
         preferredWidth: Int,
         preferredHeight: Int,

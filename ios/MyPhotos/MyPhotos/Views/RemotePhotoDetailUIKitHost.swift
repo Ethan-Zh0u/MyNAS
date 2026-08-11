@@ -52,6 +52,7 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     private let imageView = UIImageView()
     private let previewContainer = UIView()
     private var previewAspectConstraint: NSLayoutConstraint?
+    private var previewMinimumHeightConstraint: NSLayoutConstraint?
     private var previewAspectRatio: CGFloat = 1
     private let previewButton = UIButton(type: .system)
     private let playbackButton = UIButton(type: .system)
@@ -284,9 +285,14 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         let aspectConstraint = makePreviewAspectConstraint(ratio: previewAspectRatio)
         previewAspectConstraint = aspectConstraint
 
+        let placeholderMinimumHeight = previewContainer.heightAnchor.constraint(
+            greaterThanOrEqualToConstant: RemotePreviewLayout.minimumHeight(hasDecodedImage: false) ?? 0
+        )
+        previewMinimumHeightConstraint = placeholderMinimumHeight
+
         NSLayoutConstraint.activate([
             aspectConstraint,
-            previewContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            placeholderMinimumHeight,
             imageView.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor),
             imageView.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor),
             imageView.topAnchor.constraint(equalTo: previewContainer.topAnchor),
@@ -798,7 +804,7 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
                     imageView.preferredSymbolConfiguration = nil
                     imageView.contentMode = .scaleAspectFit
                     imageView.image = image
-                    updatePreviewAspectRatio(for: image)
+                    lockPreviewToDecodedImage(image)
                 } else {
                     showPreviewPlaceholder(systemName: "exclamationmark.icloud")
                 }
@@ -837,6 +843,17 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     /// The thumbnail decoder may apply orientation transforms that were not
     /// present in the source metadata. Replacing the high-priority ratio keeps
     /// the full preview visible instead of creating a tall white letterbox.
+    private func lockPreviewToDecodedImage(_ image: UIImage) {
+        if RemotePreviewLayout.minimumHeight(hasDecodedImage: true) == nil {
+            previewMinimumHeightConstraint?.isActive = false
+        }
+        updatePreviewAspectRatio(for: image)
+        // With the placeholder-height constraint removed, require the card to
+        // use exactly the decoded JPEG's upright geometry.
+        previewAspectConstraint?.priority = .required
+        view.setNeedsLayout()
+    }
+
     private func updatePreviewAspectRatio(for image: UIImage) {
         let width = Int((image.size.width * image.scale).rounded())
         let height = Int((image.size.height * image.scale).rounded())

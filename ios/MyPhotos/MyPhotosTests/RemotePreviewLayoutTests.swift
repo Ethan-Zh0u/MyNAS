@@ -46,4 +46,9 @@ final class RemotePreviewLayoutTests: XCTestCase {
             accuracy: 0.0001
         )
     }
+
+    func testReservesMinimumHeightOnlyBeforePreviewImageDecodes() {
+        XCTAssertEqual(RemotePreviewLayout.minimumHeight(hasDecodedImage: false), 180)
+        XCTAssertNil(RemotePreviewLayout.minimumHeight(hasDecodedImage: true))
+    }
 }
