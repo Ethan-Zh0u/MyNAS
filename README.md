@@ -11,7 +11,14 @@ MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和�
 > 从准备设备、连接网线和硬盘，到写入 Raspberry Pi OS、开启 SSH、安装 Tailscale、接入硬盘和打开网页，全部按顺序说明。第一次接触树莓派也可以照着操作。
 
 > [!IMPORTANT]
-> 已发布的线上版本为 **v0.9.3**（树莓派 release `20260811T030439Z`，GitHub Release 与 annotated tag 指向真机验收提交 `1c82ec4`）。本版修复远端预览大块空白、删除前 Tailscale health 的建连预算，以及 MyNAS 原件下载到 Photos 后首页出现第二张相同照片的问题。新导入的 PhotoKit identifier 与唯一远端资源组会立即写入持久关联意图；关联请求携带已逐资源证明的目标 asset ID，MyNAS 会在创建任何新 asset 前重新核验 owner、卷、source committed 状态以及完整资源角色、字节数和 SHA-256。传输用 client resource ID、文件名及 `image/png`/`public.png` 等 MIME/UTI 表达不再参与内容唯一性。历史误建的完全相同 asset 会迁移 mapping 并进入可回溯的 superseded 状态，原件文件和资源记录不删除；真正资源不一致仍以 422 失败关闭。本版还修复历史自动等待记录持续占用协调器、导致失败重试无法脱离失败态的问题：自动评估只处理当前 PhotoKit 可访问且源版本匹配的任务，用户重试会先持久化为等待并在当前工作结束后继续。Xcode 27 beta 的完整 iOS 模拟器回归 73/73 与后端回归通过；iPhone 16 Pro 将两个旧完整性失败项目重试到 19/19、0 失败，两条本机记录均收敛到同一已提交且预览就绪的远端 asset。MyNAS Photos 已具备 Tailscale 私有连接、手动原始资源备份、服务端预览、受账号隔离的远程浏览与精确内容关联，以及已真机验收的受限本机删除、MyNAS-only 删除、受校验原件导入/系统分享和账号隔离缓存管理。I1/I2/I3 已分别在默认关闭的许可边界内提供本机元数据、像素分析队列与 OCR 索引；所有照片搜索统一由“照片”主页的一个搜索框显示三列缩略图，“人物”栏只预留给人物识别。前台自动备份策略已实现；G2 已完成 Wi-Fi 中断、恢复并达到 MyNAS-confirmed 最终完成，服务重启、账号/卷、iCloud-only 和长队列仍未验收，不能称为完整后台备份保证。首次部署目前需要项目维护者完成；不要把 MyNAS 当作重要文件的唯一备份。
+> **当前版本：v0.9.3** · [查看 GitHub Release](https://github.com/Ethan-Zh0u/MyNAS/releases/tag/v0.9.3)
+>
+> - **本版修复：**远端预览白边、Tailnet 建连时删除误禁用、相同原件误建远端副本，以及失败重试卡住。
+> - **验收结果：**树莓派 `0.9.3` 在线；iPhone 16 Pro 为 19/19、0 失败；自动化回归 73/73。
+> - **已知问题：**重试后的同一运行期可能短暂沿用旧的本机关联显示；服务端映射正确，重开 App 可恢复，补丁正在处理。
+> - **能力边界：**尚不保证服务重启、账号/卷、真实 iCloud-only 和长队列下的完整后台备份；请勿把 MyNAS 作为重要文件的唯一副本。
+>
+> 完整说明见 [更新日志](CHANGELOG.md) 和 [MyNAS Photos 路线图](docs/myphotos/IMPLEMENTATION_PLAN.md)。
 
 ## MyNAS 网页地址（重要）
 
