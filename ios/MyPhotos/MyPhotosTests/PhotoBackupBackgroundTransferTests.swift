@@ -303,6 +303,98 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
         XCTAssertEqual(persisted, queued)
     }
 
+    func testServerMappingMutationDiscardsAStaleRecoverySnapshot() async throws {
+        let account = connectedAccount()
+        let queueURL = temporaryRoot.appendingPathComponent("mapping-mutation-jobs.json")
+        let policyURL = temporaryRoot.appendingPathComponent("mapping-mutation-policies.json")
+        let persistence = PhotoBackupPersistenceStore(explicitURL: queueURL)
+        let sourceDate = Date(timeIntervalSince1970: 1_700_000_100)
+        let localIdentifier = "verified-local-copy"
+        let staleAssetID = "stale-superseded-asset"
+        let canonicalAssetID = "canonical-asset"
+        let job = PhotoBackupJob(
+            id: UUID(),
+            accountID: account.accountID,
+            localIdentifier: localIdentifier,
+            mediaKind: .photo,
+            creationDate: Date(timeIntervalSince1970: 1_700_000_000),
+            sourceModificationDate: sourceDate,
+            status: .completed,
+            totalBytes: 116_983,
+            uploadedBytes: 116_983,
+            resourceCount: 1,
+            assetID: staleAssetID,
+            sourceState: .committed,
+            derivativeState: .ready,
+            origin: .manual,
+            message: "旧映射快照",
+            failure: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_200)
+        )
+        try persistence.save([job])
+        let staleMapping = ServerDeviceAssetMapping(
+            localIdentifier: localIdentifier,
+            assetID: staleAssetID,
+            sourceModificationDate: PhotoBackupSourceVersion.string(from: sourceDate),
+            sourceState: PhotoSourceState.committed.rawValue,
+            derivativeState: PhotoDerivativeState.ready.rawValue,
+            resourceCount: 1,
+            sourceBytes: 116_983,
+            updatedAt: "2026-08-11T03:00:00Z"
+        )
+        let canonicalMapping = ServerDeviceAssetMapping(
+            localIdentifier: localIdentifier,
+            assetID: canonicalAssetID,
+            sourceModificationDate: PhotoBackupSourceVersion.string(from: sourceDate),
+            sourceState: PhotoSourceState.committed.rawValue,
+            derivativeState: PhotoDerivativeState.ready.rawValue,
+            resourceCount: 1,
+            sourceBytes: 116_983,
+            updatedAt: "2026-08-11T03:15:46Z"
+        )
+        let mappingClient = SequencedDeviceMappingClient(
+            responses: [[staleMapping], [canonicalMapping]]
+        )
+        let defaultsSuite = "MyPhotosTests.mapping-mutation.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { userDefaults.removePersistentDomain(forName: defaultsSuite) }
+        let coordinator = PhotoBackupCoordinator(
+            mappingClient: mappingClient,
+            persistence: persistence,
+            automationPersistence: PhotoBackupAutomationPolicyStore(explicitURL: policyURL),
+            userDefaults: userDefaults
+        )
+        let asset = LocalPhotoAsset(
+            localIdentifier: localIdentifier,
+            creationDate: job.creationDate,
+            modificationDate: sourceDate,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 1_200,
+            pixelHeight: 900,
+            duration: 0,
+            isFavorite: false
+        )
+
+        coordinator.synchronizeLibrary(assets: [asset], account: account)
+        try await waitUntil {
+            await mappingClient.requestCount == 1
+        }
+
+        coordinator.refreshDeviceMappingsAfterServerMutation(for: account)
+        try await waitUntil {
+            coordinator.jobs(for: account.accountID).first?.assetID == canonicalAssetID
+        }
+
+        let requestCount = await mappingClient.requestCount
+        XCTAssertEqual(requestCount, 2)
+        let restored = try XCTUnwrap(coordinator.jobs(for: account.accountID).first)
+        XCTAssertEqual(restored.assetID, canonicalAssetID)
+        XCTAssertEqual(restored.status, .completed)
+        XCTAssertEqual(restored.message, "已从 MyNAS 验证记录恢复")
+        XCTAssertEqual(try XCTUnwrap(persistence.load().first).assetID, canonicalAssetID)
+    }
+
     func testLegacyQueueWithoutPendingVerifiedRemoteAssetIDStillLoads() throws {
         let queueURL = temporaryRoot.appendingPathComponent("legacy-jobs.json", isDirectory: false)
         let persistence = PhotoBackupPersistenceStore(explicitURL: queueURL)
@@ -1437,5 +1529,40 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
             hasRecoveredMappings: hasRecoveredMappings,
             conditions: conditions
         )
+    }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(2),
+        condition: @escaping @MainActor () async -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if await condition() {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for the asynchronous coordinator state.")
+    }
+}
+
+private actor SequencedDeviceMappingClient: PhotoDeviceAssetMappingFetching {
+    private var responses: [[ServerDeviceAssetMapping]]
+    private(set) var requestCount = 0
+
+    init(responses: [[ServerDeviceAssetMapping]]) {
+        self.responses = responses
+    }
+
+    func fetchDeviceAssetMappings(
+        account: AccountContext,
+        deviceID: String
+    ) async throws -> [ServerDeviceAssetMapping] {
+        requestCount += 1
+        guard !responses.isEmpty else {
+            return []
+        }
+        return responses.removeFirst()
     }
 }

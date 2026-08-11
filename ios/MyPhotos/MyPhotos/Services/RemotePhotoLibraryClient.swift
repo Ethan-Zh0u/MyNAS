@@ -73,6 +73,13 @@ nonisolated struct RemotePhotoDownloadProgress: Sendable, Equatable {
     }
 }
 
+nonisolated protocol PhotoDeviceAssetMappingFetching: Sendable {
+    func fetchDeviceAssetMappings(
+        account: AccountContext,
+        deviceID: String
+    ) async throws -> [ServerDeviceAssetMapping]
+}
+
 /// `URLSession.download(for:)` intentionally has no streaming-byte callback.
 /// This single-use delegate keeps a large original on disk and reports bytes
 /// without retaining the media in memory.
@@ -168,7 +175,7 @@ private final class OriginalResourceDownloadDelegate: NSObject, URLSessionDownlo
     }
 }
 
-actor RemotePhotoLibraryClient {
+actor RemotePhotoLibraryClient: PhotoDeviceAssetMappingFetching {
     private nonisolated struct MetadataCacheEnvelope: Codable {
         let eTag: String?
         let fetchedAt: Date

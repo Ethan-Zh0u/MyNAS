@@ -59,7 +59,7 @@ final class PhotoBackupCoordinator: ObservableObject {
     @Published private(set) var automationStatuses: [String: PhotoBackupAutomationStatus] = [:]
 
     private let uploader: PhotoBackupUploader
-    private let mappingClient: RemotePhotoLibraryClient
+    private let mappingClient: any PhotoDeviceAssetMappingFetching
     private let backgroundTransferEngine: PhotoBackupBackgroundTransferEngine
     private let persistence: PhotoBackupPersistenceStore
     private let automationPersistence: PhotoBackupAutomationPolicyStore
@@ -150,7 +150,7 @@ final class PhotoBackupCoordinator: ObservableObject {
 
     init(
         uploader: PhotoBackupUploader = PhotoBackupUploader(),
-        mappingClient: RemotePhotoLibraryClient = RemotePhotoLibraryClient(),
+        mappingClient: any PhotoDeviceAssetMappingFetching = RemotePhotoLibraryClient(),
         backgroundTransferEngine: PhotoBackupBackgroundTransferEngine? = nil,
         persistence: PhotoBackupPersistenceStore = PhotoBackupPersistenceStore(),
         automationPersistence: PhotoBackupAutomationPolicyStore = PhotoBackupAutomationPolicyStore(),
@@ -1167,6 +1167,21 @@ final class PhotoBackupCoordinator: ObservableObject {
         }
     }
 
+    /// Upload completion can change the server's canonical mapping for a
+    /// local identifier. A device-mapping page fetched before that mutation
+    /// must never overwrite the freshly persisted upload outcome.
+    func refreshDeviceMappingsAfterServerMutation(for account: AccountContext) {
+        let accountID = account.accountID
+        mappingRecoveryTasks[accountID]?.cancel()
+        mappingRecoveryTasks[accountID] = nil
+        recoveredMappingsByAccountID[accountID] = nil
+        guard mappingRecoveryRequests[accountID] != nil,
+              deviceMappingRecoveryIsRequired(for: account) else {
+            return
+        }
+        recoverDeviceMappingsIfNeeded(for: account)
+    }
+
     private func finishDeviceMappingRecovery(
         _ mappings: [ServerDeviceAssetMapping],
         for accountID: String
@@ -1692,6 +1707,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                     $0.message = "原始资源已完整校验；浏览预览等待生成"
                 }
             }
+            refreshDeviceMappingsAfterServerMutation(for: account)
         } catch is CancellationError {
             update(jobID) {
                 $0.status = .waiting
@@ -1750,6 +1766,7 @@ final class PhotoBackupCoordinator: ObservableObject {
             ($0.localIdentifier, $0)
         })
         var changed = false
+        var completedServerMappingMutation = false
         var recordsToDiscard: [PhotoBackupBackgroundTransferRecord] = []
         for record in backgroundTransferEngine.completedTransfers(for: account) {
             guard let outcome = record.outcome,
@@ -1794,6 +1811,7 @@ final class PhotoBackupCoordinator: ObservableObject {
                 : "原始资源已完整校验；浏览预览等待生成"
             jobs[jobIndex].updatedAt = Date()
             changed = true
+            completedServerMappingMutation = true
             recordsToDiscard.append(record)
         }
         if changed, persist() {
@@ -1803,6 +1821,9 @@ final class PhotoBackupCoordinator: ObservableObject {
             refreshHeadline(accountID: account.accountID)
         } else if changed {
             refreshHeadline(accountID: account.accountID)
+        }
+        if completedServerMappingMutation {
+            refreshDeviceMappingsAfterServerMutation(for: account)
         }
     }
 
