@@ -148,6 +148,161 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
         XCTAssertEqual(try persistence.load(), [restoredJob])
     }
 
+    func testAutomaticWorkSelectionIgnoresWaitingJobsOutsideCurrentPhotoAccess() throws {
+        let account = connectedAccount()
+        let queueURL = temporaryRoot.appendingPathComponent("stale-automatic-jobs.json")
+        let policyURL = temporaryRoot.appendingPathComponent("stale-automatic-policies.json")
+        let persistence = PhotoBackupPersistenceStore(explicitURL: queueURL)
+        let sourceDate = Date(timeIntervalSince1970: 1_700_000_100)
+        let staleJob = PhotoBackupJob(
+            id: UUID(),
+            accountID: account.accountID,
+            localIdentifier: "outside-current-photo-access",
+            mediaKind: .photo,
+            creationDate: Date(timeIntervalSince1970: 1_700_000_000),
+            sourceModificationDate: sourceDate,
+            status: .waiting,
+            totalBytes: 1_024,
+            uploadedBytes: 0,
+            resourceCount: 1,
+            assetID: nil,
+            sourceState: nil,
+            derivativeState: nil,
+            origin: .automatic,
+            message: "等待从 MyNAS 已接收的位置继续",
+            failure: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_200)
+        )
+        try persistence.save([staleJob])
+        let defaultsSuite = "MyPhotosTests.stale-automatic-selection.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { userDefaults.removePersistentDomain(forName: defaultsSuite) }
+        let coordinator = PhotoBackupCoordinator(
+            persistence: persistence,
+            automationPersistence: PhotoBackupAutomationPolicyStore(explicitURL: policyURL),
+            userDefaults: userDefaults
+        )
+        let accessibleDifferentAsset = LocalPhotoAsset(
+            localIdentifier: "currently-accessible-photo",
+            creationDate: Date(timeIntervalSince1970: 1_700_000_010),
+            modificationDate: sourceDate,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 1_200,
+            pixelHeight: 900,
+            duration: 0,
+            isFavorite: false
+        )
+        let accessibleMatchingAsset = LocalPhotoAsset(
+            localIdentifier: staleJob.localIdentifier,
+            creationDate: staleJob.creationDate,
+            modificationDate: sourceDate,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 1_200,
+            pixelHeight: 900,
+            duration: 0,
+            isFavorite: false
+        )
+
+        XCTAssertFalse(
+            coordinator.hasRunnableAutomaticWork(
+                for: [accessibleDifferentAsset],
+                accountID: account.accountID
+            )
+        )
+        XCTAssertTrue(
+            coordinator.hasRunnableAutomaticWork(
+                for: [accessibleMatchingAsset],
+                accountID: account.accountID
+            )
+        )
+    }
+
+    func testManualRetryPersistsWhileAnotherRunOwnsTheCoordinator() throws {
+        let account = connectedAccount()
+        let queueURL = temporaryRoot.appendingPathComponent("queued-manual-retry-jobs.json")
+        let policyURL = temporaryRoot.appendingPathComponent("queued-manual-retry-policies.json")
+        let persistence = PhotoBackupPersistenceStore(explicitURL: queueURL)
+        let failedSourceDate = Date(timeIntervalSince1970: 1_700_000_100)
+        let failedJob = PhotoBackupJob(
+            id: UUID(),
+            accountID: account.accountID,
+            localIdentifier: "failed-photo-to-retry",
+            mediaKind: .photo,
+            creationDate: Date(timeIntervalSince1970: 1_700_000_000),
+            sourceModificationDate: failedSourceDate,
+            status: .failed,
+            totalBytes: 116_983,
+            uploadedBytes: 116_983,
+            resourceCount: 1,
+            assetID: nil,
+            pendingVerifiedRemoteAssetID: "expected-remote-asset",
+            sourceState: nil,
+            derivativeState: nil,
+            origin: .manual,
+            message: "完整性校验失败",
+            failure: PhotoBackupFailure(
+                kind: .integrity,
+                detail: "旧候选返回了不同的原件标识。",
+                occurredAt: Date(timeIntervalSince1970: 1_700_000_200)
+            ),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_200)
+        )
+        try persistence.save([failedJob])
+        let defaultsSuite = "MyPhotosTests.queued-manual-retry.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { userDefaults.removePersistentDomain(forName: defaultsSuite) }
+        let coordinator = PhotoBackupCoordinator(
+            persistence: persistence,
+            automationPersistence: PhotoBackupAutomationPolicyStore(explicitURL: policyURL),
+            userDefaults: userDefaults
+        )
+        let client = PhotoLibraryClient()
+        let activeAsset = LocalPhotoAsset(
+            localIdentifier: "active-manual-photo",
+            creationDate: Date(timeIntervalSince1970: 1_700_000_010),
+            modificationDate: Date(timeIntervalSince1970: 1_700_000_110),
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 1_200,
+            pixelHeight: 900,
+            duration: 0,
+            isFavorite: false
+        )
+        let failedAsset = LocalPhotoAsset(
+            localIdentifier: failedJob.localIdentifier,
+            creationDate: failedJob.creationDate,
+            modificationDate: failedSourceDate,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 1_200,
+            pixelHeight: 900,
+            duration: 0,
+            isFavorite: false
+        )
+
+        coordinator.startManualBackup(assets: [activeAsset], account: account, client: client)
+        XCTAssertTrue(coordinator.isRunning)
+
+        coordinator.retryFailed(assets: [failedAsset], account: account, client: client)
+
+        let queued = try XCTUnwrap(
+            coordinator.jobs(for: account.accountID).first {
+                $0.localIdentifier == failedJob.localIdentifier
+            }
+        )
+        XCTAssertEqual(queued.status, .waiting)
+        XCTAssertEqual(queued.origin, .manual)
+        XCTAssertEqual(queued.message, "已排队，等待当前任务完成后重试")
+        XCTAssertNil(queued.failure)
+        XCTAssertEqual(queued.pendingVerifiedRemoteAssetID, "expected-remote-asset")
+        let persisted = try XCTUnwrap(
+            persistence.load().first { $0.localIdentifier == failedJob.localIdentifier }
+        )
+        XCTAssertEqual(persisted, queued)
+    }
+
     func testLegacyQueueWithoutPendingVerifiedRemoteAssetIDStillLoads() throws {
         let queueURL = temporaryRoot.appendingPathComponent("legacy-jobs.json", isDirectory: false)
         let persistence = PhotoBackupPersistenceStore(explicitURL: queueURL)

@@ -258,8 +258,11 @@ struct PhotoBackupView: View {
     }
 
     private var startButtonTitle: String {
+        if coordinator.isRunning(for: accountStore.current.accountID) {
+            return "正在处理备份队列…"
+        }
         if coordinator.isRunning {
-            return pendingCount > 0 ? "正在备份 \(pendingCount) 项…" : "正在完成备份…"
+            return "等待当前备份完成…"
         }
         if pendingCount == 0 {
             return assets.isEmpty ? "没有可备份的项目" : "全部 \(assets.count) 项均已备份"
@@ -283,7 +286,7 @@ struct PhotoBackupView: View {
             }
             .contentShape(Rectangle())
         }
-        .disabled(coordinator.isRunning || retryableFailedCount == 0)
+        .disabled(retryableFailedCount == 0)
 
         if #available(iOS 26.0, *) {
             button.buttonStyle(.glass)

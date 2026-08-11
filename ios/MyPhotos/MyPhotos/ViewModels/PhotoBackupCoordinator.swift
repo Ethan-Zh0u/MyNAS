@@ -84,6 +84,10 @@ final class PhotoBackupCoordinator: ObservableObject {
     private var activeRemoteCopyReconciliationAccountID: String?
     private var pendingRemoteCopyReconciliation: RemoteCopyReconciliationRequest?
     private var checkedRemoteCopyPairs: Set<RemoteCopyVerificationPair> = []
+    /// A manual retry is a user instruction, not a best-effort tap. Persisted
+    /// jobs move to waiting immediately; this request starts them as soon as
+    /// mapping recovery or the current run releases the coordinator.
+    private var pendingManualRuns: [String: ManualRunRequest] = [:]
     /// Exact association requests are never discarded merely because another
     /// backup or mapping recovery is active. Their target is persisted on the
     /// job; this in-memory snapshot only starts the foreground upload as soon
@@ -106,6 +110,12 @@ final class PhotoBackupCoordinator: ObservableObject {
     }
 
     private struct VerifiedAssociationRunRequest {
+        let assets: [LocalPhotoAsset]
+        let account: AccountContext
+        let client: PhotoLibraryClient
+    }
+
+    private struct ManualRunRequest {
         let assets: [LocalPhotoAsset]
         let account: AccountContext
         let client: PhotoLibraryClient
@@ -187,6 +197,10 @@ final class PhotoBackupCoordinator: ObservableObject {
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    func isRunning(for accountID: String) -> Bool {
+        isRunning && activeRunAccountID == accountID
+    }
+
     /// UI summaries must be derived from the account and the current PhotoKit
     /// source versions being viewed. The legacy `headline` is updated by
     /// asynchronous queue and mapping work, while the persisted queue can also
@@ -259,7 +273,7 @@ final class PhotoBackupCoordinator: ObservableObject {
             completedCount: currentJobs.filter { $0.status == .completed }.count,
             failedCount: currentJobs.filter { $0.status == .failed }.count,
             totalCount: assets.count,
-            isRunning: (isRunning && accountJobs.contains {
+            isRunning: (isRunning(for: accountID) && currentJobs.contains {
                 $0.status == .preparing || $0.status == .uploading || $0.status == .waiting
             }) || !activeProgressBySource.isEmpty,
             uploadedBytes: uploadedBytes,
@@ -284,6 +298,27 @@ final class PhotoBackupCoordinator: ObservableObject {
                 count += 1
                 return
             }
+        }
+    }
+
+    /// Automatic work is runnable only when the queued source still belongs
+    /// to the current PhotoKit snapshot. Historical waiting rows outside the
+    /// user's present access must not keep an empty run loop alive.
+    func hasRunnableAutomaticWork(
+        for assets: [LocalPhotoAsset],
+        accountID: String
+    ) -> Bool {
+        let assetsByIdentifier = Dictionary(
+            uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) }
+        )
+        return jobs.contains { job in
+            guard job.accountID == accountID,
+                  job.status == .waiting,
+                  job.origin == .automatic,
+                  let asset = assetsByIdentifier[job.localIdentifier] else {
+                return false
+            }
+            return job.matchesCurrentLocalAsset(asset)
         }
     }
 
@@ -840,18 +875,30 @@ final class PhotoBackupCoordinator: ObservableObject {
     ) {
         refreshHeadline(accountID: account.accountID)
         resumeBackgroundTransfersIfAllowed(account: account, assets: assets)
-        guard !isRunning, !account.isLocalOnly,
-              mappingRecoveryTasks[account.accountID] == nil else { return }
-        let interruptedManualJob = jobs.contains {
-            $0.accountID == account.accountID
-                && ($0.status == .waiting || $0.status == .uploading || $0.status == .preparing)
-                && $0.origin != .automatic
+        guard !account.isLocalOnly else { return }
+        let interruptedManualAssets = assets.filter { asset in
+            jobs.contains {
+                $0.accountID == account.accountID
+                    && $0.localIdentifier == asset.localIdentifier
+                    && ($0.status == .waiting || $0.status == .uploading || $0.status == .preparing)
+                    && $0.origin != .automatic
+                    && $0.matchesCurrentLocalAsset(asset)
+            }
         }
-        if interruptedManualJob {
+        if !interruptedManualAssets.isEmpty {
+            if isRunning || mappingRecoveryTasks[account.accountID] != nil {
+                mergePendingManualRun(
+                    assets: interruptedManualAssets,
+                    account: account,
+                    client: client
+                )
+                return
+            }
             run(account: account, assets: assets, client: client, intent: .manual)
-        } else {
-            discoverAndAutomaticallyBackUp(assets: assets, account: account, client: client)
+            return
         }
+        guard !isRunning, mappingRecoveryTasks[account.accountID] == nil else { return }
+        discoverAndAutomaticallyBackUp(assets: assets, account: account, client: client)
     }
 
     func retryFailed(
@@ -859,8 +906,9 @@ final class PhotoBackupCoordinator: ObservableObject {
         account: AccountContext,
         client: PhotoLibraryClient
     ) {
-        guard !isRunning, mappingRecoveryTasks[account.accountID] == nil else { return }
         let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) })
+        let waitsForCurrentWork = isRunning || mappingRecoveryTasks[account.accountID] != nil
+        var retryAssets: [LocalPhotoAsset] = []
         var retryCount = 0
         for index in jobs.indices where
             jobs[index].accountID == account.accountID && jobs[index].status == .failed {
@@ -879,17 +927,25 @@ final class PhotoBackupCoordinator: ObservableObject {
             }
             jobs[index].status = .waiting
             jobs[index].origin = .manual
-            jobs[index].message = "等待重试"
+            jobs[index].message = waitsForCurrentWork
+                ? "已排队，等待当前任务完成后重试"
+                : "等待重试"
             jobs[index].failure = nil
             jobs[index].updatedAt = Date()
+            retryAssets.append(asset)
             retryCount += 1
         }
         guard retryCount > 0 else {
             headline = "失败项目当前不在可访问的照片库中"
             return
         }
-        headline = "仅重试 \(retryCount) 个失败项目"
         persist()
+        if waitsForCurrentWork {
+            mergePendingManualRun(assets: retryAssets, account: account, client: client)
+            headline = "已将 \(retryCount) 个失败项目加入重试队列"
+            return
+        }
+        headline = "仅重试 \(retryCount) 个失败项目"
         run(account: account, assets: assets, client: client, intent: .manual)
     }
 
@@ -1034,9 +1090,10 @@ final class PhotoBackupCoordinator: ObservableObject {
             retryFailed: false,
             origin: .automatic
         )
-        let hasAutomaticWork = jobs.contains {
-            $0.accountID == accountID && $0.status == .waiting && $0.origin == .automatic
-        }
+        let hasAutomaticWork = hasRunnableAutomaticWork(
+            for: request.assets,
+            accountID: accountID
+        )
         guard hasAutomaticWork else {
             updateAutomationStatus(
                 hasICloudWaitingWork ? .waitingForICloudOriginalPermission : .watchingForeground,
@@ -1126,7 +1183,10 @@ final class PhotoBackupCoordinator: ObservableObject {
                 headline = "已从 MyNAS 验证记录恢复 \(recoveredCount) 项备份状态"
             }
         }
-        startPendingVerifiedAssociationRunIfPossible(preferredAccountID: accountID)
+        let startedManualRun = startPendingManualRunIfPossible(preferredAccountID: accountID)
+        if !startedManualRun {
+            startPendingVerifiedAssociationRunIfPossible(preferredAccountID: accountID)
+        }
         evaluateAutomaticBackup(for: accountID)
     }
 
@@ -1136,7 +1196,10 @@ final class PhotoBackupCoordinator: ObservableObject {
     private func failDeviceMappingRecovery(for accountID: String) {
         mappingRecoveryTasks[accountID] = nil
         recoveredMappingsByAccountID[accountID] = nil
-        startPendingVerifiedAssociationRunIfPossible(preferredAccountID: accountID)
+        let startedManualRun = startPendingManualRunIfPossible(preferredAccountID: accountID)
+        if !startedManualRun {
+            startPendingVerifiedAssociationRunIfPossible(preferredAccountID: accountID)
+        }
         evaluateAutomaticBackup(for: accountID)
     }
 
@@ -1396,6 +1459,59 @@ final class PhotoBackupCoordinator: ObservableObject {
         )
     }
 
+    private func mergePendingManualRun(
+        assets: [LocalPhotoAsset],
+        account: AccountContext,
+        client: PhotoLibraryClient
+    ) {
+        let existingAssets = pendingManualRuns[account.accountID]?.assets ?? []
+        let merged = Dictionary(
+            (existingAssets + assets).map { ($0.localIdentifier, $0) },
+            uniquingKeysWith: { _, newest in newest }
+        )
+        pendingManualRuns[account.accountID] = ManualRunRequest(
+            assets: Array(merged.values),
+            account: account,
+            client: client
+        )
+    }
+
+    @discardableResult
+    private func startPendingManualRunIfPossible(
+        preferredAccountID: String? = nil
+    ) -> Bool {
+        guard !isRunning else { return false }
+        let accountIDs = pendingManualRuns.keys.sorted { left, right in
+            if left == preferredAccountID { return true }
+            if right == preferredAccountID { return false }
+            return left < right
+        }
+        for accountID in accountIDs {
+            guard mappingRecoveryTasks[accountID] == nil,
+                  let request = pendingManualRuns.removeValue(forKey: accountID) else {
+                continue
+            }
+            let runnableAssets = request.assets.filter { asset in
+                jobs.contains { job in
+                    job.accountID == accountID
+                        && job.localIdentifier == asset.localIdentifier
+                        && job.status == .waiting
+                        && job.origin != .automatic
+                        && job.matchesCurrentLocalAsset(asset)
+                }
+            }
+            guard !runnableAssets.isEmpty else { continue }
+            run(
+                account: request.account,
+                assets: runnableAssets,
+                client: request.client,
+                intent: .manual
+            )
+            return true
+        }
+        return false
+    }
+
     @discardableResult
     private func startPendingVerifiedAssociationRunIfPossible(
         preferredAccountID: String? = nil
@@ -1456,9 +1572,14 @@ final class PhotoBackupCoordinator: ObservableObject {
                 self.activeRunAccountID = nil
                 self.activeRunIntent = nil
                 self.refreshHeadline(accountID: account.accountID)
-                self.startPendingVerifiedAssociationRunIfPossible(
+                let startedManualRun = self.startPendingManualRunIfPossible(
                     preferredAccountID: account.accountID
                 )
+                if !startedManualRun {
+                    self.startPendingVerifiedAssociationRunIfPossible(
+                        preferredAccountID: account.accountID
+                    )
+                }
                 self.reevaluateAutomaticBackupRequests()
             }
 
