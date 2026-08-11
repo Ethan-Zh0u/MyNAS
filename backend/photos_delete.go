@@ -215,19 +215,18 @@ func (a *App) planPhotoDeletion(
 	if err != nil {
 		return photosDeletePlan{}, err
 	}
-	if !asset.ModificationDate.Valid || asset.ModificationDate.String != item.SourceModificationDate {
-		return photosDeletePlan{}, &photosDeleteRejected{message: "本机照片版本已经变化；请先完成当前版本备份"}
-	}
-	var matchingMappings int
+	var mappingSourceModificationDate string
 	if err = transaction.QueryRow(
-		`SELECT COUNT(1) FROM device_asset_mappings
+		`SELECT source_modification_date FROM device_asset_mappings
 		 WHERE owner_user_id=? AND device_id=? AND local_identifier=? AND asset_id=?`,
 		ownerUserID, item.DeviceID, item.LocalIdentifier, item.AssetID,
-	).Scan(&matchingMappings); err != nil {
+	).Scan(&mappingSourceModificationDate); errors.Is(err, sql.ErrNoRows) {
+		return photosDeletePlan{}, &photosDeleteRejected{message: "MyNAS 备份与当前 iPhone 照片的验证关系已变化"}
+	} else if err != nil {
 		return photosDeletePlan{}, err
 	}
-	if matchingMappings != 1 {
-		return photosDeletePlan{}, &photosDeleteRejected{message: "MyNAS 备份与当前 iPhone 照片的验证关系已变化"}
+	if mappingSourceModificationDate == "" || mappingSourceModificationDate != item.SourceModificationDate {
+		return photosDeletePlan{}, &photosDeleteRejected{message: "本机照片版本已经变化；请先完成当前版本备份"}
 	}
 	if err = a.verifyPhotoDeletionNotSharedOrProcessing(transaction, ownerUserID, item.AssetID, true); err != nil {
 		return photosDeletePlan{}, err
@@ -274,18 +273,20 @@ func (a *App) photoDeletionAssetState(
 func (a *App) verifyPhotoDeletionNotSharedOrProcessing(
 	transaction *sql.Tx, ownerUserID, assetID string, requireExactlyOneMapping bool,
 ) error {
-	var allMappings, processingJobs int
+	if requireExactlyOneMapping {
+		var allMappings int
+		if err := transaction.QueryRow(
+			`SELECT COUNT(1) FROM device_asset_mappings WHERE owner_user_id=? AND asset_id=?`,
+			ownerUserID, assetID,
+		).Scan(&allMappings); err != nil {
+			return err
+		}
+		if allMappings != 1 {
+			return &photosDeleteRejected{message: "该 MyNAS 原件仍被其他备份记录使用，不能删除"}
+		}
+	}
+	var processingJobs int
 	err := transaction.QueryRow(
-		`SELECT COUNT(1) FROM device_asset_mappings WHERE owner_user_id=? AND asset_id=?`,
-		ownerUserID, assetID,
-	).Scan(&allMappings)
-	if err != nil {
-		return err
-	}
-	if (requireExactlyOneMapping && allMappings != 1) || (!requireExactlyOneMapping && allMappings > 1) {
-		return &photosDeleteRejected{message: "该 MyNAS 原件仍被其他备份记录使用，不能删除"}
-	}
-	err = transaction.QueryRow(
 		`SELECT COUNT(1) FROM photo_derivative_jobs
 		 WHERE owner_user_id=? AND asset_id=? AND status=?`,
 		ownerUserID, assetID, photosDerivativeStateProcessing,

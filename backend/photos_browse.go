@@ -264,7 +264,9 @@ func (a *App) photosDeviceAssetMappings(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	query := `SELECT m.local_identifier,m.asset_id,a.modification_date,a.source_state,a.derivative_state,
+	query := `SELECT m.local_identifier,m.asset_id,
+		NULLIF(m.source_modification_date,''),
+		a.source_state,a.derivative_state,
 		COALESCE((SELECT COUNT(1) FROM photo_resources r
 			WHERE r.owner_user_id=m.owner_user_id AND r.asset_id=m.asset_id),0),
 		COALESCE((SELECT SUM(r.byte_size) FROM photo_resources r

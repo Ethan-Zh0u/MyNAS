@@ -78,6 +78,34 @@ func TestPhotosDeletePermanentlyRemovesCompleteResourceGroup(t *testing.T) {
 	}
 }
 
+func TestPhotosDeleteAcceptsTheExactPerMappingSourceVersion(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	payload := []byte("downloaded-local-copy-delete")
+	assetModificationDate := "2026-08-06T08:01:00Z"
+	input := testPhotoUploadInput(payload, nil)
+	input.ModificationDate = &assetModificationDate
+	completed := completeTestPhotoUpload(t, app, input, map[string][]byte{"photo-0": payload})
+	ownerUserID := testPhotoOwnerID(t, app, completed.AssetID)
+	localCopyModificationDate := "2026-08-11T01:12:55.138Z"
+	if _, err := app.db.Exec(
+		`UPDATE device_asset_mappings SET source_modification_date=?
+		 WHERE owner_user_id=? AND device_id=? AND local_identifier=? AND asset_id=?`,
+		localCopyModificationDate, ownerUserID, input.DeviceID, input.LocalIdentifier, completed.AssetID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := postPhotosDelete(t, app, photosDeleteAssetsInput{Items: []photosDeleteItemInput{{
+		AssetID:                completed.AssetID,
+		DeviceID:               input.DeviceID,
+		LocalIdentifier:        input.LocalIdentifier,
+		SourceModificationDate: localCopyModificationDate,
+	}}})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestPhotosDeleteRejectsSharedOrStaleBackupsWithoutDeletingAnything(t *testing.T) {
 	app := newPhotosPhase2TestApp(t)
 	shared := []byte("shared-photo-must-not-delete")
@@ -178,7 +206,7 @@ func TestPhotosRemoteDeletePermanentlyRemovesOnlyTheConfirmedGalleryAsset(t *tes
 	}
 }
 
-func TestPhotosRemoteDeleteRejectsStaleOrSharedAssetWithoutDeleting(t *testing.T) {
+func TestPhotosRemoteDeleteRejectsStaleButAllowsExplicitSharedAssetDeletion(t *testing.T) {
 	app := newPhotosPhase2TestApp(t)
 	input := testPhotoUploadInput([]byte("remote-delete-reject"), nil)
 	input.DeviceID = "first-device"
@@ -187,10 +215,6 @@ func TestPhotosRemoteDeleteRejectsStaleOrSharedAssetWithoutDeleting(t *testing.T
 		"photo-0": []byte("remote-delete-reject"),
 	})
 	ownerUserID := testPhotoOwnerID(t, app, first.AssetID)
-	asset, err := app.photoAsset(ownerUserID, first.AssetID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	originalPath, _ := testCommittedPhotoSource(t, app, first.AssetID)
 
 	stale := postPhotosRemoteDelete(t, app, first.AssetID, "stale-gallery-version")
@@ -207,12 +231,16 @@ func TestPhotosRemoteDeleteRejectsStaleOrSharedAssetWithoutDeleting(t *testing.T
 	if duplicate := createTestPhotoUploadSession(t, app, secondInput); duplicate.Status != "duplicate" {
 		t.Fatalf("expected shared duplicate: %#v", duplicate)
 	}
-	shared := postPhotosRemoteDelete(t, app, first.AssetID, asset.Version)
-	if shared.Code != http.StatusConflict {
+	sharedAsset, err := app.photoAsset(ownerUserID, first.AssetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := postPhotosRemoteDelete(t, app, first.AssetID, sharedAsset.Version)
+	if shared.Code != http.StatusOK {
 		t.Fatalf("shared remote delete status=%d body=%s", shared.Code, shared.Body.String())
 	}
-	if _, err := os.Stat(originalPath); err != nil {
-		t.Fatalf("shared remote delete removed original: %v", err)
+	if _, err := os.Stat(originalPath); !os.IsNotExist(err) {
+		t.Fatalf("explicit shared remote delete left original: %v", err)
 	}
 }
 

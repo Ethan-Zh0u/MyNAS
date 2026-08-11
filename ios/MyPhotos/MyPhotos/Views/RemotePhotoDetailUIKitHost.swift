@@ -215,7 +215,9 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         stack.addArrangedSubview(makeActions())
 
         let footnote = UILabel()
-        footnote.text = "预览来自 MyNAS；下载原件会先核验资源大小和 SHA-256，再导入系统照片。"
+        footnote.text = hasConfirmedLocalCopy
+            ? "原件同时保存在本机和 MyNAS；预览来自 MyNAS。"
+            : "预览来自 MyNAS；下载原件会先核验资源大小和 SHA-256，再导入系统照片。"
         footnote.font = .preferredFont(forTextStyle: .caption1)
         footnote.textColor = .secondaryLabel
         footnote.numberOfLines = 0
@@ -522,6 +524,9 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
             action: #selector(prepareRemoteDeletion)
         )
         stack.addArrangedSubview(downloadButton)
+        downloadButton.isHidden = !RemotePhotoDownloadPolicy.offersOriginalDownload(
+            hasConfirmedLocalCopy: hasConfirmedLocalCopy
+        )
         stack.addArrangedSubview(makeDownloadProgress())
         stack.addArrangedSubview(exportButton)
         stack.addArrangedSubview(makeDeletionAvailabilityNotice())
@@ -611,7 +616,7 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
         title.text = "本机已有同一原件"
         title.font = preferredFont(.footnote, weight: .semibold)
         let subtitle = UILabel()
-        subtitle.text = "继续下载会在系统照片中创建一份新的副本。"
+        subtitle.text = "原件同时保存在本机和 MyNAS。"
         subtitle.font = .preferredFont(forTextStyle: .caption2)
         subtitle.textColor = .secondaryLabel
         subtitle.numberOfLines = 0
@@ -1073,7 +1078,6 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     }
 
     private var restingDownloadButtonTitle: String {
-        if hasConfirmedLocalCopy { return "仍然下载一份副本" }
         if canAssociateLocalCopy && !automaticVerificationCompleted {
             return "正在自动核验本机原件…"
         }
@@ -1140,10 +1144,9 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
 
     @objc private func downloadOriginals() {
         guard !isPerformingAction else { return }
-        if hasConfirmedLocalCopy {
-            presentDuplicateDownloadConfirmation()
-            return
-        }
+        guard RemotePhotoDownloadPolicy.offersOriginalDownload(
+            hasConfirmedLocalCopy: hasConfirmedLocalCopy
+        ) else { return }
         if canAssociateLocalCopy && !automaticVerificationCompleted {
             verifyAndAssociateLocalCopy(presentsResult: false)
             return
@@ -1161,7 +1164,9 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
                 guard !Task.isCancelled else { return }
                 if let mapping,
                    localClient.hasAccessibleAsset(localIdentifier: mapping.localIdentifier) {
-                    presentDuplicateDownloadConfirmation()
+                    automaticallyVerifiedLocalCopy = true
+                    updateActionAvailability()
+                    showDownloadCompletionToast("本机已有同一原件")
                 } else {
                     await downloadOriginalsToPhotos(alreadyPerformingAction: true)
                 }
@@ -1230,20 +1235,6 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
             guard !Task.isCancelled else { return }
             showMessage("导出未完成：\n\n\(error.localizedDescription)")
         }
-    }
-
-    private func presentDuplicateDownloadConfirmation() {
-        let alert = UIAlertController(
-            title: "本机已有这张照片",
-            message: "当前 iPhone 已确认仍可访问同一原件。继续会在系统照片中创建一份新的副本。",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "仍然下载一份副本", style: .default) { [weak self] _ in
-            guard let self else { return }
-            Task { await self.downloadOriginalsToPhotos() }
-        })
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        present(alert, animated: true)
     }
 
     private func downloadOriginalsToPhotos(alreadyPerformingAction: Bool = false) async {
@@ -1472,6 +1463,9 @@ private final class RemotePhotoDetailUIKitController: UIViewController {
     }
 
     private func updateActionAvailability() {
+        downloadButton.isHidden = !RemotePhotoDownloadPolicy.offersOriginalDownload(
+            hasConfirmedLocalCopy: hasConfirmedLocalCopy
+        )
         downloadButton.isEnabled = !isPerformingAction
         exportButton.isEnabled = !isPerformingAction && activeExportDownload == nil
         associateButton.isEnabled = !isPerformingAction

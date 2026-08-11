@@ -125,6 +125,8 @@ func TestPhotosExpectedAssetUsesCompleteResourceProofAcrossTransportMetadata(t *
 	importedInput.DeviceID = "current-iphone"
 	importedInput.LocalIdentifier = "photo-kit-import-placeholder"
 	importedInput.ExpectedAssetID = original.AssetID
+	importedModificationDate := "2026-08-11T01:12:55.138Z"
+	importedInput.ModificationDate = &importedModificationDate
 	importedInput.Resources[0].ClientResourceID = "resource-000"
 	importedInput.Resources[0].ContentType = "public.png"
 	importedInput.Fingerprint = photoManifestFingerprint(importedInput.Resources)
@@ -143,16 +145,119 @@ func TestPhotosExpectedAssetUsesCompleteResourceProofAcrossTransportMetadata(t *
 	if committedAssets != 1 {
 		t.Fatalf("committed assets=%d, expected association created a duplicate", committedAssets)
 	}
-	var mappedAssetID string
+	var mappedAssetID, mappedSourceModificationDate string
 	if err := app.db.QueryRow(
-		`SELECT asset_id FROM device_asset_mappings
+		`SELECT asset_id,source_modification_date FROM device_asset_mappings
 		 WHERE device_id=? AND local_identifier=?`,
 		importedInput.DeviceID, importedInput.LocalIdentifier,
-	).Scan(&mappedAssetID); err != nil {
+	).Scan(&mappedAssetID, &mappedSourceModificationDate); err != nil {
 		t.Fatal(err)
 	}
 	if mappedAssetID != original.AssetID {
 		t.Fatalf("mapping asset=%q, want %q", mappedAssetID, original.AssetID)
+	}
+	if mappedSourceModificationDate != importedModificationDate {
+		t.Fatalf(
+			"mapping source version=%q, want local version %q",
+			mappedSourceModificationDate,
+			importedModificationDate,
+		)
+	}
+	mappingRequest := tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/device-asset-mappings?deviceID=current-iphone&limit=10",
+	)
+	mappingRecorder := httptest.NewRecorder()
+	app.photosDeviceAssetMappings(mappingRecorder, mappingRequest)
+	if mappingRecorder.Code != http.StatusOK {
+		t.Fatalf("mapping status=%d body=%s", mappingRecorder.Code, mappingRecorder.Body.String())
+	}
+	var mappingPage photosDeviceAssetMappingPageResponse
+	if err := json.NewDecoder(mappingRecorder.Body).Decode(&mappingPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(mappingPage.Mappings) != 1 ||
+		mappingPage.Mappings[0].SourceModificationDate == nil ||
+		*mappingPage.Mappings[0].SourceModificationDate != importedModificationDate {
+		t.Fatalf("mapping recovery lost the local source version: %#v", mappingPage.Mappings)
+	}
+}
+
+func TestMigrateBackfillsOnlyProvenDeviceMappingSourceVersions(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	payload := []byte("mapping-source-version-migration")
+	input := testPhotoUploadInput(payload, nil)
+	input.DeviceID = "migration-device"
+	input.LocalIdentifier = "completed-session-local"
+	provenModificationDate := "2026-08-06T09:13:35.577Z"
+	input.ModificationDate = &provenModificationDate
+	completed := completeTestPhotoUpload(t, app, input, map[string][]byte{"photo-0": payload})
+	ownerUserID := testPhotoOwnerID(t, app, completed.AssetID)
+
+	if _, err := app.db.Exec(
+		`UPDATE device_asset_mappings SET source_modification_date=''
+		 WHERE owner_user_id=? AND device_id=? AND local_identifier=?`,
+		ownerUserID, input.DeviceID, input.LocalIdentifier,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(
+		`INSERT INTO device_asset_mappings(
+		 owner_user_id,device_id,local_identifier,fingerprint,source_modification_date,asset_id,updated
+		 ) VALUES(?,?,?,?,?,?,?)`,
+		ownerUserID, input.DeviceID, "mapping-without-session", input.Fingerprint, "",
+		completed.AssetID, "2026-08-11T04:00:00Z",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var restoredSourceVersion, unprovenSourceVersion string
+	if err := app.db.QueryRow(
+		`SELECT source_modification_date FROM device_asset_mappings
+		 WHERE owner_user_id=? AND device_id=? AND local_identifier=?`,
+		ownerUserID, input.DeviceID, input.LocalIdentifier,
+	).Scan(&restoredSourceVersion); err != nil {
+		t.Fatal(err)
+	}
+	if restoredSourceVersion != provenModificationDate {
+		t.Fatalf("restored source version=%q, want %q", restoredSourceVersion, provenModificationDate)
+	}
+	if err := app.db.QueryRow(
+		`SELECT source_modification_date FROM device_asset_mappings
+		 WHERE owner_user_id=? AND device_id=? AND local_identifier='mapping-without-session'`,
+		ownerUserID, input.DeviceID,
+	).Scan(&unprovenSourceVersion); err != nil {
+		t.Fatal(err)
+	}
+	if unprovenSourceVersion != "" {
+		t.Fatalf("unproven mapping inherited an asset-wide source version=%q", unprovenSourceVersion)
+	}
+
+	request := tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/device-asset-mappings?deviceID=migration-device&limit=10",
+	)
+	recorder := httptest.NewRecorder()
+	app.photosDeviceAssetMappings(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("mapping status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var page photosDeviceAssetMappingPageResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	versionsByLocalIdentifier := make(map[string]*string, len(page.Mappings))
+	for _, mapping := range page.Mappings {
+		versionsByLocalIdentifier[mapping.LocalIdentifier] = mapping.SourceModificationDate
+	}
+	if version := versionsByLocalIdentifier[input.LocalIdentifier]; version == nil || *version != provenModificationDate {
+		t.Fatalf("endpoint lost proven source version: %#v", versionsByLocalIdentifier)
+	}
+	if version := versionsByLocalIdentifier["mapping-without-session"]; version != nil {
+		t.Fatalf("endpoint exposed unproven source version=%q", *version)
 	}
 }
 
@@ -229,9 +334,10 @@ func TestPhotosExpectedAssetConsolidatesProvenLegacyDuplicateWithoutDeletingFile
 	ownerUserID := testPhotoOwnerID(t, app, original.AssetID)
 	if _, err := app.db.Exec(
 		`INSERT INTO device_asset_mappings(
-		 owner_user_id,device_id,local_identifier,fingerprint,asset_id,updated
-		 ) VALUES(?,?,?,?,?,'now')`,
-		ownerUserID, "legacy-device", "legacy-local", strings.Repeat("b", 64), duplicateAssetID,
+		 owner_user_id,device_id,local_identifier,fingerprint,source_modification_date,asset_id,updated
+		 ) VALUES(?,?,?,?,?,?,'now')`,
+		ownerUserID, "legacy-device", "legacy-local", strings.Repeat("b", 64),
+		"2026-08-05T01:02:03.456Z", duplicateAssetID,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -266,16 +372,19 @@ func TestPhotosExpectedAssetConsolidatesProvenLegacyDuplicateWithoutDeletingFile
 	if preservedResources != 1 {
 		t.Fatalf("superseded duplicate resources=%d, want preserved resource", preservedResources)
 	}
-	var legacyMappingAssetID string
+	var legacyMappingAssetID, legacyMappingSourceModificationDate string
 	if err := app.db.QueryRow(
-		`SELECT asset_id FROM device_asset_mappings
+		`SELECT asset_id,source_modification_date FROM device_asset_mappings
 		 WHERE owner_user_id=? AND device_id='legacy-device' AND local_identifier='legacy-local'`,
 		ownerUserID,
-	).Scan(&legacyMappingAssetID); err != nil {
+	).Scan(&legacyMappingAssetID, &legacyMappingSourceModificationDate); err != nil {
 		t.Fatal(err)
 	}
 	if legacyMappingAssetID != original.AssetID {
 		t.Fatalf("legacy mapping asset=%q, want %q", legacyMappingAssetID, original.AssetID)
+	}
+	if legacyMappingSourceModificationDate != "2026-08-05T01:02:03.456Z" {
+		t.Fatalf("legacy mapping source version changed=%q", legacyMappingSourceModificationDate)
 	}
 }
 

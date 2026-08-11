@@ -48,6 +48,13 @@ type photosUploadSessionInput struct {
 	Resources        []photosUploadResourceInput `json:"resources"`
 }
 
+func photoMappingSourceModificationDate(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
 type photosUploadResourceResponse struct {
 	ID               string `json:"id"`
 	ClientResourceID string `json:"clientResourceID"`
@@ -170,6 +177,7 @@ func (a *App) photosUploadSessions(w http.ResponseWriter, r *http.Request) {
 			input.DeviceID,
 			input.LocalIdentifier,
 			input.Fingerprint,
+			photoMappingSourceModificationDate(input.ModificationDate),
 		); err != nil {
 			http.Error(w, "photo identity consolidation unavailable", http.StatusInternalServerError)
 			return
@@ -204,7 +212,8 @@ func (a *App) photosUploadSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if found {
 		if err = a.upsertDeviceAssetMapping(
-			owner.UserID, input.DeviceID, input.LocalIdentifier, input.Fingerprint, assetID,
+			owner.UserID, input.DeviceID, input.LocalIdentifier, input.Fingerprint,
+			photoMappingSourceModificationDate(input.ModificationDate), assetID,
 		); err != nil {
 			http.Error(w, "photo mapping unavailable", http.StatusInternalServerError)
 			return
@@ -739,9 +748,13 @@ func (a *App) completePhotoUploadSession(w http.ResponseWriter, ownerUserID stri
 		)
 	}
 	if err == nil {
+		mappingSourceModificationDate := ""
+		if session.ModificationDate.Valid {
+			mappingSourceModificationDate = strings.TrimSpace(session.ModificationDate.String)
+		}
 		_, err = a.upsertDeviceAssetMappingInTransaction(
 			transaction, ownerUserID, session.DeviceID, session.LocalIdentifier,
-			session.Fingerprint, session.AssetID, now,
+			session.Fingerprint, mappingSourceModificationDate, session.AssetID, now,
 		)
 	}
 	if err == nil {
@@ -963,7 +976,7 @@ func (a *App) photoAssetResourceProofs(
 func (a *App) consolidateEquivalentPhotoAssets(
 	ownerUserID, volumeID, canonicalAssetID string,
 	equivalentAssetIDs []string,
-	deviceID, localIdentifier, fingerprint string,
+	deviceID, localIdentifier, fingerprint, sourceModificationDate string,
 ) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	transaction, err := a.db.Begin()
@@ -1028,6 +1041,7 @@ func (a *App) consolidateEquivalentPhotoAssets(
 		deviceID,
 		localIdentifier,
 		fingerprint,
+		sourceModificationDate,
 		canonicalAssetID,
 		now,
 	); err != nil {
@@ -1052,7 +1066,7 @@ func (a *App) consolidateEquivalentPhotoAssets(
 }
 
 func (a *App) upsertDeviceAssetMapping(
-	ownerUserID, deviceID, localIdentifier, fingerprint, assetID string,
+	ownerUserID, deviceID, localIdentifier, fingerprint, sourceModificationDate, assetID string,
 ) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	transaction, err := a.db.Begin()
@@ -1061,7 +1075,8 @@ func (a *App) upsertDeviceAssetMapping(
 	}
 	defer transaction.Rollback()
 	_, err = a.upsertDeviceAssetMappingInTransaction(
-		transaction, ownerUserID, deviceID, localIdentifier, fingerprint, assetID, now,
+		transaction, ownerUserID, deviceID, localIdentifier, fingerprint,
+		sourceModificationDate, assetID, now,
 	)
 	if err != nil {
 		return err
@@ -1075,7 +1090,7 @@ func (a *App) upsertDeviceAssetMapping(
 // browse responses expose only aggregate predecessor/successor counts.
 func (a *App) upsertDeviceAssetMappingInTransaction(
 	transaction *sql.Tx,
-	ownerUserID, deviceID, localIdentifier, fingerprint, assetID, now string,
+	ownerUserID, deviceID, localIdentifier, fingerprint, sourceModificationDate, assetID, now string,
 ) (bool, error) {
 	var previousAssetID, previousFingerprint string
 	err := transaction.QueryRow(
@@ -1088,14 +1103,18 @@ func (a *App) upsertDeviceAssetMappingInTransaction(
 		return false, err
 	}
 	result, err := transaction.Exec(
-		`INSERT INTO device_asset_mappings(owner_user_id,device_id,local_identifier,fingerprint,asset_id,updated)
-		 VALUES(?,?,?,?,?,?)
+		`INSERT INTO device_asset_mappings(
+		 owner_user_id,device_id,local_identifier,fingerprint,source_modification_date,asset_id,updated
+		 ) VALUES(?,?,?,?,?,?,?)
 		 ON CONFLICT(owner_user_id,device_id,local_identifier)
-		 DO UPDATE SET fingerprint=excluded.fingerprint,asset_id=excluded.asset_id,updated=excluded.updated
+		 DO UPDATE SET fingerprint=excluded.fingerprint,
+		               source_modification_date=excluded.source_modification_date,
+		               asset_id=excluded.asset_id,updated=excluded.updated
 		 WHERE device_asset_mappings.fingerprint IS NOT excluded.fingerprint
+		    OR device_asset_mappings.source_modification_date IS NOT excluded.source_modification_date
 		    OR device_asset_mappings.asset_id IS NOT excluded.asset_id`,
-		ownerUserID, deviceID, localIdentifier, fingerprint, assetID,
-		now,
+		ownerUserID, deviceID, localIdentifier, fingerprint, sourceModificationDate,
+		assetID, now,
 	)
 	if err != nil {
 		return false, err

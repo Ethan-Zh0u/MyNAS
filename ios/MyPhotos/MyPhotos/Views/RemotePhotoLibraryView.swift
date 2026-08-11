@@ -1,6 +1,12 @@
 import AVKit
 import SwiftUI
 
+nonisolated enum RemotePhotoDownloadPolicy {
+    static func offersOriginalDownload(hasConfirmedLocalCopy: Bool) -> Bool {
+        !hasConfirmedLocalCopy
+    }
+}
+
 struct RemotePhotoLibraryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var viewModel: RemotePhotoLibraryViewModel
@@ -553,7 +559,7 @@ struct RemotePhotoDetailView: View {
     @State private var exportDownload: RemotePhotoOriginalDownload?
     @State private var showsOriginalExportSheet = false
     @State private var isDeleting = false
-    @State private var showsDuplicateDownloadConfirmation = false
+    @State private var hasDiscoveredAccessibleLocalCopy = false
     @State private var showsRemoteDeleteConfirmation = false
     @State private var showsFinalRemoteDeleteConfirmation = false
     @State private var showsFinalPairedDeleteConfirmation = false
@@ -629,7 +635,11 @@ struct RemotePhotoDetailView: View {
                 detailActions
                     .padding(.horizontal)
 
-                Text("下载会先核验每个原件资源的大小和 SHA-256，再通过系统 Photos 导入。删除时可只删除 MyNAS，或同时将已验证的本机原件移入系统“最近删除”。")
+                Text(
+                    hasConfirmedLocalCopy
+                        ? "原件同时保存在本机和 MyNAS。删除时可只删除 MyNAS，或同时将已验证的本机原件移入系统“最近删除”。"
+                        : "下载会先核验每个原件资源的大小和 SHA-256，再通过系统 Photos 导入。"
+                )
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
@@ -670,18 +680,6 @@ struct RemotePhotoDetailView: View {
                     }
                 }
             }
-        }
-        .confirmationDialog(
-            "本机已有这张照片",
-            isPresented: $showsDuplicateDownloadConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("仍然下载一份副本") {
-                Task { await downloadOriginalsToPhotos() }
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("MyNAS 已确认这台 iPhone 仍可访问同一项目。继续会在系统照片中创建一份新的副本。")
         }
         .confirmationDialog(
             "选择删除范围",
@@ -758,6 +756,7 @@ struct RemotePhotoDetailView: View {
     }
 
     private var hasConfirmedLocalCopy: Bool {
+        if hasDiscoveredAccessibleLocalCopy { return true }
         guard let confirmedLocalCopy else { return false }
         return localClient.hasAccessibleAsset(localIdentifier: confirmedLocalCopy.localIdentifier)
     }
@@ -767,7 +766,7 @@ struct RemotePhotoDetailView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("本机已有同一原件")
                     .font(.subheadline.weight(.semibold))
-                Text("继续下载会在系统照片中创建一份新的副本。")
+                Text("原件同时保存在本机和 MyNAS。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -783,17 +782,21 @@ struct RemotePhotoDetailView: View {
     @ViewBuilder
     private var detailActions: some View {
         VStack(spacing: 10) {
-            Button {
-                Task { await prepareOriginalDownload() }
-            } label: {
-                Label(
-                    downloadActionTitle,
-                    systemImage: "arrow.down.to.line.compact"
-                )
-                .frame(maxWidth: .infinity)
+            if RemotePhotoDownloadPolicy.offersOriginalDownload(
+                hasConfirmedLocalCopy: hasConfirmedLocalCopy
+            ) {
+                Button {
+                    Task { await prepareOriginalDownload() }
+                } label: {
+                    Label(
+                        downloadActionTitle,
+                        systemImage: "arrow.down.to.line.compact"
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+                .disabled(isPerformingAction)
+                remotePrimaryActionStyle()
             }
-            .disabled(isPerformingAction)
-            remotePrimaryActionStyle()
 
             Button {
                 Task { await exportVerifiedOriginals() }
@@ -877,10 +880,9 @@ struct RemotePhotoDetailView: View {
 
     private func prepareOriginalDownload() async {
         guard !isPerformingAction else { return }
-        if hasConfirmedLocalCopy {
-            showsDuplicateDownloadConfirmation = true
-            return
-        }
+        guard RemotePhotoDownloadPolicy.offersOriginalDownload(
+            hasConfirmedLocalCopy: hasConfirmedLocalCopy
+        ) else { return }
         isCheckingForDuplicate = true
         defer { isCheckingForDuplicate = false }
         do {
@@ -892,7 +894,7 @@ struct RemotePhotoDetailView: View {
             guard !Task.isCancelled else { return }
             if let mapping,
                localClient.hasAccessibleAsset(localIdentifier: mapping.localIdentifier) {
-                showsDuplicateDownloadConfirmation = true
+                hasDiscoveredAccessibleLocalCopy = true
             } else {
                 await downloadOriginalsToPhotos()
             }
@@ -974,7 +976,6 @@ struct RemotePhotoDetailView: View {
         if isCheckingForDuplicate { return "正在准备下载…" }
         if isImportingDownloadedResources { return "正在导入系统照片…" }
         if isDownloading { return "正在下载原件…" }
-        if hasConfirmedLocalCopy { return "仍然下载一份副本" }
         return "下载原件到本机"
     }
 

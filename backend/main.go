@@ -217,6 +217,7 @@ CREATE TABLE IF NOT EXISTS device_asset_mappings(
 	device_id TEXT NOT NULL,
 	local_identifier TEXT NOT NULL,
 	fingerprint TEXT NOT NULL,
+	source_modification_date TEXT NOT NULL DEFAULT '',
 	asset_id TEXT NOT NULL,
 	updated TEXT NOT NULL,
 	PRIMARY KEY(owner_user_id,device_id,local_identifier)
@@ -337,10 +338,29 @@ CREATE INDEX IF NOT EXISTS photo_changes_owner_sequence ON photo_changes(owner_u
 		"ALTER TABLE photo_assets ADD COLUMN derivative_recipe_version TEXT NOT NULL DEFAULT 'photos-browse-v2'",
 		"ALTER TABLE photo_assets ADD COLUMN derivative_error TEXT",
 		"ALTER TABLE photo_assets ADD COLUMN derivative_updated TEXT",
+		"ALTER TABLE device_asset_mappings ADD COLUMN source_modification_date TEXT NOT NULL DEFAULT ''",
 	} {
 		if _, e = a.db.Exec(statement); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
 			return e
 		}
+	}
+	if _, e = a.db.Exec(
+		`UPDATE device_asset_mappings AS m
+		 SET source_modification_date=COALESCE(
+		       NULLIF((SELECT s.modification_date
+		        FROM photo_upload_sessions s
+		        WHERE s.owner_user_id=m.owner_user_id
+		          AND s.device_id=m.device_id
+		          AND s.local_identifier=m.local_identifier
+		          AND s.status='completed'
+		          AND s.modification_date IS NOT NULL
+		          AND s.modification_date<>''
+		        ORDER BY s.updated DESC LIMIT 1),''),
+		       ''
+		     )
+		 WHERE source_modification_date=''`,
+	); e != nil {
+		return e
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, e = a.db.Exec(

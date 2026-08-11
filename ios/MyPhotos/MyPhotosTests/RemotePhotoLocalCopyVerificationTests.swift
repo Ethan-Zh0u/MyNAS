@@ -2,6 +2,19 @@ import XCTest
 @testable import MyPhotos
 
 final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
+    func testConfirmedLocalCopyDoesNotOfferAnotherOriginalDownload() {
+        XCTAssertTrue(
+            RemotePhotoDownloadPolicy.offersOriginalDownload(
+                hasConfirmedLocalCopy: false
+            )
+        )
+        XCTAssertFalse(
+            RemotePhotoDownloadPolicy.offersOriginalDownload(
+                hasConfirmedLocalCopy: true
+            )
+        )
+    }
+
     func testMissingOptionalDeviceMappingDoesNotBlockOriginalDownload() {
         XCTAssertTrue(RemotePhotoLibraryError.featureUnavailable.permitsDownloadWithoutDeviceMappingCheck)
         XCTAssertTrue(RemotePhotoLibraryError.invalidResponse.permitsDownloadWithoutDeviceMappingCheck)
@@ -134,8 +147,9 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
         )
     }
 
-    func testUnifiedTimelineMergesSeveralCurrentLocalCopiesOfOneRemoteAsset() {
-        let modificationDate = Date(timeIntervalSinceReferenceDate: 123_456)
+    func testUnifiedTimelineMergesSeveralCurrentLocalCopiesWithIndependentSourceVersions() {
+        let firstModificationDate = Date(timeIntervalSinceReferenceDate: 123_456)
+        let secondModificationDate = firstModificationDate.addingTimeInterval(86_400)
         let remote = ServerPhotoAsset(
             id: "remote-1",
             volumeID: "volume-1",
@@ -159,9 +173,12 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
             resources: [],
             derivatives: []
         )
-        let copies = ["local-old", "local-imported"].map {
+        let copies = zip(
+            ["local-old", "local-imported"],
+            [firstModificationDate, secondModificationDate]
+        ).map { localIdentifier, modificationDate in
             LocalPhotoAsset(
-                localIdentifier: $0,
+                localIdentifier: localIdentifier,
                 creationDate: modificationDate,
                 modificationDate: modificationDate,
                 mediaKind: .photo,
@@ -179,7 +196,7 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
                 localIdentifier: $0.localIdentifier,
                 mediaKind: $0.mediaKind,
                 creationDate: $0.creationDate,
-                sourceModificationDate: modificationDate,
+                sourceModificationDate: $0.modificationDate,
                 status: .completed,
                 totalBytes: 1,
                 uploadedBytes: 1,
@@ -190,7 +207,7 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
                 origin: .manual,
                 message: nil,
                 failure: nil,
-                updatedAt: modificationDate
+                updatedAt: $0.modificationDate ?? .distantPast
             )
         }
 
