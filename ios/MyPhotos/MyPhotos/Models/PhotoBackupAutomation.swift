@@ -30,7 +30,76 @@ struct PhotoBackupAutomationPolicy: Codable, Equatable, Sendable {
     var isEnabled: Bool
     var networkPolicy: PhotoBackupAutomaticNetworkPolicy
     var pausesInLowPowerMode: Bool
+    /// This is deliberately independent from `isEnabled`: automatic discovery
+    /// must not silently grant PhotoKit permission to download iCloud originals.
+    var automaticallyDownloadsICloudOriginals: Bool
     var updatedAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case accountID
+        case serverID
+        case userID
+        case isEnabled
+        case networkPolicy
+        case pausesInLowPowerMode
+        case automaticallyDownloadsICloudOriginals
+        case updatedAt
+    }
+
+    nonisolated init(
+        accountID: String,
+        serverID: String,
+        userID: String,
+        isEnabled: Bool,
+        networkPolicy: PhotoBackupAutomaticNetworkPolicy,
+        pausesInLowPowerMode: Bool,
+        automaticallyDownloadsICloudOriginals: Bool = false,
+        updatedAt: Date
+    ) {
+        self.accountID = accountID
+        self.serverID = serverID
+        self.userID = userID
+        self.isEnabled = isEnabled
+        self.networkPolicy = networkPolicy
+        self.pausesInLowPowerMode = pausesInLowPowerMode
+        self.automaticallyDownloadsICloudOriginals = automaticallyDownloadsICloudOriginals
+        self.updatedAt = updatedAt
+    }
+
+    /// Older G1 policy files predate the iCloud-original switch. Decode those
+    /// files fail-closed so an app update cannot begin a large cloud download.
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accountID = try container.decode(String.self, forKey: .accountID)
+        serverID = try container.decode(String.self, forKey: .serverID)
+        userID = try container.decode(String.self, forKey: .userID)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        networkPolicy = try container.decode(
+            PhotoBackupAutomaticNetworkPolicy.self,
+            forKey: .networkPolicy
+        )
+        pausesInLowPowerMode = try container.decode(Bool.self, forKey: .pausesInLowPowerMode)
+        automaticallyDownloadsICloudOriginals = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .automaticallyDownloadsICloudOriginals
+        ) ?? false
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(accountID, forKey: .accountID)
+        try container.encode(serverID, forKey: .serverID)
+        try container.encode(userID, forKey: .userID)
+        try container.encode(isEnabled, forKey: .isEnabled)
+        try container.encode(networkPolicy, forKey: .networkPolicy)
+        try container.encode(pausesInLowPowerMode, forKey: .pausesInLowPowerMode)
+        try container.encode(
+            automaticallyDownloadsICloudOriginals,
+            forKey: .automaticallyDownloadsICloudOriginals
+        )
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
 
     static func disabled(for account: AccountContext) -> PhotoBackupAutomationPolicy {
         PhotoBackupAutomationPolicy(
@@ -40,6 +109,7 @@ struct PhotoBackupAutomationPolicy: Codable, Equatable, Sendable {
             isEnabled: false,
             networkPolicy: .wifiOnly,
             pausesInLowPowerMode: true,
+            automaticallyDownloadsICloudOriginals: false,
             updatedAt: Date()
         )
     }
@@ -49,6 +119,12 @@ struct PhotoBackupAutomationPolicy: Codable, Equatable, Sendable {
             && serverID == account.serverID
             && userID == account.userID
             && !account.isLocalOnly
+    }
+
+    /// Manual backup is an explicit user action and keeps the existing ability
+    /// to request an iCloud original. Automatic work requires the extra opt-in.
+    nonisolated func allowsPhotoKitNetworkAccess(forAutomaticBackup isAutomatic: Bool) -> Bool {
+        !isAutomatic || automaticallyDownloadsICloudOriginals
     }
 }
 
@@ -64,6 +140,7 @@ enum PhotoBackupAutomationStatus: Equatable, Sendable {
     case waitingForSelectedAccount
     case verifyingExistingBackups
     case waitingToVerifyExistingBackups
+    case waitingForICloudOriginalPermission
     case discovering
     case uploading
     case backgroundTransferActive
@@ -82,6 +159,7 @@ enum PhotoBackupAutomationStatus: Equatable, Sendable {
         case .waitingForSelectedAccount: "等待切回此账号"
         case .verifyingExistingBackups: "正在核验已有备份"
         case .waitingToVerifyExistingBackups: "等待核验已有备份"
+        case .waitingForICloudOriginalPermission: "等待允许下载 iCloud 原件"
         case .discovering: "正在发现新项目"
         case .uploading: "正在自动上传"
         case .backgroundTransferActive: "iOS 正在处理后台传输"
@@ -113,10 +191,12 @@ enum PhotoBackupAutomationStatus: Equatable, Sendable {
             "自动上传会先向 MyNAS 核验此设备已确认的备份记录，避免重复排队。"
         case .waitingToVerifyExistingBackups:
             "上次核验未完成；App 会在前台下次检查时重试，期间不会自动上传。"
+        case .waitingForICloudOriginalPermission:
+            "有项目的完整原件只在 iCloud。开启“自动下载 iCloud 原件”，或点“立即备份”手动处理。"
         case .discovering:
             "正在比较当前图库与该账号已验证的备份记录。"
         case .uploading:
-            "自动发现的项目正在以前台队列上传。"
+            "App 正在读取本机或已允许的 iCloud 原件；准备完成后可交给 iOS 系统传输。"
         case .backgroundTransferActive:
             "iOS 已接管已准备好的上传文件；网络、电量和系统调度仍可能延后传输。"
         case .watchingForeground:
@@ -136,6 +216,7 @@ enum PhotoBackupAutomationStatus: Equatable, Sendable {
         case .waitingForCurrentBackup: "clock.arrow.circlepath"
         case .waitingForSelectedAccount: "person.crop.circle.badge.pause"
         case .verifyingExistingBackups, .waitingToVerifyExistingBackups: "checkmark.shield"
+        case .waitingForICloudOriginalPermission: "icloud.and.arrow.down"
         case .discovering: "photo.on.rectangle.angled"
         case .uploading: "arrow.up.circle.fill"
         case .backgroundTransferActive: "arrow.triangle.2.circlepath"

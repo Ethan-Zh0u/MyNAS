@@ -339,6 +339,15 @@ final class PhotoBackupCoordinator: ObservableObject {
         }
     }
 
+    func setAutomaticICloudOriginalDownload(
+        _ automaticallyDownloadsICloudOriginals: Bool,
+        for account: AccountContext
+    ) {
+        updateAutomationPolicy(for: account) { policy in
+            policy.automaticallyDownloadsICloudOriginals = automaticallyDownloadsICloudOriginals
+        }
+    }
+
     /// G1's automatic discovery entry point. It runs only when the local
     /// library changed or the active scene returned to the foreground.
     func discoverAndAutomaticallyBackUp(
@@ -904,6 +913,11 @@ final class PhotoBackupCoordinator: ObservableObject {
         let newlyPausesForLowPower = !previousPolicy.pausesInLowPowerMode
             && policy.pausesInLowPowerMode
             && automationConditions.snapshot.isLowPowerModeEnabled
+        let newlyAllowsICloudOriginals = !previousPolicy.automaticallyDownloadsICloudOriginals
+            && policy.automaticallyDownloadsICloudOriginals
+        if newlyAllowsICloudOriginals {
+            resumeJobsWaitingForICloudOriginals(accountID: account.accountID)
+        }
         if !policy.isEnabled || hasTightenedNetworkPolicy || newlyPausesForLowPower {
             backgroundTransferEngine.pauseTransfers(
                 for: account,
@@ -915,6 +929,22 @@ final class PhotoBackupCoordinator: ObservableObject {
             )
         }
         evaluateAutomaticBackup(for: account.accountID)
+    }
+
+    private func resumeJobsWaitingForICloudOriginals(accountID: String) {
+        var changed = false
+        for index in jobs.indices where
+            jobs[index].accountID == accountID
+                && jobs[index].status == .waitingForICloud
+                && jobs[index].origin == .automatic {
+            jobs[index].status = .waiting
+            jobs[index].message = "已允许下载 iCloud 原件，等待自动备份"
+            jobs[index].updatedAt = Date()
+            changed = true
+        }
+        if changed {
+            persist()
+        }
     }
 
     private func reevaluateAutomaticBackupRequests() {
@@ -977,6 +1007,20 @@ final class PhotoBackupCoordinator: ObservableObject {
             return
         }
 
+        let policy = automationPolicy(for: request.account)
+        var hasICloudWaitingWork = false
+        if policy.automaticallyDownloadsICloudOriginals {
+            resumeJobsWaitingForICloudOriginals(accountID: accountID)
+        } else {
+            let availableIdentifiers = Set(request.assets.map(\.localIdentifier))
+            hasICloudWaitingWork = jobs.contains {
+                $0.accountID == accountID
+                    && $0.status == .waitingForICloud
+                    && $0.origin == .automatic
+                    && availableIdentifiers.contains($0.localIdentifier)
+            }
+        }
+
         let pending = pendingCount(for: request.assets, accountID: accountID)
         guard pending > 0 else {
             updateAutomationStatus(.watchingForeground, for: accountID)
@@ -994,7 +1038,10 @@ final class PhotoBackupCoordinator: ObservableObject {
             $0.accountID == accountID && $0.status == .waiting && $0.origin == .automatic
         }
         guard hasAutomaticWork else {
-            updateAutomationStatus(.watchingForeground, for: accountID)
+            updateAutomationStatus(
+                hasICloudWaitingWork ? .waitingForICloudOriginalPermission : .watchingForeground,
+                for: accountID
+            )
             return
         }
         run(
@@ -1202,6 +1249,16 @@ final class PhotoBackupCoordinator: ObservableObject {
                     continue
                 }
                 if !sourceChanged {
+                    if jobs[index].status == .waitingForICloud, origin == .manual {
+                        jobs[index].status = .waiting
+                        jobs[index].origin = .manual
+                        jobs[index].message = "手动备份将下载 iCloud 原件"
+                        jobs[index].failure = nil
+                        jobs[index].updatedAt = Date()
+                        queuedCount += 1
+                        changed = true
+                        continue
+                    }
                     if jobs[index].status == .failed, retryFailed {
                         jobs[index].status = .waiting
                         jobs[index].message = "等待重试"
@@ -1439,17 +1496,27 @@ final class PhotoBackupCoordinator: ObservableObject {
         account: AccountContext,
         client: PhotoLibraryClient
     ) async {
+        let isAutomaticJob = jobs.first(where: { $0.id == jobID })?.origin == .automatic
+        let policy = automationPolicy(for: account)
+        let allowsPhotoKitNetworkAccess = policy.allowsPhotoKitNetworkAccess(
+            forAutomaticBackup: isAutomaticJob
+        )
         update(jobID) {
             $0.status = .preparing
             $0.failure = nil
-            $0.message = asset.mediaKind == .livePhoto
+            $0.message = isAutomaticJob && allowsPhotoKitNetworkAccess
+                ? "读取本机资源；需要时从 iCloud 下载完整原件"
+                : asset.mediaKind == .livePhoto
                 ? "读取静态原图、配对视频与编辑资源"
                 : "读取 PhotoKit 原始资源"
         }
 
         var preparedAsset: PreparedPhotoAsset?
         do {
-            let prepared = try await client.prepareBackupAsset(asset)
+            let prepared = try await client.prepareBackupAsset(
+                asset,
+                allowsNetworkAccess: allowsPhotoKitNetworkAccess
+            )
             preparedAsset = prepared
             update(jobID) {
                 $0.status = .uploading
@@ -1519,6 +1586,13 @@ final class PhotoBackupCoordinator: ObservableObject {
                 $0.failure = nil
                 $0.message = "低电量模式已暂停，等待恢复自动备份"
             }
+        } catch PhotoBackupPreparationError.iCloudDownloadRequired {
+            update(jobID) {
+                $0.status = .waitingForICloud
+                $0.failure = nil
+                $0.message = "完整原件只在 iCloud；自动下载当前未开启"
+            }
+            updateAutomationStatus(.waitingForICloudOriginalPermission, for: account.accountID)
         } catch {
             let failure = Self.failure(from: error)
             update(jobID) {
@@ -1674,11 +1748,14 @@ final class PhotoBackupCoordinator: ObservableObject {
         for cycle in 0..<3 {
             let coordinator = self
             let isRecovery = cycle > 0
+            let expectedRemoteAssetID = jobs.first(where: { $0.id == jobID })?
+                .pendingVerifiedRemoteAssetID
             do {
                 return try await uploader.upload(
                     preparedAsset: preparedAsset,
                     account: account,
-                    deviceID: deviceID
+                    deviceID: deviceID,
+                    expectedAssetID: expectedRemoteAssetID
                 ) { uploaded, total in
                     Task { @MainActor [coordinator] in
                         coordinator.update(jobID) {
@@ -1772,6 +1849,8 @@ final class PhotoBackupCoordinator: ObservableObject {
         } else if let preparationError = error as? PhotoBackupPreparationError {
             switch preparationError {
             case .assetUnavailable, .noResources:
+                kind = .sourceUnavailable
+            case .iCloudDownloadRequired:
                 kind = .sourceUnavailable
             case .invalidResource:
                 kind = .integrity

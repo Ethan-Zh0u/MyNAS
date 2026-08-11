@@ -1,6 +1,6 @@
 # MyNAS Photos — API 契约
 
-当前已部署 MyNAS `0.8.5` 使用 API version `v1`，包含 E1 状态字段、E2 服务端派生任务、E3 受控远程读取接口、F2 同设备映射恢复、F3 精确内容关联摘要、F4 显式版本转移和 H0 受限删除配对。路由以 `/api/v1/photos` 为前缀，不改变 MyNAS 的通用 `health`、`files`、`uploads`、`trash` 等 API；后者不是 Photos 授权或完整性协议的替代品。通用 `GET /api/v1/health` 在 Linux thermal zone 可读时返回 `system.temperatureC`，不可读时省略该字段。2026-08-03 的受控 G2 验收 release 明确返回 `features.backgroundTransfers=true`；这不是已完成后台能力声明。**H1 的下列接口已在本地源码与回归中实现，但尚未部署到该 0.8.5 服务或经真机验收。**
+当前维护候选 MyNAS `0.9.3` 继续使用 API version `v1`，包含 E1 状态字段、E2 服务端派生任务、E3 受控远程读取接口、F2 同设备映射恢复、F3 精确内容关联摘要、F4 显式版本转移、H0/H1 受限删除与原件恢复，以及 G2 的受控系统传输协议。路由以 `/api/v1/photos` 为前缀，不改变 MyNAS 的通用 `health`、`files`、`uploads`、`trash` 等 API；后者不是 Photos 授权或完整性协议的替代品。通用 `GET /api/v1/health` 在 Linux thermal zone 可读时返回 `system.temperatureC`，不可读时省略该字段。`features.backgroundTransfers=true` 只表示受控 G2 路径已启用，不是完整后台能力声明。
 
 ## 共同安全规则
 
@@ -24,7 +24,7 @@ iOS 必须依序调用 capabilities → me → volumes，并验证 capabilities 
 
 | Method | Path | 行为 |
 | --- | --- | --- |
-| POST | `/upload-sessions` | 提交一个 asset 的完整 manifest；按 `owner + volume + device + localIdentifier + fingerprint` 返回新/既有可续传 session，或返回 `status=duplicate` 的已有 asset。不同卷绝不复用 session 或 received bytes。 |
+| POST | `/upload-sessions` | 提交一个 asset 的完整 manifest；按 `owner + volume + device + localIdentifier + fingerprint` 返回新/既有可续传 session，或返回 `status=duplicate` 的已有 asset。可选 `expectedAssetID` 只用于已经逐资源证明的下载/恢复关联：服务端必须在创建新 asset 前复核 owner、卷、source committed 与完整资源组，匹配才返回该目标 ID。不同卷绝不复用 session 或 received bytes。 |
 | GET | `/upload-sessions/{id}` | 读取 owner 自己的 session 与每资源 `receivedBytes`，供重开/断网续传。 |
 | PUT | `/upload-sessions/{id}/resources/{resourceID}/parts/{n}` | 上传恰好一个不超过 4 MiB 的分片；要求 `X-Upload-Offset` 和 `X-Chunk-SHA256`。已接收 part 幂等返回当前位置，跳跃 offset 返回冲突。 |
 | POST | `/upload-sessions/{id}/complete` | 逐资源核对长度和完整 SHA-256；整组通过后提交原件和元数据；有任一资源缺失/不匹配则拒绝。 |
@@ -36,6 +36,7 @@ iOS 必须依序调用 capabilities → me → volumes，并验证 capabilities 
   "volumeID": "primary",
   "deviceID": "ios-…",
   "localIdentifier": "PhotoKit local identifier",
+  "expectedAssetID": "ast-… optional verified target",
   "fingerprint": "sha256 of canonical manifest",
   "mediaType": "photo | video | livePhoto",
   "captureDate": "RFC3339 optional",
@@ -55,7 +56,7 @@ iOS 必须依序调用 capabilities → me → volumes，并验证 capabilities 
 }
 ```
 
-响应包含 session/asset ID、`waiting|uploading|completed|failed|duplicate`、fingerprint、总/已接收字节和资源状态。完成或去重响应还包含 `sourceState`、`derivativeState` 和 `browseReady`。上传完成的即时结果通常是 `sourceCommitted + pending + false`；E2 worker 只有在 required outputs 均完成后才把 asset 变为 ready。
+响应包含 session/asset ID、`waiting|uploading|completed|failed|duplicate`、fingerprint、总/已接收字节和资源状态。完成或去重响应还包含 `sourceState`、`derivativeState` 和 `browseReady`。上传完成的即时结果通常是 `sourceCommitted + pending + false`；E2 worker 只有在 required outputs 均完成后才把 asset 变为 ready。`expectedAssetID` 目标缺失、跨 owner/卷、非 committed 或资源角色/字节数/SHA-256 任一不一致时返回 422，且不得创建会话、asset 或 mapping。目标证明成功时，历史完全相同 asset 可迁移 mapping 并进入 `sourceSuperseded`；其原件文件和资源记录保持保留，浏览 API 只返回 committed 逻辑 asset。
 
 ## 当前已实现：远程图库与资源读取
 

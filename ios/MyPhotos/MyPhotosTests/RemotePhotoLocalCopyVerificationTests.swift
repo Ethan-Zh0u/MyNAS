@@ -42,6 +42,52 @@ final class RemotePhotoLocalCopyVerificationTests: XCTestCase {
         )
     }
 
+    func testVerifiedAssociationCarriesExpectedRemoteAssetIntoUploadManifest() throws {
+        let source = Data("verified-original".utf8)
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try source.write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let local = LocalPhotoAsset(
+            localIdentifier: "local-import-placeholder",
+            creationDate: nil,
+            modificationDate: nil,
+            mediaKind: .photo,
+            isRAW: false,
+            pixelWidth: 1_200,
+            pixelHeight: 800,
+            duration: 0,
+            isFavorite: false
+        )
+        let prepared = PreparedPhotoAsset(
+            localAsset: local,
+            temporaryDirectory: FileManager.default.temporaryDirectory,
+            resourceDrafts: [
+                .init(
+                    role: "photo",
+                    originalFilename: "test.png",
+                    contentType: "public.png",
+                    byteSize: Int64(source.count),
+                    sha256: FileSHA256.digest(of: source),
+                    fileURL: sourceURL
+                )
+            ]
+        )
+
+        let request = prepared.uploadSessionRequest(
+            volumeID: "primary",
+            deviceID: "current-iphone",
+            expectedAssetID: "  ast-verified-target  "
+        )
+
+        XCTAssertEqual(request.expectedAssetID, "ast-verified-target")
+        let encoded = try JSONEncoder().encode(request)
+        XCTAssertEqual(
+            try JSONDecoder().decode(PhotoUploadSessionRequest.self, from: encoded).expectedAssetID,
+            "ast-verified-target"
+        )
+    }
+
     func testUniqueCompleteResourceGroupMatchSelectsOnlyExactRemote() {
         let exactHash = String(repeating: "a", count: 64)
         let otherHash = String(repeating: "b", count: 64)

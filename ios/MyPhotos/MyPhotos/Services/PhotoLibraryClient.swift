@@ -555,8 +555,19 @@ final class PhotoLibraryClient: NSObject {
             )
         } catch {
             try? FileManager.default.removeItem(at: directory)
+            if !allowsNetworkAccess, Self.isPhotoKitNetworkAccessRequired(error) {
+                throw PhotoBackupPreparationError.iCloudDownloadRequired
+            }
             throw error
         }
+    }
+
+    /// PhotoKit uses this exact public error when an original is not stored on
+    /// device and a request deliberately disallows network access.
+    static func isPhotoKitNetworkAccessRequired(_ error: Error) -> Bool {
+        let photoError = error as NSError
+        return photoError.domain == PHPhotosErrorDomain
+            && photoError.code == PHPhotosError.networkAccessRequired.rawValue
     }
 
     func startCachingThumbnails(for identifiers: [String], targetSize: CGSize) {

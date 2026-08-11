@@ -62,9 +62,9 @@ struct PhotoBackupView: View {
 
     private var automationFooter: String {
         if accountStore.current.serverCapabilities.supportsBackgroundTransfers {
-            return "新项目仍只在 App 前台通过 PhotoKit 发现。已准备且此账号允许的上传可交给 iOS background URLSession/BGTask 续接；网络、电量和系统调度仍可能延后，不能保证持续或即时上传。"
+            return "新项目仍只在 App 前台通过 PhotoKit 发现；仅在 iCloud 的原件也由 iPhone 系统照片框架按独立开关下载，MyNAS 不会直连 iCloud。已准备且此账号允许的上传可交给 iOS background URLSession/BGTask 续接；网络、电量和系统调度仍可能延后。"
         }
-        return "当前 G1 仅在 App 前台通过 PhotoKit 发现新项目并使用现有前台上传队列。它不是 BGTask 或 background URLSession：锁屏、退出 App 或系统回收后不保证继续上传。"
+        return "当前仅在 App 前台通过 PhotoKit 发现项目并准备原件；仅在 iCloud 的原件也由 iPhone 按独立开关下载，MyNAS 不会直连 iCloud。此服务器不支持系统后台传输，锁屏、退出 App 或系统回收后不保证继续上传。"
     }
 
     var body: some View {
@@ -137,6 +137,27 @@ struct PhotoBackupView: View {
                                 set: { coordinator.setAutomaticLowPowerPause($0, for: accountStore.current) }
                             )
                         )
+
+                        Toggle(
+                            "自动下载 iCloud 原件",
+                            isOn: Binding(
+                                get: { automationPolicy.automaticallyDownloadsICloudOriginals },
+                                set: {
+                                    coordinator.setAutomaticICloudOriginalDownload(
+                                        $0,
+                                        for: accountStore.current
+                                    )
+                                }
+                            )
+                        )
+
+                        Text(
+                            automationPolicy.automaticallyDownloadsICloudOriginals
+                                ? "需要时，iPhone 会先通过系统照片框架下载完整原件，再交给 MyNAS 备份；不会删除系统相册中的项目。"
+                                : "默认关闭。仅在 iCloud 的原件会等待；点“立即备份”仍可手动下载并备份。"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
 
                         automationPauseButton
                     }
@@ -432,7 +453,7 @@ private struct BackupJobRow: View {
         case .completed: .green
         case .failed: .red
         case .uploading: .accentColor
-        case .waiting, .preparing: .secondary
+        case .waiting, .waitingForICloud, .preparing: .secondary
         }
     }
 }

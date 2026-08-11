@@ -9,7 +9,7 @@
 | 实体 | 关键字段 / 约束 | 当前语义 |
 | --- | --- | --- |
 | `photo_users` | `id`、唯一 `authentication_identity`、显示名、头像版本 | Tailscale 登录映射到稳定 opaque user ID |
-| `photo_assets` | `id`、owner/volume/fingerprint、媒体/拍摄元数据、兼容 `backup_state`、`source_state`、`derivative_state`、recipe/error/updated | 原件提交后为 `sourceCommitted + pending`；只有 required derivatives 都完成才能进入 `ready` |
+| `photo_assets` | `id`、owner/volume/fingerprint、媒体/拍摄元数据、兼容 `backup_state`、`source_state`、`derivative_state`、recipe/error/updated | 原件提交后为 `sourceCommitted + pending`；只有 required derivatives 都完成才能进入 `ready`。旧传输指纹误建、但经完整资源证明与目标 asset 完全相同的记录可进入 `sourceSuperseded`；该状态不浏览，但原件和资源记录保留 |
 | `photo_resources` | asset/owner/volume、role、文件名、content type、大小、SHA-256、相对 `storage_path` | 一个 asset 多条记录；Live Photo/RAW/HDR 都用同一结构 |
 | `photo_upload_sessions` | owner、volume、device、PhotoKit local ID、fingerprint、目标 asset ID、stage dir、状态 | 持久化续传会话；唯一身份为 `owner + volume + device + local ID + fingerprint`，状态为 waiting/uploading/completed/failed。仅在后台 capability 显式开启的进程启动期，超过七天的未完成会话才可能被清理，且须通过卷/精确暂存路径校验 |
 | `photo_upload_resources` | session、客户端资源 ID、role、hash、stage name、`received`、4 MiB `chunk_size`、状态 | 服务器以 `received` 为真相恢复每个资源 |
@@ -34,7 +34,7 @@
 | --- | --- |
 | `AccountContext` | `accountID`、server/user ID、URL、Tailscale identity、卷、capabilities；无 MyNAS 密码/token |
 | `LocalPhotoAsset` | local identifier、创建/修改时间、媒体种类、像素、时长、favorite；不承诺远端状态 |
-| `PreparedPhotoAsset` | 当前上传期的完整 resource group、每资源临时文件/大小/SHA-256 和 manifest fingerprint |
+| `PreparedPhotoAsset` / `PhotoUploadSessionRequest` | 当前上传期的完整 resource group、每资源临时文件/大小/SHA-256 和 manifest fingerprint；已验证的下载/恢复关联额外携带可选 `expectedAssetID`，普通/自动备份为 `nil` |
 | `PhotoBackupJob` | account、local ID、源修改日期、waiting/preparing/uploading/completed/failed、字节/资源数/asset ID、可选 source/derivative 状态，以及持久化的失败类别/详情/发生时间。可选 `pendingVerifiedRemoteAssetID` 只在完整资源组经 MyNAS 下载校验或角色+字节数+SHA-256 唯一比对后写入，用于服务端 mapping 完成前的显示去重与重启恢复；它不能形成删除候选或 completed proof。H1 删除成功后仅将匹配 proof 转为 `remoteDeleted` failed并等待用户明确手动重传 |
 | `PhotoBackupBackgroundTransferRecord` | G2 的受保护任务登记册记录；绑定 `accountID + serverID + userID + volumeID`、当前 local identifier/source version、manifest fingerprint 与每资源 hash/相对暂存文件名，并最多绑定一个 future system task 的 ID、协议阶段、资源/分片范围、body/response 文件名、HTTP 状态和响应长度，以及只在完整响应验证后写入的上传 outcome。2026-08-03 的受控部署允许创建后台会话或任务；同日 iPhone 16 Pro 已完成一项 212.1 MB 的真实锁屏系统传输并得到 MyNAS outcome，终止/中断恢复等其余验收仍待完成。 |
 | `PhotoBackupProgressSnapshot` | **队列**完成数、失败数和总数；不是服务器完整图库数，也不是 browse-ready 计数 |
@@ -43,7 +43,7 @@
 | `ServerAssetPage` | owner-scoped 稳定分页结果、opaque next cursor 与 has-more |
 | `CacheDirectoryProvider` | `AppCache/<serverID>/<userID>/<kind>` 的目录约定；E4 已用于带 ETag 的 metadata 以及经 SHA-256 校验的 grid/preview，尚未实现 LRU/缓存索引 |
 
-`PhotoBackupJob.completed` 仍表示上传协议返回 `completed`/`duplicate` 且原始资源已经校验；E1 已增加可选的 `sourceState`、`derivativeState` 和计算属性 `isBrowseReady`。`pendingVerifiedRemoteAssetID` 同样是可选字段，旧队列缺失时解码为 `nil`；服务器返回的 asset ID 必须与它一致才可升级为 completed，否则记为完整性失败。不要把待登记目标或 job 的 completed 单独扩展成远程删除资格。
+`PhotoBackupJob.completed` 仍表示上传协议返回 `completed`/`duplicate` 且原始资源已经校验；E1 已增加可选的 `sourceState`、`derivativeState` 和计算属性 `isBrowseReady`。`pendingVerifiedRemoteAssetID` 同样是可选字段，旧队列缺失时解码为 `nil`；客户端会把它作为 `expectedAssetID` 发送，服务器只有在重新证明目标完整资源组相同后才返回同一 ID，客户端仍要求返回 ID 严格一致才可升级为 completed。不要把待登记目标或 job 的 completed 单独扩展成远程删除资格。
 
 G2 登记册与前台队列分开存放，使用同一等级的 Data Protection 原子写入。对应暂存器只会在逐资源复制后再次验证字节数和 SHA-256 均匹配时写入记录；失败会清理尚未登记的暂存目录。它使用与前台上传共享的 manifest 类型写入创建会话 request body，并写入空完成 request body；按需分片准备器只从已验证的暂存资源生成唯一、不覆盖既有文件的 part body，返回该文件的字节数和 SHA-256。每条记录至多登记一个 iOS 协议 task，且 task ID、请求阶段、资源/分片范围、相对 body/response 文件名和回调 HTTP 状态/响应长度均必须与记录形状相符；传输结束后只进入“等待 App 解析”，不能据此标记上传成功。客户端的 background engine 使用按网络策略分离的 file-backed session，回调只在完整响应被解析、来源/派生状态符合现有完整性契约后，才写入 outcome；中断或策略暂停会清除 session/offset 假设，重新用幂等 create-session 获得 MyNAS 权威 received bytes。仅当相关前台队列已成功原子写入同一完成 outcome 时，才可按记录 UUID、server/user 私有路径再次核验并删除该暂存目录及登记册；任一写入或清理失败都会保留记录。服务端续传会话也以 `owner + volume + device + local ID + fingerprint` 为唯一身份，旧库在启动迁移中保留所有行并升级该约束，因而切卷绝不复用 session 或 received bytes。App 的 BGProcessing handler 只读取这些持久记录，且每次再核验当前账号、卷、capability、用户策略和低电量条件；它不读取 PhotoKit 或创建新备份。它不保存凭据、服务器存储路径或完整 App 沙盒绝对路径；暂存目录由记录 UUID 推导，资源文件名只能是受限的单一路径组件。2026-08-03 的受控部署 capability 为 true，因此首次真实后台 `URLSession`/`BGTask` 验收可以创建记录；在回调、媒体完整性和终止恢复被观察前，仍不能把任一记录解释为已在系统后台完成。
 
@@ -63,13 +63,13 @@ G2 的 PhotoBackupBackgroundTransferProgress 也是进程内模型，不编码�
 
 ## Manifest 与去重
 
-客户端与服务端使用相同的 SHA-256 manifest 规则。客户端先稳定排序 resource draft，赋予 `resource-000` 等 ID；fingerprint 逐行包含：
+客户端与服务端使用相同的 SHA-256 上传会话 manifest 规则。客户端先稳定排序 resource draft，赋予 `resource-000` 等 ID；用于会话续传身份的 fingerprint 逐行包含：
 
 ```text
 clientResourceID \0 resourceRole \0 resourceSHA256 \0 byteSize \n
 ```
 
-服务端重新按 `clientResourceID` 排序并计算相同格式。去重键必须包含 owner 与 volume，并优先检查设备映射；相同内容来自不同 local ID 时可复用 asset。文件名、拍摄日期、尺寸都不能单独判重。
+服务端重新按 `clientResourceID` 排序并计算相同格式。该 fingerprint 只用于会话幂等和旧映射兼容，**不是最终内容唯一性**：内容去重和 `expectedAssetID` 目标验证使用完整资源证明多重集 `resourceRole + byteSize + SHA-256`，忽略 transport-only `clientResourceID`、原文件名及 MIME/UTI 拼写。owner 与 volume 仍是硬隔离边界；文件名、拍摄日期、尺寸或缩略图都不能单独判重。
 
 ## 后续阶段仍待实现的模型
 

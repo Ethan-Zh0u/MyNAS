@@ -40,6 +40,69 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
         XCTAssertTrue(MyPhotosRuntime.isRunningXCTest)
     }
 
+    func testAutomaticICloudOriginalDownloadIsIndependentAndDefaultsOff() {
+        let account = connectedAccount()
+        var policy = PhotoBackupAutomationPolicy.disabled(for: account)
+
+        XCTAssertFalse(policy.automaticallyDownloadsICloudOriginals)
+        XCTAssertTrue(policy.allowsPhotoKitNetworkAccess(forAutomaticBackup: false))
+        XCTAssertFalse(policy.allowsPhotoKitNetworkAccess(forAutomaticBackup: true))
+
+        policy.automaticallyDownloadsICloudOriginals = true
+        XCTAssertTrue(policy.allowsPhotoKitNetworkAccess(forAutomaticBackup: true))
+    }
+
+    func testLegacyAutomaticPolicyLoadsWithICloudOriginalDownloadDisabled() throws {
+        let policyURL = temporaryRoot.appendingPathComponent(
+            "legacy-automatic-policy.json",
+            isDirectory: false
+        )
+        let legacyJSON = """
+        [{
+          "accountID": "legacy-account",
+          "serverID": "legacy-server",
+          "userID": "legacy-user",
+          "isEnabled": true,
+          "networkPolicy": "wifiOnly",
+          "pausesInLowPowerMode": true,
+          "updatedAt": 0
+        }]
+        """
+        try Data(legacyJSON.utf8).write(to: policyURL)
+
+        let restored = try XCTUnwrap(
+            PhotoBackupAutomationPolicyStore(explicitURL: policyURL).load().first
+        )
+
+        XCTAssertTrue(restored.isEnabled)
+        XCTAssertFalse(restored.automaticallyDownloadsICloudOriginals)
+    }
+
+    func testAutomaticPolicyRoundTripPreservesICloudOriginalOptIn() throws {
+        let account = connectedAccount()
+        let policyURL = temporaryRoot.appendingPathComponent(
+            "icloud-automatic-policy.json",
+            isDirectory: false
+        )
+        let store = PhotoBackupAutomationPolicyStore(explicitURL: policyURL)
+        var policy = enabledAutomaticPolicy(for: account)
+        policy.automaticallyDownloadsICloudOriginals = true
+
+        try store.save([policy])
+
+        XCTAssertEqual(try store.load(), [policy])
+    }
+
+    func testPhotoKitNetworkAccessRequiredClassifierIsExact() {
+        let required = NSError(domain: "PHPhotosErrorDomain", code: 3_164)
+        let otherPhotoError = NSError(domain: "PHPhotosErrorDomain", code: 3_169)
+        let sameCodeFromAnotherDomain = NSError(domain: NSCocoaErrorDomain, code: 3_164)
+
+        XCTAssertTrue(PhotoLibraryClient.isPhotoKitNetworkAccessRequired(required))
+        XCTAssertFalse(PhotoLibraryClient.isPhotoKitNetworkAccessRequired(otherPhotoError))
+        XCTAssertFalse(PhotoLibraryClient.isPhotoKitNetworkAccessRequired(sameCodeFromAnotherDomain))
+    }
+
     func testRestartNormalizesAutomaticInFlightJobToWaiting() throws {
         let account = connectedAccount()
         let queueURL = temporaryRoot.appendingPathComponent("jobs.json", isDirectory: false)
@@ -1055,6 +1118,7 @@ final class PhotoBackupBackgroundTransferTests: XCTestCase {
         XCTAssertEqual(manifest.volumeID, account.selectedVolumeID)
         XCTAssertEqual(manifest.deviceID, "ios-test-device")
         XCTAssertEqual(manifest.localIdentifier, localAsset.localIdentifier)
+        XCTAssertNil(manifest.expectedAssetID)
         XCTAssertEqual(manifest.fingerprint, preparedAsset.fingerprint)
         XCTAssertEqual(manifest.resources.count, 1)
         XCTAssertEqual(

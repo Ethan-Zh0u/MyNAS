@@ -2,18 +2,20 @@
 
 本项目遵循语义化版本规则，所有可识别的发布版本都记录在这里。
 
-## [0.9.3] - 2026-08-06
+## [0.9.3] - 2026-08-11
 
 ### 修复
 
 - 修复 MyNAS 远端详情预览在服务端衍生 JPEG 的方向或尺寸与原始媒体元数据不一致时，按原始宽高预留出大片空白的问题。界面现在先采用服务端返回的 preview/grid 尺寸，并在解码完成后以实际位图尺寸重新布局。
 - 修复 Tailscale 已恢复、但删除前 health 探测仍处在建连窗口时被 4/6 秒短超时误判为“未连接”的问题。探测现在复用图库/连接请求的直连私网会话与 12/30 秒预算；不可达、检查中或最终动作时的失败关闭与服务端 owner/version/resource-group 校验保持不变。
 - 修复部署脚本只更新根目录 `VERSION`、但后端健康检查仍编译入旧字符串的问题。发布二进制现在在构建时从唯一的 `VERSION` SemVer 源注入 health/capabilities；不规范版本会在部署前失败。
+- 修复 MyNAS 原件下载进 Photos 后因上传期 `clientResourceID` 或 `image/png`/`public.png` 表达不同而被错误创建为第二个远端 asset、随后显示“完整性校验失败”的问题。关联 manifest 现在携带已核验目标 asset ID；服务端在创建会话前复核 owner、卷、source committed 状态及全部资源角色、字节数和 SHA-256，匹配时直接建立目标 mapping，不匹配时以 422 失败关闭。
+- 普通上传的内容去重也新增完整资源证明回退，不再把传输 ID、原文件名或 MIME/UTI 拼写当作内容身份。历史上因旧传输指纹误建的完全相同 asset 会把映射迁移到用户已验证的目标，并标记为可回溯的 `sourceSuperseded`；原件文件和资源元数据保持不删。
 
 ### 验证
 
-- Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 62/62 通过，新增 3 项回归覆盖衍生图优先、解码后尺寸校正及异常尺寸的有界回退。
-- `v0.9.3` 是维护候选，尚未部署到树莓派、安装到 iPhone 16 Pro 或发布 GitHub Release；必须完成同一提交的完整串行门槛后才可发布。
+- Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 71/71 通过；新增 iOS 回归确认 verified association 会把目标 asset ID 写入上传 manifest。后端完整测试通过，新增回归覆盖跨 transport ID/MIME 表达去重、目标一致关联、目标不一致拒绝，以及历史完全相同 asset 的可回溯合并且资源仍保留。
+- 早期候选 `56a3b57` 虽已部署 MyNAS `0.9.3` 并安装真机，但 iPhone 16 Pro 发现“预期 asset A、服务端返回 asset B”的完整性失败，故已作废、不得发布。当前修正版仍须重新完成同一提交的树莓派部署/readback、iPhone 验收与 GitHub Release 门槛。
 
 ## [0.9.2] - 2026-08-06
 

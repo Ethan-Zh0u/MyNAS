@@ -36,6 +36,7 @@ type photosUploadSessionInput struct {
 	VolumeID         string                      `json:"volumeID"`
 	DeviceID         string                      `json:"deviceID"`
 	LocalIdentifier  string                      `json:"localIdentifier"`
+	ExpectedAssetID  string                      `json:"expectedAssetID,omitempty"`
 	Fingerprint      string                      `json:"fingerprint"`
 	MediaType        string                      `json:"mediaType"`
 	CaptureDate      *string                     `json:"captureDate"`
@@ -142,12 +143,63 @@ func (a *App) photosUploadSessions(w http.ResponseWriter, r *http.Request) {
 	for _, resource := range input.Resources {
 		totalBytes += resource.ByteSize
 	}
+	if input.ExpectedAssetID != "" {
+		equivalentAssetIDs, lookupErr := a.findEquivalentCommittedPhotoAssets(
+			owner.UserID, input.VolumeID, input.Resources,
+		)
+		if lookupErr != nil {
+			http.Error(w, "photo identity verification unavailable", http.StatusInternalServerError)
+			return
+		}
+		expectedMatches := false
+		for _, assetID := range equivalentAssetIDs {
+			if assetID == input.ExpectedAssetID {
+				expectedMatches = true
+				break
+			}
+		}
+		if !expectedMatches {
+			http.Error(w, "expected photo asset does not match complete resource group", http.StatusUnprocessableEntity)
+			return
+		}
+		if err = a.consolidateEquivalentPhotoAssets(
+			owner.UserID,
+			input.VolumeID,
+			input.ExpectedAssetID,
+			equivalentAssetIDs,
+			input.DeviceID,
+			input.LocalIdentifier,
+			input.Fingerprint,
+		); err != nil {
+			http.Error(w, "photo identity consolidation unavailable", http.StatusInternalServerError)
+			return
+		}
+		sourceState, derivativeState, stateErr := a.photoAssetStates(input.ExpectedAssetID, owner.UserID)
+		if stateErr != nil {
+			http.Error(w, "photo state unavailable", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, photosUploadSessionResponse{
+			AssetID: input.ExpectedAssetID, Status: "duplicate", Fingerprint: input.Fingerprint,
+			SourceState: sourceState, DerivativeState: derivativeState,
+			BrowseReady: derivativeState == photosDerivativeStateReady,
+			TotalBytes:  totalBytes, ReceivedBytes: totalBytes, Resources: []photosUploadResourceResponse{},
+		})
+		return
+	}
 	if uint64(totalBytes) > volume.Free {
 		http.Error(w, "insufficient space", http.StatusConflict)
 		return
 	}
 
-	if assetID, found, lookupErr := a.findBackedUpPhotoAsset(owner.UserID, input.VolumeID, input.DeviceID, input.LocalIdentifier, input.Fingerprint); lookupErr != nil {
+	if assetID, found, lookupErr := a.findBackedUpPhotoAsset(
+		owner.UserID,
+		input.VolumeID,
+		input.DeviceID,
+		input.LocalIdentifier,
+		input.Fingerprint,
+		input.Resources,
+	); lookupErr != nil {
 		http.Error(w, "photo deduplication unavailable", http.StatusInternalServerError)
 		return
 	} else if found {
@@ -739,6 +791,7 @@ func (a *App) photosRequestOwner(w http.ResponseWriter, r *http.Request) (photos
 
 func (a *App) findBackedUpPhotoAsset(
 	ownerUserID, volumeID, deviceID, localIdentifier, fingerprint string,
+	resources []photosUploadResourceInput,
 ) (string, bool, error) {
 	var assetID string
 	err := a.db.QueryRow(
@@ -763,10 +816,239 @@ func (a *App) findBackedUpPhotoAsset(
 	if err == nil {
 		return assetID, true, nil
 	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
 	}
-	return "", false, err
+	equivalentAssetIDs, err := a.findEquivalentCommittedPhotoAssets(
+		ownerUserID, volumeID, resources,
+	)
+	if err != nil {
+		return "", false, err
+	}
+	if len(equivalentAssetIDs) > 0 {
+		return equivalentAssetIDs[0], true, nil
+	}
+	return "", false, nil
+}
+
+type photoResourceProof struct {
+	Role     string
+	ByteSize int64
+	SHA256   string
+}
+
+func sortedPhotoResourceProofsFromInput(resources []photosUploadResourceInput) []photoResourceProof {
+	proofs := make([]photoResourceProof, 0, len(resources))
+	for _, resource := range resources {
+		proofs = append(proofs, photoResourceProof{
+			Role: resource.ResourceRole, ByteSize: resource.ByteSize, SHA256: resource.SHA256,
+		})
+	}
+	sortPhotoResourceProofs(proofs)
+	return proofs
+}
+
+func sortPhotoResourceProofs(proofs []photoResourceProof) {
+	sort.Slice(proofs, func(i, j int) bool {
+		if proofs[i].Role != proofs[j].Role {
+			return proofs[i].Role < proofs[j].Role
+		}
+		if proofs[i].ByteSize != proofs[j].ByteSize {
+			return proofs[i].ByteSize < proofs[j].ByteSize
+		}
+		return proofs[i].SHA256 < proofs[j].SHA256
+	})
+}
+
+func equalPhotoResourceProofs(left, right []photoResourceProof) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// A content identity is the complete multiset of resource role, byte count and
+// SHA-256 values. Transport-only client resource IDs, filenames and MIME/UTI
+// spelling must never split one immutable original into several MyNAS assets.
+func (a *App) findEquivalentCommittedPhotoAssets(
+	ownerUserID, volumeID string,
+	resources []photosUploadResourceInput,
+) ([]string, error) {
+	expectedProofs := sortedPhotoResourceProofsFromInput(resources)
+	var totalBytes int64
+	for _, proof := range expectedProofs {
+		totalBytes += proof.ByteSize
+	}
+	rows, err := a.db.Query(
+		`SELECT a.id
+		 FROM photo_assets a
+		 WHERE a.owner_user_id=? AND a.volume_id=? AND a.source_state=?
+		   AND (SELECT COUNT(1) FROM photo_resources r
+		        WHERE r.owner_user_id=a.owner_user_id AND r.asset_id=a.id)=?
+		   AND COALESCE((SELECT SUM(r.byte_size) FROM photo_resources r
+		        WHERE r.owner_user_id=a.owner_user_id AND r.asset_id=a.id),0)=?
+		 ORDER BY a.created ASC,a.id ASC`,
+		ownerUserID, volumeID, photosSourceStateCommitted, len(expectedProofs), totalBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []string
+	for rows.Next() {
+		var assetID string
+		if err = rows.Scan(&assetID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, assetID)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+
+	matching := make([]string, 0, len(candidates))
+	for _, assetID := range candidates {
+		storedProofs, proofErr := a.photoAssetResourceProofs(ownerUserID, volumeID, assetID)
+		if proofErr != nil {
+			return nil, proofErr
+		}
+		if equalPhotoResourceProofs(expectedProofs, storedProofs) {
+			matching = append(matching, assetID)
+		}
+	}
+	return matching, nil
+}
+
+func (a *App) photoAssetResourceProofs(
+	ownerUserID, volumeID, assetID string,
+) ([]photoResourceProof, error) {
+	rows, err := a.db.Query(
+		`SELECT resource_role,byte_size,sha256
+		 FROM photo_resources
+		 WHERE owner_user_id=? AND volume_id=? AND asset_id=?`,
+		ownerUserID, volumeID, assetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var proofs []photoResourceProof
+	for rows.Next() {
+		var proof photoResourceProof
+		if err = rows.Scan(&proof.Role, &proof.ByteSize, &proof.SHA256); err != nil {
+			return nil, err
+		}
+		proofs = append(proofs, proof)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	sortPhotoResourceProofs(proofs)
+	return proofs, nil
+}
+
+// Consolidation is metadata-only and reversible: equivalent duplicate asset
+// rows and their immutable files remain on disk in a superseded state. Only a
+// complete resource proof can move their device mappings to the user-selected
+// canonical asset and remove the duplicate logical item from browse results.
+func (a *App) consolidateEquivalentPhotoAssets(
+	ownerUserID, volumeID, canonicalAssetID string,
+	equivalentAssetIDs []string,
+	deviceID, localIdentifier, fingerprint string,
+) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	transaction, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+
+	var canonicalState string
+	if err = transaction.QueryRow(
+		`SELECT source_state FROM photo_assets
+		 WHERE owner_user_id=? AND volume_id=? AND id=?`,
+		ownerUserID, volumeID, canonicalAssetID,
+	).Scan(&canonicalState); err != nil {
+		return err
+	}
+	if canonicalState != photosSourceStateCommitted {
+		return errors.New("canonical photo asset is unavailable")
+	}
+
+	for _, duplicateAssetID := range equivalentAssetIDs {
+		if duplicateAssetID == canonicalAssetID {
+			continue
+		}
+		if _, err = transaction.Exec(
+			`UPDATE device_asset_mappings SET asset_id=?,updated=?
+			 WHERE owner_user_id=? AND asset_id=?`,
+			canonicalAssetID, now, ownerUserID, duplicateAssetID,
+		); err != nil {
+			return err
+		}
+		result, updateErr := transaction.Exec(
+			`UPDATE photo_assets
+			 SET backup_state='deduplicated',source_state=?,updated=?
+			 WHERE owner_user_id=? AND volume_id=? AND id=? AND source_state=?`,
+			photosSourceStateSuperseded, now,
+			ownerUserID, volumeID, duplicateAssetID, photosSourceStateCommitted,
+		)
+		if updateErr != nil {
+			return updateErr
+		}
+		changed, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if changed == 0 {
+			return errors.New("equivalent photo asset changed during consolidation")
+		}
+		if _, err = transaction.Exec(
+			`INSERT OR IGNORE INTO photo_changes(
+			 owner_user_id,asset_id,change_type,asset_updated,created
+			 ) VALUES(?,?,'delete',?,?)`,
+			ownerUserID, duplicateAssetID, now, now,
+		); err != nil {
+			return err
+		}
+	}
+
+	if _, err = a.upsertDeviceAssetMappingInTransaction(
+		transaction,
+		ownerUserID,
+		deviceID,
+		localIdentifier,
+		fingerprint,
+		canonicalAssetID,
+		now,
+	); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(
+		`UPDATE photo_assets SET updated=?
+		 WHERE owner_user_id=? AND volume_id=? AND id=? AND source_state=?`,
+		now, ownerUserID, volumeID, canonicalAssetID, photosSourceStateCommitted,
+	); err != nil {
+		return err
+	}
+	if _, err = transaction.Exec(
+		`INSERT OR IGNORE INTO photo_changes(
+		 owner_user_id,asset_id,change_type,asset_updated,created
+		 ) VALUES(?,?,'upsert',?,?)`,
+		ownerUserID, canonicalAssetID, now, now,
+	); err != nil {
+		return err
+	}
+	return transaction.Commit()
 }
 
 func (a *App) upsertDeviceAssetMapping(
@@ -989,6 +1271,7 @@ func validatePhotosUploadInput(input *photosUploadSessionInput) error {
 	input.VolumeID = strings.TrimSpace(input.VolumeID)
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
 	input.LocalIdentifier = strings.TrimSpace(input.LocalIdentifier)
+	input.ExpectedAssetID = strings.TrimSpace(input.ExpectedAssetID)
 	input.Fingerprint = strings.ToLower(strings.TrimSpace(input.Fingerprint))
 	input.MediaType = strings.TrimSpace(input.MediaType)
 	if input.VolumeID == "" || len(input.VolumeID) > 200 {
@@ -999,6 +1282,11 @@ func validatePhotosUploadInput(input *photosUploadSessionInput) error {
 	}
 	if input.LocalIdentifier == "" || len(input.LocalIdentifier) > 1200 {
 		return errors.New("invalid local identifier")
+	}
+	if input.ExpectedAssetID != "" {
+		if err := validatePhotoAssetID(input.ExpectedAssetID); err != nil {
+			return errors.New("invalid expected asset ID")
+		}
 	}
 	if !isSHA256(input.Fingerprint) {
 		return errors.New("invalid fingerprint")

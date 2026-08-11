@@ -4,6 +4,7 @@ import Foundation
 enum PhotoBackupPreparationError: LocalizedError {
     case assetUnavailable
     case noResources
+    case iCloudDownloadRequired
     case invalidResource
 
     var errorDescription: String? {
@@ -12,6 +13,8 @@ enum PhotoBackupPreparationError: LocalizedError {
             "照片资源已从本地图库移除或当前不可访问。"
         case .noResources:
             "这项媒体没有可备份的原始资源。"
+        case .iCloudDownloadRequired:
+            "完整原件只在 iCloud，当前自动备份策略未允许下载。"
         case .invalidResource:
             "照片资源的大小或校验信息无效。"
         }
@@ -86,12 +89,18 @@ struct PreparedPhotoAsset: Sendable {
     /// protected storage before it ever asks iOS to own an upload task.
     nonisolated func uploadSessionRequest(
         volumeID: String,
-        deviceID: String
+        deviceID: String,
+        expectedAssetID: String? = nil
     ) -> PhotoUploadSessionRequest {
-        PhotoUploadSessionRequest(
+        let normalizedExpectedAssetID = expectedAssetID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return PhotoUploadSessionRequest(
             volumeID: volumeID,
             deviceID: deviceID,
             localIdentifier: localAsset.localIdentifier,
+            expectedAssetID: normalizedExpectedAssetID?.isEmpty == false
+                ? normalizedExpectedAssetID
+                : nil,
             fingerprint: fingerprint,
             mediaType: localAsset.mediaKind.backupMediaType,
             captureDate: localAsset.creationDate.map(PhotoBackupSourceVersion.string),
@@ -130,6 +139,10 @@ nonisolated struct PhotoUploadSessionRequest: Codable, Sendable {
     let volumeID: String
     let deviceID: String
     let localIdentifier: String
+    /// Present only after the client has already proved that the complete
+    /// local resource group equals this visible MyNAS asset. The server must
+    /// verify the same proof before it creates or changes a device mapping.
+    let expectedAssetID: String?
     let fingerprint: String
     let mediaType: String
     let captureDate: String?
@@ -152,6 +165,7 @@ nonisolated struct PhotoUploadResourceRequest: Codable, Sendable {
 
 enum PhotoBackupJobStatus: String, Codable, Sendable {
     case waiting
+    case waitingForICloud
     case preparing
     case uploading
     case completed
@@ -160,6 +174,7 @@ enum PhotoBackupJobStatus: String, Codable, Sendable {
     var title: String {
         switch self {
         case .waiting: "等待中"
+        case .waitingForICloud: "等待 iCloud 原件"
         case .preparing: "读取原始资源"
         case .uploading: "上传中"
         case .completed: "原件已安全上传"
@@ -170,6 +185,7 @@ enum PhotoBackupJobStatus: String, Codable, Sendable {
     var systemImage: String {
         switch self {
         case .waiting: "clock"
+        case .waitingForICloud: "icloud.and.arrow.down"
         case .preparing: "doc.badge.gearshape"
         case .uploading: "arrow.up.circle"
         case .completed: "checkmark.circle.fill"

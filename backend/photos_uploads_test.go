@@ -112,6 +112,194 @@ func TestPhotosMultiResourceUploadResumesVerifiesAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestPhotosExpectedAssetUsesCompleteResourceProofAcrossTransportMetadata(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	originalBytes := []byte("same-png-original")
+	originalInput := testPhotoUploadInput(originalBytes, nil)
+	originalInput.Resources[0].ClientResourceID = "fixture-resource"
+	originalInput.Resources[0].ContentType = "image/png"
+	originalInput.Fingerprint = photoManifestFingerprint(originalInput.Resources)
+	original := commitTestPhotoUpload(t, app, originalInput, [][]byte{originalBytes})
+
+	importedInput := originalInput
+	importedInput.DeviceID = "current-iphone"
+	importedInput.LocalIdentifier = "photo-kit-import-placeholder"
+	importedInput.ExpectedAssetID = original.AssetID
+	importedInput.Resources[0].ClientResourceID = "resource-000"
+	importedInput.Resources[0].ContentType = "public.png"
+	importedInput.Fingerprint = photoManifestFingerprint(importedInput.Resources)
+
+	associated := createTestPhotoUploadSession(t, app, importedInput)
+	if associated.Status != "duplicate" || associated.AssetID != original.AssetID || associated.ID != "" {
+		t.Fatalf("verified association response=%#v, want target %q", associated, original.AssetID)
+	}
+	var committedAssets int
+	if err := app.db.QueryRow(
+		"SELECT COUNT(*) FROM photo_assets WHERE source_state=?",
+		photosSourceStateCommitted,
+	).Scan(&committedAssets); err != nil {
+		t.Fatal(err)
+	}
+	if committedAssets != 1 {
+		t.Fatalf("committed assets=%d, expected association created a duplicate", committedAssets)
+	}
+	var mappedAssetID string
+	if err := app.db.QueryRow(
+		`SELECT asset_id FROM device_asset_mappings
+		 WHERE device_id=? AND local_identifier=?`,
+		importedInput.DeviceID, importedInput.LocalIdentifier,
+	).Scan(&mappedAssetID); err != nil {
+		t.Fatal(err)
+	}
+	if mappedAssetID != original.AssetID {
+		t.Fatalf("mapping asset=%q, want %q", mappedAssetID, original.AssetID)
+	}
+}
+
+func TestPhotosExpectedAssetRejectsDifferentCompleteResourceGroup(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	targetBytes := []byte("target-original")
+	target := commitTestPhotoUpload(
+		t, app, testPhotoUploadInput(targetBytes, nil), [][]byte{targetBytes},
+	)
+
+	differentInput := testPhotoUploadInput([]byte("different-original"), nil)
+	differentInput.DeviceID = "current-iphone"
+	differentInput.LocalIdentifier = "different-photo-kit-item"
+	differentInput.ExpectedAssetID = target.AssetID
+	data, err := json.Marshal(differentInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := tailscaleRequest(http.MethodPost, "/api/v1/photos/upload-sessions")
+	request.Body = ioNopCloser(strings.NewReader(string(data)))
+	request.ContentLength = int64(len(data))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	app.photosUploadSessions(recorder, request)
+	if recorder.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(recorder.Body.String(), "does not match complete resource group") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var unexpectedMappings int
+	if err = app.db.QueryRow(
+		`SELECT COUNT(*) FROM device_asset_mappings
+		 WHERE device_id=? AND local_identifier=?`,
+		differentInput.DeviceID, differentInput.LocalIdentifier,
+	).Scan(&unexpectedMappings); err != nil {
+		t.Fatal(err)
+	}
+	if unexpectedMappings != 0 {
+		t.Fatalf("different resource group created %d mappings", unexpectedMappings)
+	}
+}
+
+func TestPhotosExpectedAssetConsolidatesProvenLegacyDuplicateWithoutDeletingFiles(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	originalBytes := []byte("legacy-duplicate-original")
+	originalInput := testPhotoUploadInput(originalBytes, nil)
+	original := commitTestPhotoUpload(t, app, originalInput, [][]byte{originalBytes})
+
+	const duplicateAssetID = "ast-legacy-transport-duplicate"
+	const duplicateResourceID = "res-legacy-transport-duplicate"
+	if _, err := app.db.Exec(
+		`INSERT INTO photo_assets(
+		 id,owner_user_id,volume_id,content_fingerprint,media_type,capture_date,modification_date,
+		 pixel_width,pixel_height,duration,favorite,backup_state,source_state,derivative_state,
+		 derivative_recipe_version,derivative_error,derivative_updated,created,updated
+		 ) SELECT ?,owner_user_id,volume_id,?,media_type,capture_date,modification_date,
+		 pixel_width,pixel_height,duration,favorite,backup_state,source_state,derivative_state,
+		 derivative_recipe_version,derivative_error,derivative_updated,created,updated
+		 FROM photo_assets WHERE id=?`,
+		duplicateAssetID, strings.Repeat("b", 64), original.AssetID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(
+		`INSERT INTO photo_resources(
+		 id,asset_id,owner_user_id,volume_id,resource_role,original_filename,content_type,
+		 byte_size,sha256,storage_path,created
+		 ) SELECT ?,?,owner_user_id,volume_id,resource_role,original_filename,'public.png',
+		 byte_size,sha256,storage_path,created
+		 FROM photo_resources WHERE asset_id=?`,
+		duplicateResourceID, duplicateAssetID, original.AssetID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	ownerUserID := testPhotoOwnerID(t, app, original.AssetID)
+	if _, err := app.db.Exec(
+		`INSERT INTO device_asset_mappings(
+		 owner_user_id,device_id,local_identifier,fingerprint,asset_id,updated
+		 ) VALUES(?,?,?,?,?,'now')`,
+		ownerUserID, "legacy-device", "legacy-local", strings.Repeat("b", 64), duplicateAssetID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	associationInput := originalInput
+	associationInput.DeviceID = "current-iphone"
+	associationInput.LocalIdentifier = "downloaded-local-copy"
+	associationInput.ExpectedAssetID = original.AssetID
+	associationInput.Resources[0].ClientResourceID = "resource-000"
+	associationInput.Resources[0].ContentType = "public.png"
+	associationInput.Fingerprint = photoManifestFingerprint(associationInput.Resources)
+	associated := createTestPhotoUploadSession(t, app, associationInput)
+	if associated.AssetID != original.AssetID || associated.Status != "duplicate" {
+		t.Fatalf("association response=%#v", associated)
+	}
+
+	var duplicateState string
+	if err := app.db.QueryRow(
+		"SELECT source_state FROM photo_assets WHERE id=?", duplicateAssetID,
+	).Scan(&duplicateState); err != nil {
+		t.Fatal(err)
+	}
+	if duplicateState != photosSourceStateSuperseded {
+		t.Fatalf("duplicate state=%q, want %q", duplicateState, photosSourceStateSuperseded)
+	}
+	var preservedResources int
+	if err := app.db.QueryRow(
+		"SELECT COUNT(*) FROM photo_resources WHERE asset_id=?", duplicateAssetID,
+	).Scan(&preservedResources); err != nil {
+		t.Fatal(err)
+	}
+	if preservedResources != 1 {
+		t.Fatalf("superseded duplicate resources=%d, want preserved resource", preservedResources)
+	}
+	var legacyMappingAssetID string
+	if err := app.db.QueryRow(
+		`SELECT asset_id FROM device_asset_mappings
+		 WHERE owner_user_id=? AND device_id='legacy-device' AND local_identifier='legacy-local'`,
+		ownerUserID,
+	).Scan(&legacyMappingAssetID); err != nil {
+		t.Fatal(err)
+	}
+	if legacyMappingAssetID != original.AssetID {
+		t.Fatalf("legacy mapping asset=%q, want %q", legacyMappingAssetID, original.AssetID)
+	}
+}
+
+func TestPhotosDeduplicationIgnoresTransportClientIDAndMIMEUTISpelling(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+	originalBytes := []byte("transport-independent-content")
+	originalInput := testPhotoUploadInput(originalBytes, nil)
+	originalInput.Resources[0].ClientResourceID = "fixture-resource"
+	originalInput.Resources[0].ContentType = "image/png"
+	originalInput.Fingerprint = photoManifestFingerprint(originalInput.Resources)
+	original := commitTestPhotoUpload(t, app, originalInput, [][]byte{originalBytes})
+
+	secondInput := originalInput
+	secondInput.DeviceID = "another-device"
+	secondInput.LocalIdentifier = "another-local-id"
+	secondInput.Resources[0].ClientResourceID = "resource-000"
+	secondInput.Resources[0].ContentType = "public.png"
+	secondInput.Fingerprint = photoManifestFingerprint(secondInput.Resources)
+	duplicate := createTestPhotoUploadSession(t, app, secondInput)
+	if duplicate.Status != "duplicate" || duplicate.AssetID != original.AssetID || duplicate.ID != "" {
+		t.Fatalf("transport metadata split exact content: %#v", duplicate)
+	}
+}
+
 func TestPhotosUploadSessionResumptionIsScopedToTheSelectedVolume(t *testing.T) {
 	app := newPhotosPhase2TestApp(t)
 	input := testPhotoUploadInput([]byte("same-resource-on-two-volumes"), nil)
@@ -364,6 +552,37 @@ func createTestPhotoUploadSession(
 		t.Fatal(err)
 	}
 	return response
+}
+
+func commitTestPhotoUpload(
+	t *testing.T,
+	app *App,
+	input photosUploadSessionInput,
+	resourceBytes [][]byte,
+) photosUploadSessionResponse {
+	t.Helper()
+	created := createTestPhotoUploadSession(t, app, input)
+	if created.Status != "waiting" || len(created.Resources) != len(resourceBytes) {
+		t.Fatalf("unexpected create response: %#v", created)
+	}
+	for index, resourceData := range resourceBytes {
+		remote := testUploadResource(t, created.Resources, input.Resources[index].ClientResourceID)
+		putTestPhotoPart(t, app, created.ID, remote, 0, resourceData)
+	}
+	request := tailscaleRequest(
+		http.MethodPost,
+		"/api/v1/photos/upload-sessions/"+created.ID+"/complete",
+	)
+	recorder := httptest.NewRecorder()
+	app.photosUploadSessionByPath(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("complete status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var completed photosUploadSessionResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&completed); err != nil {
+		t.Fatal(err)
+	}
+	return completed
 }
 
 func putTestPhotoPart(

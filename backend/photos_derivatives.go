@@ -4,7 +4,8 @@ const (
 	photosBackupStateModelVersion = 1
 	photosDerivativePolicyVersion = "photos-browse-v2"
 
-	photosSourceStateCommitted = "sourceCommitted"
+	photosSourceStateCommitted  = "sourceCommitted"
+	photosSourceStateSuperseded = "sourceSuperseded"
 
 	photosDerivativeStatePending    = "pending"
 	photosDerivativeStateProcessing = "processing"

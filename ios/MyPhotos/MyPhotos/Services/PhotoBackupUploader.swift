@@ -65,6 +65,7 @@ actor PhotoBackupUploader {
         preparedAsset: PreparedPhotoAsset,
         account: AccountContext,
         deviceID: String,
+        expectedAssetID: String? = nil,
         progress: @Sendable @escaping (_ uploadedBytes: Int64, _ totalBytes: Int64) -> Void
     ) async throws -> PhotoBackupUploadOutcome {
         guard let baseURL = account.serverURL else {
@@ -78,7 +79,8 @@ actor PhotoBackupUploader {
             preparedAsset: preparedAsset,
             baseURL: baseURL,
             volumeID: volumeID,
-            deviceID: deviceID
+            deviceID: deviceID,
+            expectedAssetID: expectedAssetID
         )
         if uploadSession.status == "duplicate" || uploadSession.status == "completed" {
             progress(uploadSession.totalBytes, uploadSession.totalBytes)
@@ -161,7 +163,8 @@ actor PhotoBackupUploader {
         preparedAsset: PreparedPhotoAsset,
         baseURL: URL,
         volumeID: String,
-        deviceID: String
+        deviceID: String,
+        expectedAssetID: String?
     ) async throws -> PhotoUploadSessionEnvelope {
         return try await jsonRequest(
             baseURL: baseURL,
@@ -170,7 +173,8 @@ actor PhotoBackupUploader {
             body: try encoder.encode(
                 preparedAsset.uploadSessionRequest(
                     volumeID: volumeID,
-                    deviceID: deviceID
+                    deviceID: deviceID,
+                    expectedAssetID: expectedAssetID
                 )
             )
         )

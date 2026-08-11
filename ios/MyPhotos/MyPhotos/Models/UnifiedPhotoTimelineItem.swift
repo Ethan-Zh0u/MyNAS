@@ -191,7 +191,7 @@ struct UnifiedPhotoTimelineItem: Identifiable, Sendable {
     ) -> UnifiedPhotoTimelineAvailability {
         guard let job else { return .localOnly }
         switch job.status {
-        case .waiting:
+        case .waiting, .waitingForICloud:
             return .waitingForBackup
         case .preparing:
             return .preparingBackup
