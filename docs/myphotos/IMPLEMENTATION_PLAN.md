@@ -37,7 +37,7 @@
 | F | 本地/远程统一时间线与去重 | 已完成（F1–F4） | 进入阶段 G 的后台自动备份设计与真机策略验收 |
 | G | 后台自动备份 | 进行中（G1 已完成模拟器及 iPhone 16 Pro 的默认关闭、持久化、前台自动上传、低电量暂停/恢复、Wi‑Fi/蜂窝网络策略、一次锁屏后完成的受限观察，以及真实 App 终止/重新打开后的自动恢复；G2 已完成真实 212.1 MB 锁屏系统会话、开发终止后恢复、真机实时进度、传输中低电量暂停/续传完成，以及 Wi‑Fi 中断后等待、恢复并达到 MyNAS-confirmed 最终完成；服务重启、账号/卷、iCloud-only 与长队列仍未验收） | 验证服务重启，再完成账号/卷、iCloud-only 和长队列边界 |
 | H | 恢复、导出、删除与缓存管理 | 已完成（H0–H2 均已真机验收） | 返回阶段 G，从 MyNAS 服务重启边界继续 |
-| I | 端侧 AI 搜索、人物/物体分类 | I1 v0.9.0、I2 v0.9.1、I3 v0.9.2 均已发布；v0.9.3 是 H 维护候选，含远端预览布局、删除连通性误判与精确本机唯一性修复，后端回归和 71 项模拟器测试已通过 | 完成新 v0.9.3 提交的树莓派部署/readback、同提交 iPhone 验收与 GitHub 发布门槛；随后回到阶段 G 的服务重启边界 |
+| I | 端侧 AI 搜索、人物/物体分类 | I1 v0.9.0、I2 v0.9.1、I3 v0.9.2 均已发布；H 维护版 v0.9.3 已通过 73 项模拟器回归、树莓派部署和 iPhone 16 Pro 19/19 真机验收并发布 | 回到阶段 G 的服务重启边界；iCloud-only、账号/卷和长队列仍单独待验收 |
 | J | 大规模、灾难恢复与版本升级 | 部分完成 | 通用卷/健康基础已有，Photos 专项韧性未做 |
 
 ## 阶段 A — 产品边界与工程基础
@@ -166,7 +166,7 @@
 
 - **G2 真机传输中低电量中断（通过，2026-08-04）：** 在实际系统后台传输进行时，用户开启低电量模式后观察到自动任务暂停；关闭低电量模式后，未点击手动备份或重试，任务自动从 MyNAS-confirmed 位置继续，并最终显示“原件已安全上传”。这证明当前账号已启用的低电量暂停策略在该真机路径上不会把在途任务误标完成或遗失恢复能力。它不承诺 iOS 在 App 挂起时会即时取消网络 socket，也不覆盖服务重启、账号/卷、iCloud-only 或长队列。
 
-- **iCloud-only 自动备份首个安全实现（本地门槛通过、真机待验收，2026-08-11）：** 每账号新增默认关闭的“自动下载 iCloud 原件”；手动备份仍是显式动作并允许 PhotoKit 网络读取。自动策略关闭该项时，完整资源不在设备上的项目收到 PhotoKit 公开的 `PHPhotosErrorNetworkAccessRequired` 后进入“等待 iCloud 原件”，不会被算作失败或由自动评估循环反复下载；开启后同账号等待任务恢复，在 App 可执行 PhotoKit 时先下载全部 `PHAssetResource`，再走既有完整 SHA-256、受保护 G2 暂存和系统传输。旧 G1 策略 JSON 缺少新字段时强制保持 false；MyNAS 不接触 Apple 账号、不会直连 iCloud，该流程也不删除 Photos。Xcode 27 beta iPhone 17 Pro 模拟器当前工作区完整 **71/71** 通过（0 失败、0 跳过），generic iPhoneOS arm64 无签名构建和 `git diff --check` 通过；同一未提交工作区随后完成签名构建、覆盖安装并启动到连接的 iPhone 16 Pro。只读界面检查确认：该设备原有“前台自动备份”保持开启时，新“自动下载 iCloud 原件”仍显示关闭，旧策略迁移没有扩大许可；未点备份、删除或新开关，既有 17/19 与 2 个失败项目未被本次观察改写。该证据只覆盖安装、显示和默认关闭；必须另用安全的真实 iCloud-only 项目验证关闭时等待、开启后的 PhotoKit 下载、G2 交接与 MyNAS-confirmed 完成，之后才可把该边界标为通过。
+- **iCloud-only 自动备份首个安全实现（本地门槛通过、真机待验收，2026-08-11）：** 每账号新增默认关闭的“自动下载 iCloud 原件”；手动备份仍是显式动作并允许 PhotoKit 网络读取。自动策略关闭该项时，完整资源不在设备上的项目收到 PhotoKit 公开的 `PHPhotosErrorNetworkAccessRequired` 后进入“等待 iCloud 原件”，不会被算作失败或由自动评估循环反复下载；开启后同账号等待任务恢复，在 App 可执行 PhotoKit 时先下载全部 `PHAssetResource`，再走既有完整 SHA-256、受保护 G2 暂存和系统传输。旧 G1 策略 JSON 缺少新字段时强制保持 false；MyNAS 不接触 Apple 账号、不会直连 iCloud，该流程也不删除 Photos。Xcode 27 beta iPhone 17 Pro 模拟器当前发布候选完整 **73/73** 通过（0 失败、0 跳过），generic iPhoneOS arm64 无签名构建和 `git diff --check` 通过；同提交签名 App 已安装到 iPhone 16 Pro。只读界面检查确认：该设备原有“前台自动备份”保持开启时，新“自动下载 iCloud 原件”仍显示关闭，旧策略迁移没有扩大许可；未点备份、删除或新开关。该证据只覆盖安装、显示和默认关闭；必须另用安全的真实 iCloud-only 项目验证关闭时等待、开启后的 PhotoKit 下载、G2 交接与 MyNAS-confirmed 完成，之后才可把该边界标为通过。
 
 ## 阶段 H — 恢复、导出、删除与缓存管理
 
@@ -222,7 +222,7 @@
 - **明确不包含：** 把本机和单块 NAS 宣称为唯一灾备；不承诺未演练的 RPO/RTO。
 - **状态与证据：** **部分完成。** 通用 MyNAS 已有健康检查、稳定卷 ID、离线状态和 SQLite 单连接以降低 `SQLITE_BUSY`；Photos 专用 migration version、灾备扫描、断电恢复和大规模基准尚未实现。
 
-## 当前工作状态与下一优先级：v0.9.3 远端预览与删除连通性维护候选
+## 当前工作状态与下一优先级：v0.9.3 已发布，回到阶段 G 剩余边界
 
 **I1 发布完成（2026-08-06）：** 候选提交 `85cd4f2` 已以 MyNAS `0.9.0` 原子部署到树莓派 release `20260806T032331Z`，systemd active、health 和 capabilities 精确回读 `0.9.0`，并保留 `photoDelete=true`、`backgroundTransfers=true`。该提交的签名 Debug App 已在 iPhone 16 Pro 安装、启动并通过最终验收；annotated tag `v0.9.0` 与公开 GitHub Release 已发布。因此 I1 完成，下一步才允许开始 I2 的端侧分析队列与独立像素分析许可。
 
@@ -230,7 +230,7 @@
 
 **I3 发布前的候选历史记录（2026-08-06）：** `v0.9.2` 已统一写入 `VERSION`、服务端 health/capabilities 版本源、CHANGELOG 与 README。早期候选的详情返回结果丢失已修复，但它们仍把 OCR 搜索放在“人物”栏，不符合照片主页统一搜索与人物栏单一职责的最新产品约束，均不得发布。替代提交 `f8352d2` 在“照片”主页的单一查询框合并 I1 和 I3 结果、按 asset ID 去重并以三列纯缩略图直达详情，同时将人物栏收敛到人物识别及对应照片；完整 59 项模拟器回归通过。该提交已部署到树莓派 `20260806T075201Z`，独立反读 systemd active、health/capabilities 均为 `0.9.2` 且保留 `photoDelete=true`、`backgroundTransfers=true`；签名 App 已安装并启动 iPhone 16 Pro。这一历史记录随后已完成用户验收、同提交的 annotated `v0.9.2` tag 与 GitHub Release，故 I3 已完成。
 
-**I3 发布完成与 v0.9.3 维护候选（2026-08-06；2026-08-11 更新）：** 用户已接受 `f8352d2` 的 iPhone 16 Pro 统一搜索验收，`v0.9.2` annotated tag 与公开 GitHub Release 已发布，I3 已完成。本轮不进入 I4。候选 `v0.9.3` 先修复远端预览比例和删除 health 建连预算，并把 `VERSION` 的 SemVer 以 linker 注入 health/capabilities。随后真机暴露 MyNAS 测试图下载进 Photos 后首页仍增加同图：PhotoKit 创建 identifier 原来只等待约 0.5 秒，且关联遇到其他备份或 mapping 恢复会被直接拒绝；历史自动修复又错误要求已有 committed mapping 作锚点，因此由其他设备/fixture 上传的 MyNAS-only 项目无法自愈。旧候选 `56a3b57` 虽已部署和安装，但真机对同一测试图返回了另一个 asset ID，故已否决。只读证据确认两个 asset 的资源角色、116,983 字节和 SHA-256 完全相同，差异只有传输层 `clientResourceID` 与 MIME/UTI 拼写；根因是旧 manifest fingerprint 错把 `clientResourceID` 当成内容身份。继任实现将持久化的 `expectedAssetID` 送到服务端，在建立 mapping 前验证 owner/volume/committed 状态和资源角色、字节数、SHA-256；普通去重也用同一证明。历史完全相同的重复 asset 会把 mapping 收敛到已验证目标并标记 `sourceSuperseded`，但保留数据库资源记录和物理原件。2026-08-11 当前工作区还加入 Phase G 的 iCloud-only 自动原件独立许可与等待状态；后端回归和 Xcode 27 beta iPhone 17 Pro 模拟器完整 71/71 已通过。继任候选仍待形成提交、树莓派重新部署/readback、同提交签名安装、iPhone 16 Pro 对两个失败项目的重试及再次下载验收；通过前不发布。
+**I3 发布完成与 v0.9.3 维护版发布（2026-08-06；2026-08-11 更新）：** 用户已接受 `f8352d2` 的 iPhone 16 Pro 统一搜索验收，`v0.9.2` annotated tag 与公开 GitHub Release 已发布，I3 已完成。本轮不进入 I4。`v0.9.3` 先修复远端预览比例和删除 health 建连预算，并把 `VERSION` 的 SemVer 以 linker 注入 health/capabilities。随后真机暴露 MyNAS 测试图下载进 Photos 后首页仍增加同图：PhotoKit 创建 identifier 原来只等待约 0.5 秒，且关联遇到其他备份或 mapping 恢复会被直接拒绝；历史自动修复又错误要求已有 committed mapping 作锚点，因此由其他设备/fixture 上传的 MyNAS-only 项目无法自愈。旧候选 `56a3b57` 因对同一测试图返回另一个 asset ID 而否决。只读证据确认两个 asset 的资源角色、116,983 字节和 SHA-256 完全相同，差异只有传输层 `clientResourceID` 与 MIME/UTI 拼写；目标关联现将持久化的 `expectedAssetID` 送到服务端，在建立 mapping 前验证 owner/volume/committed 状态和资源角色、字节数、SHA-256，普通去重也用同一证明。历史完全相同的重复 asset 会把 mapping 收敛到已验证目标并标记 `sourceSuperseded`，但保留数据库资源记录和物理原件。真机重试又暴露 4 条已不在当前 PhotoKit 访问范围的历史自动 `.waiting` 记录会反复制造空运行并阻止手动重试；最终提交 `1c82ec4` 只把当前可访问、源版本匹配的自动任务视为可运行，并将忙碌期间的用户重试先持久化后排队执行。后端回归与 Xcode 27 beta iPhone 17 Pro 模拟器完整 73/73 已通过。该提交已部署到树莓派 release `20260811T030439Z`，health/capabilities 精确回读 `0.9.3`；干净 detached worktree 构建的同提交签名 App 在 iPhone 16 Pro 单次重试后由 17/19、2 失败达到 19/19、0 失败，两条记录都关联到同一已提交且预览就绪的远端 asset。`v0.9.3` annotated tag 与 GitHub Release 已发布。
 
 ### I1 发布前历史验收记录
 

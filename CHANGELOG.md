@@ -11,11 +11,12 @@
 - 修复部署脚本只更新根目录 `VERSION`、但后端健康检查仍编译入旧字符串的问题。发布二进制现在在构建时从唯一的 `VERSION` SemVer 源注入 health/capabilities；不规范版本会在部署前失败。
 - 修复 MyNAS 原件下载进 Photos 后因上传期 `clientResourceID` 或 `image/png`/`public.png` 表达不同而被错误创建为第二个远端 asset、随后显示“完整性校验失败”的问题。关联 manifest 现在携带已核验目标 asset ID；服务端在创建会话前复核 owner、卷、source committed 状态及全部资源角色、字节数和 SHA-256，匹配时直接建立目标 mapping，不匹配时以 422 失败关闭。
 - 普通上传的内容去重也新增完整资源证明回退，不再把传输 ID、原文件名或 MIME/UTI 拼写当作内容身份。历史上因旧传输指纹误建的完全相同 asset 会把映射迁移到用户已验证的目标，并标记为可回溯的 `sourceSuperseded`；原件文件和资源元数据保持不删。
+- 修复历史自动备份 `.waiting` 记录已不在当前 PhotoKit 访问范围时仍被当作可运行任务，造成协调器反复启动空队列、页面长期显示正在处理且失败重试被拒绝的问题。自动评估现在只计入当前可访问且源版本匹配的项目；用户重试会立即持久化为等待，并在已有上传或 mapping 恢复释放协调器后继续，不因瞬时忙碌而丢失。
 
 ### 验证
 
-- Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 71/71 通过；新增 iOS 回归确认 verified association 会把目标 asset ID 写入上传 manifest。后端完整测试通过，新增回归覆盖跨 transport ID/MIME 表达去重、目标一致关联、目标不一致拒绝，以及历史完全相同 asset 的可回溯合并且资源仍保留。
-- 早期候选 `56a3b57` 虽已部署 MyNAS `0.9.3` 并安装真机，但 iPhone 16 Pro 发现“预期 asset A、服务端返回 asset B”的完整性失败，故已作废、不得发布。当前修正版仍须重新完成同一提交的树莓派部署/readback、iPhone 验收与 GitHub Release 门槛。
+- Xcode 27 beta 的 iPhone 17 Pro 模拟器完整 `MyPhotosTests` 73/73 通过；新增 iOS 回归确认 verified association 会把目标 asset ID 写入上传 manifest、过期自动等待记录不会制造空运行，以及协调器忙碌时手动重试仍会持久化并保留目标 asset ID。后端完整测试通过，新增回归覆盖跨 transport ID/MIME 表达去重、目标一致关联、目标不一致拒绝，以及历史完全相同 asset 的可回溯合并且资源仍保留。
+- 早期候选 `56a3b57` 因 iPhone 16 Pro 发现“预期 asset A、服务端返回 asset B”的完整性失败而作废；`d56790e` 随后暴露历史自动等待记录会持续占用协调器。最终提交 `1c82ec4` 已从干净 worktree 原子部署到树莓派 release `20260811T030439Z`，health/capabilities 精确回读 `0.9.3`，同提交签名 App 已覆盖安装。用户单次点击“仅重试 2 个失败项目”后，持久队列由 17/19 和 2 个失败达到 19/19、0 失败；两条本机记录均指向 `ast-ecb89fc9b3efe63e5195f3948db9105d`，服务端回读为 `sourceCommitted`、衍生预览 ready、2 台设备共 3 条精确 mapping。真机验收通过并发布 `v0.9.3`。
 
 ## [0.9.2] - 2026-08-06
 
