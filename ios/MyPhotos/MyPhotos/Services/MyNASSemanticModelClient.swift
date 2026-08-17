@@ -5,6 +5,7 @@ import Foundation
 /// trust: the model store still verifies every byte against the hashes compiled
 /// into this app before it activates anything.
 actor MyNASSemanticModelClient {
+    private static let httpOK = 200
     private let directories: CacheDirectoryProvider
     private let fileManager: FileManager
 
@@ -18,7 +19,8 @@ actor MyNASSemanticModelClient {
 
     func downloadPinnedQwen3VLEmbedding2BInt8(
         for account: AccountContext,
-        into modelStore: LocalSemanticModelStore
+        into modelStore: LocalSemanticModelStore,
+        progress: @escaping @MainActor @Sendable (LocalSemanticModelOperationStage) -> Void
     ) async throws -> LocalSemanticModelInstallStatus {
         guard let baseURL = account.serverURL else {
             throw MyNASSemanticModelDownloadError.notConnected
@@ -37,7 +39,7 @@ actor MyNASSemanticModelClient {
         try validate(
             manifestResponse,
             expectedOrigin: origin,
-            expectedStatus: httpOK,
+            expectedStatus: Self.httpOK,
             responseData: manifestData
         )
         let remoteManifest: MyNASSemanticModelManifestResponse
@@ -58,7 +60,8 @@ actor MyNASSemanticModelClient {
 
         let sourceDirectory = try stagingDirectory(for: account)
         defer { try? fileManager.removeItem(at: sourceDirectory) }
-        for file in pinnedManifest.files {
+        for (index, file) in pinnedManifest.files.enumerated() {
+            await progress(.downloading(currentFile: index + 1, totalFiles: pinnedManifest.files.count))
             let url = baseURL.appending(
                 path: "api/v1/photos/models/qwen3-vl-embedding-2b/files/\(file.relativePath)"
             )
@@ -66,7 +69,7 @@ actor MyNASSemanticModelClient {
             request.httpMethod = "GET"
             request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
             let (downloadedURL, response) = try await session.download(for: request)
-            try validate(response, expectedOrigin: origin, expectedStatus: httpOK, responseData: nil)
+            try validate(response, expectedOrigin: origin, expectedStatus: Self.httpOK, responseData: nil)
             let values = try downloadedURL.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
             guard values.isSymbolicLink != true,
                   Int64(values.fileSize ?? -1) == file.byteCount else {
@@ -80,8 +83,10 @@ actor MyNASSemanticModelClient {
             try fileManager.copyItem(at: downloadedURL, to: destination)
         }
 
+        await progress(.validatingDownloadedFiles)
         return try await modelStore.installPinnedQwen3VLEmbedding2BInt8(
-            packageDirectory: sourceDirectory
+            packageDirectory: sourceDirectory,
+            progress: progress
         )
     }
 
@@ -153,15 +158,13 @@ actor MyNASSemanticModelClient {
     }
 }
 
-private let httpOK = 200
-
-private struct MyNASSemanticModelManifestResponse: Decodable {
+nonisolated private struct MyNASSemanticModelManifestResponse: Decodable, Sendable {
     let serverID: String
     let modelID: String
     let manifest: LocalSemanticModelPackageManifest
 }
 
-private struct MyNASSemanticModelOrigin: Equatable {
+nonisolated private struct MyNASSemanticModelOrigin: Equatable, Sendable {
     let host: String
     let port: Int
 }

@@ -63,11 +63,13 @@ actor LocalSemanticModelStore {
     /// file hashes accepted by the local semantic runtime.
     @discardableResult
     func installPinnedQwen3VLEmbedding2BInt8(
-        packageDirectory: URL
-    ) throws -> LocalSemanticModelInstallStatus {
-        try install(
+        packageDirectory: URL,
+        progress: (@MainActor @Sendable (LocalSemanticModelOperationStage) -> Void)? = nil
+    ) async throws -> LocalSemanticModelInstallStatus {
+        try await install(
             packageDirectory: packageDirectory,
-            manifest: LocalSemanticModelCatalog.qwen3VLEmbedding2BInt8Manifest
+            manifest: LocalSemanticModelCatalog.qwen3VLEmbedding2BInt8Manifest,
+            progress: progress
         )
     }
 
@@ -78,8 +80,12 @@ actor LocalSemanticModelStore {
     @discardableResult
     func install(
         packageDirectory: URL,
-        manifest: LocalSemanticModelPackageManifest
-    ) throws -> LocalSemanticModelInstallStatus {
+        manifest: LocalSemanticModelPackageManifest,
+        progress: (@MainActor @Sendable (LocalSemanticModelOperationStage) -> Void)? = nil
+    ) async throws -> LocalSemanticModelInstallStatus {
+        if let progress {
+            await progress(.validatingDownloadedFiles)
+        }
         try validateSourcePackage(packageDirectory, against: manifest)
         let root = try storageRoot(create: true)
         let target = root.appendingPathComponent(directoryName(for: manifest.profile), isDirectory: true)
@@ -105,6 +111,9 @@ actor LocalSemanticModelStore {
         )
 
         do {
+            if let progress {
+                await progress(.copyingToDevice)
+            }
             for file in manifest.files {
                 let source = try resolvedFileURL(file.relativePath, in: packageDirectory)
                 let destination = try destinationFileURL(file.relativePath, in: staging)
@@ -129,6 +138,9 @@ actor LocalSemanticModelStore {
                 directoryURL: staging,
                 installedAt: installedAt
             )
+            if let progress {
+                await progress(.validatingInstallation)
+            }
             try validateInstallation(stagedInstallation, verifyDigests: true)
 
             var replacementBackup: URL?

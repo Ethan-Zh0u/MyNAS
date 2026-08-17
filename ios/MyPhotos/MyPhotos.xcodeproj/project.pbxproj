@@ -6,6 +6,10 @@
 	objectVersion = 90;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		000000000000000000000151 /* MNN-75e53afe.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000000000000000000150 /* MNN-75e53afe.xcframework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		000000000000000300000000 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -19,6 +23,7 @@
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* MyPhotos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MyPhotos.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		000000000000000000000130 /* MyPhotosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MyPhotosTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000150 /* MNN-75e53afe.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = "ThirdParty/MNN/MNN-75e53afe.xcframework"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -51,6 +56,7 @@
 		000000000000000130000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				000000000000000000000151 /* MNN-75e53afe.xcframework in Frameworks */,
 			);
 		};
 		000000000000000230000000 /* Frameworks */ = {
@@ -66,6 +72,7 @@
 			children = (
 				000000000000000000000010 /* MyPhotos */,
 				000000000000000000000030 /* MyPhotosTests */,
+				000000000000000000000150 /* MNN-75e53afe.xcframework */,
 				000000000000000000000020 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -336,14 +343,11 @@
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*][arch=arm64]" = "$(inherited) $(SRCROOT)/ThirdParty/MNN/MNN-75e53afe.xcframework/ios-arm64";
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*][arch=arm64]" = "$(inherited) $(SRCROOT)/ThirdParty/MNN/MNN-75e53afe.xcframework/ios-arm64-simulator";
-				"GCC_PREPROCESSOR_DEFINITIONS[arch=arm64]" = "$(inherited) MYPHOTOS_ENABLE_MNN_RUNTIME=1";
+				GCC_PREPROCESSOR_DEFINITIONS = "$(inherited) MYPHOTOS_ENABLE_MNN_RUNTIME=1";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MyPhotos/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
-				"OTHER_LDFLAGS[arch=arm64]" = "$(inherited) -framework MNN";
 				MARKETING_VERSION = 0.9.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ethanzhou.MyPhotos;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -371,14 +375,11 @@
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*][arch=arm64]" = "$(inherited) $(SRCROOT)/ThirdParty/MNN/MNN-75e53afe.xcframework/ios-arm64";
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*][arch=arm64]" = "$(inherited) $(SRCROOT)/ThirdParty/MNN/MNN-75e53afe.xcframework/ios-arm64-simulator";
-				"GCC_PREPROCESSOR_DEFINITIONS[arch=arm64]" = "$(inherited) MYPHOTOS_ENABLE_MNN_RUNTIME=1";
+				GCC_PREPROCESSOR_DEFINITIONS = "$(inherited) MYPHOTOS_ENABLE_MNN_RUNTIME=1";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MyPhotos/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
-				"OTHER_LDFLAGS[arch=arm64]" = "$(inherited) -framework MNN";
 				MARKETING_VERSION = 0.9.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ethanzhou.MyPhotos;
 				PRODUCT_NAME = "$(TARGET_NAME)";

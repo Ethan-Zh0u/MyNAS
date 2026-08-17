@@ -1,6 +1,29 @@
 import Combine
 import Foundation
 
+nonisolated enum LocalSemanticModelOperationStage: Equatable, Sendable {
+    case preparingDownload
+    case downloading(currentFile: Int, totalFiles: Int)
+    case validatingDownloadedFiles
+    case copyingToDevice
+    case validatingInstallation
+
+    var userFacingText: String {
+        switch self {
+        case .preparingDownload:
+            "正在连接 MyNAS…"
+        case let .downloading(currentFile, totalFiles):
+            "正在下载模型文件（\(currentFile)/\(totalFiles)）…"
+        case .validatingDownloadedFiles:
+            "正在校验下载文件…"
+        case .copyingToDevice:
+            "正在安装到此 iPhone…"
+        case .validatingInstallation:
+            "正在验证已安装模型…"
+        }
+    }
+}
+
 /// User-facing orchestration for the optional, shared Qwen package and the
 /// separate current-account semantic-index consent. Installing a model never
 /// reads Photos; the first image access happens only after the explicit
@@ -12,6 +35,7 @@ final class LocalSemanticModelViewModel: ObservableObject {
     @Published private(set) var availableCapacity: Int64?
     @Published private(set) var isWorking = false
     @Published private(set) var statusMessage: String?
+    @Published private(set) var operationStage: LocalSemanticModelOperationStage?
     @Published var errorMessage: String?
 
     let manifest = LocalSemanticModelCatalog.qwen3VLEmbedding2BInt8Manifest
@@ -71,6 +95,10 @@ final class LocalSemanticModelViewModel: ObservableObject {
         installationStatus.isInstalled && isRuntimeAvailable && !isWorking
     }
 
+    var operationStatusText: String? {
+        operationStage?.userFacingText
+    }
+
     func load(account: AccountContext) async {
         let identity = Self.identity(for: account)
         activeAccountIdentity = identity
@@ -81,6 +109,7 @@ final class LocalSemanticModelViewModel: ObservableObject {
 
     func importPinnedPackage(from directoryURL: URL, account: AccountContext) async {
         let identity = Self.identity(for: account)
+        operationStage = .validatingDownloadedFiles
         await perform(account: account) {
             let didAccess = directoryURL.startAccessingSecurityScopedResource()
             defer {
@@ -89,7 +118,10 @@ final class LocalSemanticModelViewModel: ObservableObject {
                 }
             }
             let installed = try await self.modelStore.installPinnedQwen3VLEmbedding2BInt8(
-                packageDirectory: directoryURL
+                packageDirectory: directoryURL,
+                progress: { stage in
+                    self.operationStage = stage
+                }
             )
             guard self.activeAccountIdentity == identity else { return }
             self.installationStatus = installed
@@ -100,6 +132,7 @@ final class LocalSemanticModelViewModel: ObservableObject {
 
     func downloadPinnedPackageFromMyNAS(account: AccountContext) async {
         let identity = Self.identity(for: account)
+        operationStage = .preparingDownload
         await perform(account: account) {
             guard self.availableCapacity.map({ $0 >= self.minimumDownloadAvailableByteCount }) ?? true else {
                 throw LocalSemanticModelPackageError.insufficientDiskSpace(
@@ -108,7 +141,10 @@ final class LocalSemanticModelViewModel: ObservableObject {
             }
             let installed = try await self.myNASModelClient.downloadPinnedQwen3VLEmbedding2BInt8(
                 for: account,
-                into: self.modelStore
+                into: self.modelStore,
+                progress: { stage in
+                    self.operationStage = stage
+                }
             )
             guard self.activeAccountIdentity == identity else { return }
             self.installationStatus = installed
@@ -238,11 +274,15 @@ final class LocalSemanticModelViewModel: ObservableObject {
         preservesMessage: Bool = false
     ) async {
         do {
-            let verified = try await modelStore.verifiedInstallation(for: modelProfile)
+            // The package is fully hashed during installation and again before
+            // a fresh MNN engine is constructed. Opening Settings should only
+            // read the signed installation record, rather than re-hashing a
+            // 1.39 GB package and making the page feel stalled.
+            let installed = try await modelStore.status(for: modelProfile)
             let capacity = try await modelStore.availableCapacityForImportantUsage()
             let semantic = try await semanticStore.status(for: account)
             guard activeAccountIdentity == identity else { return }
-            installationStatus = verified.map(Self.installStatus) ?? .notInstalled
+            installationStatus = installed
             availableCapacity = capacity
             semanticStatus = semantic
             if !preservesMessage {
@@ -263,9 +303,9 @@ final class LocalSemanticModelViewModel: ObservableObject {
         while !Task.isCancelled, let request = automaticSynchronizationRequest {
             automaticSynchronizationRequest = nil
             let identity = Self.identity(for: request.account)
-            // `load` performs the full package integrity check.  Keep that
-            // check at the process/account boundary instead of re-hashing a
-            // multi-gigabyte package for every Photos-library notification.
+            // `load` reads the installed-package record. A full digest check
+            // occurs immediately before a fresh MNN engine is constructed,
+            // avoiding a multi-gigabyte re-hash for every Settings appearance.
             if activeAccountIdentity != identity {
                 await load(account: request.account)
             }
@@ -401,6 +441,7 @@ final class LocalSemanticModelViewModel: ObservableObject {
         defer {
             if activeAccountIdentity == identity {
                 isWorking = false
+                operationStage = nil
             }
         }
         do {
@@ -409,18 +450,6 @@ final class LocalSemanticModelViewModel: ObservableObject {
             guard activeAccountIdentity == identity else { return }
             errorMessage = error.localizedDescription
         }
-    }
-
-    private static func installStatus(
-        for installation: LocalSemanticModelInstallation
-    ) -> LocalSemanticModelInstallStatus {
-        LocalSemanticModelInstallStatus(
-            isInstalled: true,
-            profile: installation.manifest.profile,
-            runtime: installation.manifest.runtime,
-            byteCount: installation.manifest.totalByteCount,
-            installedAt: installation.installedAt
-        )
     }
 
     private static func semanticSynchronizationMessage(

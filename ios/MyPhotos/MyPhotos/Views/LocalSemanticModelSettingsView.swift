@@ -49,9 +49,10 @@ struct LocalSemanticModelSettingsView: View {
                 if model.isWorking {
                     HStack(spacing: 9) {
                         ProgressView()
-                        Text("正在校验模型…")
+                        Text(model.operationStatusText ?? "正在处理模型…")
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityLabel(model.operationStatusText ?? "正在处理模型")
                 } else if !model.isRuntimeAvailable {
                     Label("当前设备不支持语义模型", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
