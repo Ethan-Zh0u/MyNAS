@@ -18,12 +18,17 @@ nonisolated struct PhotoTextIndexStatus: Equatable, Sendable {
     let indexedAssetCount: Int
     let lastSynchronizedAt: Date?
     let needsRebuild: Bool
+    /// A prior OCR permission did not include downloading iCloud photos. Its
+    /// records stay unreadable until the owner explicitly accepts the new
+    /// scope, at which point the old index is replaced.
+    let requiresICloudDownloadConsent: Bool
 
     static let disabled = PhotoTextIndexStatus(
         isEnabled: false,
         indexedAssetCount: 0,
         lastSynchronizedAt: nil,
-        needsRebuild: false
+        needsRebuild: false,
+        requiresICloudDownloadConsent: false
     )
 }
 
@@ -39,8 +44,8 @@ nonisolated struct PhotoTextIndexSyncResult: Equatable, Sendable {
     let updatedCount: Int
     let removedCount: Int
     let unchangedCount: Int
-    /// Current local images whose current source version could not be read
-    /// without downloading from iCloud are deliberately left unindexed.
+    /// Images that could not currently be rendered after requesting their
+    /// iCloud photo download are left for a later automatic or manual retry.
     let deferredAssetCount: Int
     let status: PhotoTextIndexStatus
 }

@@ -3,8 +3,10 @@ import SwiftUI
 struct MyNASConnectionView: View {
     @EnvironmentObject private var accountStore: AccountStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var addressIsFocused: Bool
     @State private var currentStep: ConnectionWizardStep = .install
+    @State private var furthestStep: ConnectionWizardStep = .install
     @State private var address = ""
     @State private var addressError: String?
     @State private var isConnecting = false
@@ -16,27 +18,34 @@ struct MyNASConnectionView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+            List {
+                Section {
                     introduction
                     ConnectionProgress(currentStep: currentStep)
+                }
 
+                Section("连接步骤") {
                     ForEach(ConnectionWizardStep.allCases) { step in
-                        stepCard(step)
+                        stepRow(step)
                     }
+                }
 
+                Section(currentStep.title) {
+                    stepContent(currentStep)
+                        .padding(.vertical, 4)
+                }
+
+                Section {
                     Label(
                         "Tailscale 登录由官方 App 管理。MyNAS Photos 不会读取或保存你的密码。",
                         systemImage: "lock.shield"
                     )
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 20)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .listStyle(.insetGrouped)
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("连接 MyNAS")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -57,69 +66,51 @@ struct MyNASConnectionView: View {
     }
 
     private var introduction: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: MyPhotosMetrics.compactSpacing) {
             Text("跟着四步完成连接")
                 .font(.title2.bold())
             Text("每一步完成后再继续。最后一步会同时验证 Tailscale 身份、MyNAS 版本和可用硬盘。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
+        .padding(.vertical, 4)
     }
 
-    @ViewBuilder
-    private func stepCard(_ step: ConnectionWizardStep) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Button {
-                revisit(step)
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: statusSymbol(for: step))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(statusColor(for: step))
-                        .frame(width: 30)
+    private func stepRow(_ step: ConnectionWizardStep) -> some View {
+        Button {
+            revisit(step)
+        } label: {
+            HStack(spacing: MyPhotosMetrics.standardSpacing) {
+                Image(systemName: statusSymbol(for: step))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(statusColor(for: step))
+                    .frame(width: 30, height: 30)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("第 \(step.rawValue + 1) 步")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(step.title)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                    }
-
-                    Spacer()
-
-                    if step.rawValue < currentStep.rawValue {
-                        Text("已完成")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    } else if step == currentStep {
-                        Text("进行中")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tint)
-                    }
-
-                    if step.rawValue <= currentStep.rawValue, step != currentStep {
-                        Image(systemName: "chevron.down")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(.tertiary)
-                    }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(step.title)
+                        .font(.body.weight(step == currentStep ? .semibold : .regular))
+                        .foregroundStyle(.primary)
+                    Text("第 \(step.rawValue + 1) 步 · \(stepStateText(for: step))")
+                        .font(.caption)
+                        .foregroundStyle(
+                            step == currentStep ? Color.accentColor : Color.secondary
+                        )
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(step.rawValue > currentStep.rawValue || isConnecting)
 
-            if step == currentStep {
-                Divider()
-                stepContent(step)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                Spacer()
+
+                if step.rawValue <= furthestStep.rawValue, step != currentStep {
+                    Image(systemName: "chevron.forward")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
             }
+            .contentShape(Rectangle())
         }
-        .padding(18)
-        .connectionCardSurface()
-        .animation(.snappy(duration: 0.32), value: currentStep)
-        .accessibilityElement(children: .contain)
+        .buttonStyle(.plain)
+        .disabled(step.rawValue > furthestStep.rawValue || isConnecting)
+        .accessibilityLabel("第 \(step.rawValue + 1) 步，\(step.title)")
+        .accessibilityValue(stepStateText(for: step))
     }
 
     @ViewBuilder
@@ -193,30 +184,35 @@ struct MyNASConnectionView: View {
                     .onSubmit(validateAddressAndContinue)
                     .onChange(of: address) {
                         addressError = nil
-                        if address != scannedServerURL {
-                            scannedServerURL = nil
-                            expectedServerID = nil
-                        }
+                        guard address != scannedServerURL else { return }
+                        scannedServerURL = nil
+                        expectedServerID = nil
+                        invalidateAddressVerification()
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 14))
+                    .textFieldStyle(.roundedBorder)
+                    .myPhotosMinimumTouchTarget()
 
                 Text("只填写 `https://设备名.tailnet名.ts.net` 根地址，不要填写局域网 IP、端口或子路径。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
                 if expectedServerID != nil {
-                    Label("已读取二维码，连接时会核对服务器身份", systemImage: "checkmark.seal.fill")
-                        .font(.footnote)
-                        .foregroundStyle(.green)
+                    MyPhotosInlineNotice(
+                        title: "二维码已读取",
+                        message: "连接时会同时核对服务器身份。",
+                        systemImage: "checkmark.seal.fill",
+                        tone: .success
+                    )
                 }
 
                 if let addressError {
-                    Label(addressError, systemImage: "exclamationmark.triangle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                        .transition(.opacity)
+                    MyPhotosInlineNotice(
+                        title: "地址不可用",
+                        message: addressError,
+                        systemImage: "exclamationmark.triangle.fill",
+                        tone: .danger
+                    )
+                    .transition(.opacity)
                 }
 
                 primaryButton("检查地址，下一步", systemImage: "arrow.right") {
@@ -246,16 +242,12 @@ struct MyNASConnectionView: View {
                 )
 
                 if let connectionError {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("未能连接", systemImage: "exclamationmark.triangle.fill")
-                            .font(.headline)
-                        Text(connectionError)
-                            .font(.subheadline)
-                    }
-                    .foregroundStyle(.red)
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.red.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+                    MyPhotosInlineNotice(
+                        title: "未能连接",
+                        message: connectionError,
+                        systemImage: "exclamationmark.triangle.fill",
+                        tone: .danger
+                    )
                 }
 
                 connectButton
@@ -265,6 +257,7 @@ struct MyNASConnectionView: View {
                 }
                 .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity)
+                .myPhotosMinimumTouchTarget()
                 .disabled(isConnecting)
             }
         }
@@ -280,9 +273,15 @@ struct MyNASConnectionView: View {
         }
 
         if #available(iOS 26.0, *) {
-            link.buttonStyle(.glass)
+            link
+                .buttonStyle(.glass)
+                .controlSize(.large)
+                .myPhotosMinimumTouchTarget()
         } else {
-            link.buttonStyle(.bordered)
+            link
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .myPhotosMinimumTouchTarget()
         }
     }
 
@@ -296,9 +295,15 @@ struct MyNASConnectionView: View {
         }
 
         if #available(iOS 26.0, *) {
-            button.buttonStyle(.glassProminent)
+            button
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
+                .myPhotosMinimumTouchTarget()
         } else {
-            button.buttonStyle(.borderedProminent)
+            button
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .myPhotosMinimumTouchTarget()
         }
     }
 
@@ -314,9 +319,15 @@ struct MyNASConnectionView: View {
         }
 
         if #available(iOS 26.0, *) {
-            button.buttonStyle(.glassProminent)
+            button
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
+                .myPhotosMinimumTouchTarget()
         } else {
-            button.buttonStyle(.borderedProminent)
+            button
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .myPhotosMinimumTouchTarget()
         }
     }
 
@@ -339,9 +350,15 @@ struct MyNASConnectionView: View {
         .disabled(isConnecting)
 
         if #available(iOS 26.0, *) {
-            button.buttonStyle(.glassProminent)
+            button
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
+                .myPhotosMinimumTouchTarget()
         } else {
-            button.buttonStyle(.borderedProminent)
+            button
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .myPhotosMinimumTouchTarget()
         }
     }
 
@@ -351,16 +368,19 @@ struct MyNASConnectionView: View {
 
     private func advance(to step: ConnectionWizardStep) {
         connectionError = nil
-        withAnimation(.snappy(duration: 0.32)) {
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.32)) {
+            if step.rawValue > furthestStep.rawValue {
+                furthestStep = step
+            }
             currentStep = step
         }
     }
 
     private func revisit(_ step: ConnectionWizardStep) {
-        guard step.rawValue <= currentStep.rawValue, !isConnecting else { return }
+        guard step.rawValue <= furthestStep.rawValue, !isConnecting else { return }
         addressError = nil
         connectionError = nil
-        withAnimation(.snappy(duration: 0.32)) {
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.32)) {
             currentStep = step
         }
     }
@@ -374,6 +394,17 @@ struct MyNASConnectionView: View {
             advance(to: .verify)
         } catch {
             addressError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// A changed manual address must pass the address validator again before
+    /// the verification screen can be revisited. A scanned value retains its
+    /// pairing identity and advances through its dedicated path below.
+    private func invalidateAddressVerification() {
+        guard furthestStep.rawValue > ConnectionWizardStep.address.rawValue else { return }
+        furthestStep = .address
+        if currentStep == .verify {
+            currentStep = .address
         }
     }
 
@@ -431,14 +462,21 @@ struct MyNASConnectionView: View {
     }
 
     private func statusSymbol(for step: ConnectionWizardStep) -> String {
-        if step.rawValue < currentStep.rawValue {
+        if step != currentStep, step.rawValue < furthestStep.rawValue {
             return "checkmark.circle.fill"
         }
         return step == currentStep ? "\(step.rawValue + 1).circle.fill" : "\(step.rawValue + 1).circle"
     }
 
     private func statusColor(for step: ConnectionWizardStep) -> Color {
-        step.rawValue <= currentStep.rawValue ? .accentColor : .secondary
+        step.rawValue <= furthestStep.rawValue ? .accentColor : .secondary
+    }
+
+    private func stepStateText(for step: ConnectionWizardStep) -> String {
+        if step == currentStep { return "当前步骤" }
+        if step.rawValue < furthestStep.rawValue { return "已完成，可返回修改" }
+        if step == furthestStep { return "已到达，可继续" }
+        return "等待前一步完成"
     }
 }
 
@@ -461,27 +499,26 @@ private enum ConnectionWizardStep: Int, CaseIterable, Identifiable {
 }
 
 private struct ConnectionProgress: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let currentStep: ConnectionWizardStep
 
     var body: some View {
-        HStack(spacing: 7) {
-            ForEach(ConnectionWizardStep.allCases) { step in
-                Circle()
-                    .fill(step.rawValue <= currentStep.rawValue ? Color.accentColor : Color.secondary.opacity(0.24))
-                    .frame(width: step == currentStep ? 11 : 8, height: step == currentStep ? 11 : 8)
-
-                if step != ConnectionWizardStep.allCases.last {
-                    Capsule()
-                        .fill(
-                            step.rawValue < currentStep.rawValue
-                                ? Color.accentColor
-                                : Color.secondary.opacity(0.18)
-                        )
-                        .frame(height: 3)
-                }
+        VStack(alignment: .leading, spacing: MyPhotosMetrics.compactSpacing) {
+            HStack {
+                Text("连接进度")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(currentStep.rawValue + 1) / \(ConnectionWizardStep.allCases.count)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
+            ProgressView(
+                value: Double(currentStep.rawValue + 1),
+                total: Double(ConnectionWizardStep.allCases.count)
+            )
         }
-        .animation(.snappy(duration: 0.32), value: currentStep)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.32), value: currentStep)
         .accessibilityLabel("连接进度，第 \(currentStep.rawValue + 1) 步，共 4 步")
     }
 }
@@ -519,17 +556,6 @@ private struct VerificationRow: View {
                     .font(.subheadline.weight(.medium))
                     .lineLimit(2)
             }
-        }
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func connectionCardSurface() -> some View {
-        if #available(iOS 26.0, *) {
-            glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        } else {
-            background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
     }
 }

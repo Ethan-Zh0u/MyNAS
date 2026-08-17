@@ -16,6 +16,8 @@
 | GET | `/capabilities` | `serverID`、`apiVersion`、`serverVersion`、`minimumClientVersion`、`backupStateModelVersion=1`、`derivativePolicyVersion=photos-browse-v2`、`features`、`derivativeRecipes`、`supportsVolumes`。`features.backgroundTransfers` 默认是 false；源码仅在维护者显式设置 `MYNAS_PHOTOS_BACKGROUND_TRANSFERS=1` 时才为 true。2026-08-03 的受控 G2 验收 release 为真实 iOS 系统会话测试返回 true，尚未等同于已交付能力。启动时找到 FFmpeg processor 后列出三项 recipe；工具不可用时保持空数组，不能虚报支持。 |
 | GET | `/pairing` | `mynas-photos-pairing` v1 的 `serverURL` 和 `serverID`；仅在服务器配置了根 `https://*.ts.net` private origin 时可用。二维码不含 token/password。 |
 | GET | `/me` | 稳定 `userID`、`authenticationIdentity`、显示名、头像版本和 `serverID`。 |
+| GET | `/models/qwen3-vl-embedding-2b/manifest` | 仅限当前 Tailscale owner；仅当 NAS 已完整放置固定 Qwen/MNN 包时返回 server ID 与清单。App 必须将其与内置固定清单完全比对，不能把服务器清单当作信任来源。 |
+| GET/HEAD | `/models/qwen3-vl-embedding-2b/files/{fixed-name}` | 仅限当前 owner；只接受固定清单内文件名，支持 HTTP Range。响应不暴露 NAS 路径或任意文件浏览能力；客户端按内置 SHA-256 和字节数验证。 |
 | GET | `/volumes` | 当前用户可选择的卷 ID/名称/在线状态/总量/可用量/default；不得暴露 mount/device/path。 |
 
 iOS 必须依序调用 capabilities → me → volumes，并验证 capabilities 与 me 的 `serverID`（及二维码期望 ID）一致后才保存账号。

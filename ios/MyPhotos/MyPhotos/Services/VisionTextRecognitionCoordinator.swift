@@ -12,20 +12,21 @@ final class VisionTextRecognitionCoordinator {
         self.recognizer = recognizer
     }
 
-    /// Processes one image at a time. The caller supplies only I3's explicit
-    /// candidates; `PhotoLibraryClient` enforces `isNetworkAccessAllowed=false`
-    /// for every image request, so iCloud-only originals are left deferred.
+    /// Processes one image at a time. The caller supplies only I3's explicitly
+    /// consented candidates; `PhotoLibraryClient` may ask Photos to download
+    /// an iCloud image, but sends only its bounded rendered copy to Vision.
     func recognize(
         assets: [LocalPhotoAsset],
         photoClient: PhotoLibraryClient
-    ) async -> [PhotoTextRecognitionOutput] {
+    ) async throws -> [PhotoTextRecognitionOutput] {
         var outputs: [PhotoTextRecognitionOutput] = []
         outputs.reserveCapacity(assets.count)
 
-        for asset in assets where !Task.isCancelled {
+        for asset in assets {
+            try Task.checkCancellation()
             let imageResult = await photoClient.textRecognitionImage(for: asset.localIdentifier)
             guard let image = imageResult.image else { continue }
-            guard let recognizedText = try? await recognizer.recognizeText(in: image) else { continue }
+            let recognizedText = try await recognizer.recognizeText(in: image)
             outputs.append(
                 PhotoTextRecognitionOutput(
                     assetID: asset.localIdentifier,

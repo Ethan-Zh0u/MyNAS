@@ -361,8 +361,9 @@ final class PhotoLibraryClient: NSObject {
 
     /// Provides a bounded rendered still for an explicitly enabled I3 OCR
     /// operation. This deliberately rejects videos and Live Photos, never
-    /// requests the original resource, caps the raster at 2,048 px and keeps
-    /// PhotoKit network access off so an iCloud-only item remains unindexed.
+    /// requests the original resource, and caps the raster at 2,048 px. With
+    /// the I3 iCloud-download consent, Photos may download the rendered image
+    /// before it is passed to on-device Vision.
     func textRecognitionImage(for localIdentifier: String) async -> PhotoImageResult {
         guard let asset = photoAsset(localIdentifier),
               asset.mediaType == .image,
@@ -371,6 +372,67 @@ final class PhotoLibraryClient: NSObject {
         }
 
         let maximumDimension: CGFloat = 2_048
+        let sourceWidth = max(CGFloat(asset.pixelWidth), 1)
+        let sourceHeight = max(CGFloat(asset.pixelHeight), 1)
+        let scale = min(1, maximumDimension / max(sourceWidth, sourceHeight))
+        let targetSize = CGSize(
+            width: max(1, floor(sourceWidth * scale)),
+            height: max(1, floor(sourceHeight * scale))
+        )
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .exact
+        options.isNetworkAccessAllowed = true
+        options.version = .current
+
+        return await withCheckedContinuation { continuation in
+            var resumed = false
+            let requestID = imageManager.requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFit,
+                options: options
+            ) { image, info in
+                guard !resumed else { return }
+                let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                let isCloudOnly = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false && image == nil
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                let error = info?[PHImageErrorKey] as? Error
+
+                if let image, !isDegraded {
+                    resumed = true
+                    continuation.resume(returning: PhotoImageResult(image: image, isCloudOnly: false))
+                    return
+                }
+                if cancelled || error != nil || (image == nil && !isCloudOnly) {
+                    resumed = true
+                    continuation.resume(
+                        returning: PhotoImageResult(image: nil, isCloudOnly: isCloudOnly)
+                    )
+                }
+            }
+
+            if requestID == PHInvalidImageRequestID, !resumed {
+                resumed = true
+                continuation.resume(returning: PhotoImageResult(image: nil, isCloudOnly: false))
+            }
+        }
+    }
+
+    /// Provides a small, local-only rendered still for an explicitly enabled
+    /// semantic-index operation. It never asks Photos to download an iCloud
+    /// asset, rejects video and Live Photo sources, and limits the model input
+    /// to 420 px on the long edge. The caller must release this image after
+    /// converting it into an in-memory vector; no image crosses into index
+    /// storage.
+    func semanticIndexImage(for localIdentifier: String) async -> PhotoImageResult {
+        guard let asset = photoAsset(localIdentifier),
+              asset.mediaType == .image,
+              !asset.mediaSubtypes.contains(.photoLive) else {
+            return PhotoImageResult(image: nil, isCloudOnly: false)
+        }
+
+        let maximumDimension: CGFloat = 420
         let sourceWidth = max(CGFloat(asset.pixelWidth), 1)
         let sourceHeight = max(CGFloat(asset.pixelHeight), 1)
         let scale = min(1, maximumDimension / max(sourceWidth, sourceHeight))
@@ -403,7 +465,11 @@ final class PhotoLibraryClient: NSObject {
                     continuation.resume(returning: PhotoImageResult(image: image, isCloudOnly: false))
                     return
                 }
-                if cancelled || isCloudOnly || error != nil || image == nil {
+                // Network access is deliberately disabled for semantic
+                // indexing, so an iCloud-only asset has no later callback to
+                // wait for. Report it as deferred instead of leaving the
+                // continuation suspended.
+                if cancelled || error != nil || isCloudOnly || image == nil {
                     resumed = true
                     continuation.resume(
                         returning: PhotoImageResult(image: nil, isCloudOnly: isCloudOnly)

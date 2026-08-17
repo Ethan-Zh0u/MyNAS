@@ -11,12 +11,13 @@ nonisolated struct LocalUnifiedSearchResult: Identifiable, Equatable, Sendable {
 }
 
 nonisolated enum LocalUnifiedSearchResultMerger {
-    /// Keep the metadata search order, then append OCR-only matches. An asset
-    /// that matches both sources is deliberately one grid tile and one detail
-    /// destination, never a duplicate result.
+    /// Keep the metadata search order, then append OCR-only and semantic-only
+    /// matches. An asset that matches several sources is deliberately one grid
+    /// tile and one detail destination, never a duplicate result.
     static func merge(
         metadata: [PhotoSearchIndexRecord],
-        recognizedText: [PhotoTextIndexRecord]
+        recognizedText: [PhotoTextIndexRecord],
+        semantic: [LocalSemanticSearchHit] = []
     ) -> [LocalUnifiedSearchResult] {
         var seenAssetIDs = Set<String>()
         var merged: [LocalUnifiedSearchResult] = []
@@ -33,6 +34,12 @@ nonisolated enum LocalUnifiedSearchResultMerger {
         for record in recognizedText where seenAssetIDs.insert(record.assetID).inserted {
             merged.append(
                 LocalUnifiedSearchResult(assetID: record.assetID, mediaKind: .photo)
+            )
+        }
+
+        for hit in semantic where seenAssetIDs.insert(hit.assetID).inserted {
+            merged.append(
+                LocalUnifiedSearchResult(assetID: hit.assetID, mediaKind: .photo)
             )
         }
 

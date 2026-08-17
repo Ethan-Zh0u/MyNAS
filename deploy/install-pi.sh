@@ -16,7 +16,7 @@ command -v heif-convert >/dev/null
 findmnt -no TARGET /mnt/nas | grep -qx '/mnt/nas'
 df -h /mnt/nas
 
-mkdir -p /mnt/nas/.mynas/{staging,thumbnails,trash} "$HOME/.local/share/mynas"
+mkdir -p /mnt/nas/.mynas/{staging,thumbnails,trash,models/qwen3-vl-embedding-2b} "$HOME/.local/share/mynas"
 chmod 700 /mnt/nas/.mynas "$HOME/.local/share/mynas"
 sudo install -d -m 0755 /mnt/mynas /etc/mynas
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"

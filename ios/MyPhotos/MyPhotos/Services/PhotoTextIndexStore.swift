@@ -7,7 +7,9 @@ import Foundation
 actor PhotoTextIndexStore {
     nonisolated static let schemaVersion = 1
     nonisolated static let processorRevision = "vision-text-recognition-accurate-v1"
-    nonisolated static let consentRevision = "local-ocr-consent-v1"
+    /// v2 adds the separately acknowledged ability to let Photos download an
+    /// iCloud image before the app sends its rendered copy to on-device Vision.
+    nonisolated static let consentRevision = "local-ocr-consent-v2-icloud-download"
     nonisolated static let maximumRecognizedTextCharacterCount = 24_000
 
     private let directories: CacheDirectoryProvider
@@ -36,7 +38,10 @@ actor PhotoTextIndexStore {
             try removeIndexFile(for: account)
             return .disabled
         }
-        guard let snapshot = try loadSnapshot(for: account) else {
+        guard let snapshot = try loadSnapshot(
+            for: account,
+            allowsUnsupportedConsentRevision: true
+        ) else {
             return .disabled
         }
         return status(for: snapshot)
@@ -47,8 +52,17 @@ actor PhotoTextIndexStore {
     @discardableResult
     func enable(for account: AccountContext) async throws -> PhotoTextIndexStatus {
         try await requirePixelAnalysisConsent(for: account)
-        if let snapshot = try loadSnapshot(for: account) {
-            return status(for: snapshot)
+        if let snapshot = try loadSnapshot(
+            for: account,
+            allowsUnsupportedConsentRevision: true
+        ) {
+            if snapshot.consentRevision == Self.consentRevision {
+                return status(for: snapshot)
+            }
+            // The earlier consent explicitly prohibited downloading iCloud
+            // photos. The caller's new affirmative action replaces, rather
+            // than silently widens, that historical text index.
+            try removeIndexFile(for: account)
         }
         let snapshot = PhotoTextIndexSnapshot(
             schemaVersion: Self.schemaVersion,
@@ -230,7 +244,10 @@ actor PhotoTextIndexStore {
         }
     }
 
-    private func loadSnapshot(for account: AccountContext) throws -> PhotoTextIndexSnapshot? {
+    private func loadSnapshot(
+        for account: AccountContext,
+        allowsUnsupportedConsentRevision: Bool = false
+    ) throws -> PhotoTextIndexSnapshot? {
         guard let url = try existingStorageURL(for: account) else { return nil }
         try rejectSymbolicLink(at: url)
         let data: Data
@@ -248,7 +265,7 @@ actor PhotoTextIndexStore {
         guard snapshot.schemaVersion == Self.schemaVersion else {
             throw PhotoTextIndexError.unsupportedSchema(snapshot.schemaVersion)
         }
-        guard snapshot.consentRevision == Self.consentRevision else {
+        guard allowsUnsupportedConsentRevision || snapshot.consentRevision == Self.consentRevision else {
             throw PhotoTextIndexError.unsupportedConsentRevision(snapshot.consentRevision)
         }
         guard snapshot.accountID == account.accountID,
@@ -314,11 +331,14 @@ actor PhotoTextIndexStore {
     }
 
     private func status(for snapshot: PhotoTextIndexSnapshot) -> PhotoTextIndexStatus {
-        PhotoTextIndexStatus(
-            isEnabled: true,
-            indexedAssetCount: snapshot.records.count,
-            lastSynchronizedAt: snapshot.lastSynchronizedAt,
-            needsRebuild: snapshot.processorRevision != Self.processorRevision
+        let hasCurrentICloudDownloadConsent = snapshot.consentRevision == Self.consentRevision
+        return PhotoTextIndexStatus(
+            isEnabled: hasCurrentICloudDownloadConsent,
+            indexedAssetCount: hasCurrentICloudDownloadConsent ? snapshot.records.count : 0,
+            lastSynchronizedAt: hasCurrentICloudDownloadConsent ? snapshot.lastSynchronizedAt : nil,
+            needsRebuild: hasCurrentICloudDownloadConsent
+                && snapshot.processorRevision != Self.processorRevision,
+            requiresICloudDownloadConsent: !hasCurrentICloudDownloadConsent
         )
     }
 

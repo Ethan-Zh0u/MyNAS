@@ -11,9 +11,9 @@ MyNAS 提供网页文件管理、多硬盘管理、上传下载、回收站和�
 > 从准备设备、连接网线和硬盘，到写入 Raspberry Pi OS、开启 SSH、安装 Tailscale、接入硬盘和打开网页，全部按顺序说明。第一次接触树莓派也可以照着操作。
 
 > [!IMPORTANT]
-> **当前稳定版：v0.9.6** · [查看 GitHub Release](https://github.com/Ethan-Zh0u/MyNAS/releases/tag/v0.9.6)
+> **发布候选：v0.9.7** · 当前稳定版仍为 [v0.9.6](https://github.com/Ethan-Zh0u/MyNAS/releases/tag/v0.9.6)
 >
-> 远端详情预览、完整资源备份/下载/导出与受限删除均已完成对应真机验收；树莓派与 iPhone 16 Pro 当前使用同一 0.9.6 版本。系统后台上传在服务重启、账号/卷、真实 iCloud-only 与长队列边界仍未完全验收，请勿将 MyNAS 作为重要文件的唯一副本。
+> v0.9.7 候选移除了人物/二次元角色归类，并增加从已配对 MyNAS 下载并校验本地 Qwen 模型的路径；最终发布仍须通过同一候选的真机下载验收。系统后台上传在服务重启、账号/卷、真实 iCloud-only 与长队列边界仍未完全验收，请勿将 MyNAS 作为重要文件的唯一副本。
 >
 > 详见 [更新日志](CHANGELOG.md) 和 [MyNAS Photos 路线图](docs/myphotos/IMPLEMENTATION_PLAN.md)。
 

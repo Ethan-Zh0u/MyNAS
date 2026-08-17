@@ -7,23 +7,8 @@ struct SettingsView: View {
     let assets: [LocalPhotoAsset]
     let photoClient: PhotoLibraryClient
     @ObservedObject var backupCoordinator: PhotoBackupCoordinator
-    @AppStorage("photoTimelineShowsUnified") private var showsUnifiedTimeline = true
-    private let cacheDirectories = CacheDirectoryProvider()
-    private let cacheManager = RemotePhotoCacheManager()
-    private let connectionService = MyNASConnectionService()
-    @State private var isConnectionPresented = false
-    @State private var serverTemperatureC: Double?
-    @State private var isTemperatureLoading = false
-    @State private var isRefreshingConnection = false
-    @State private var connectionRefreshError: String?
-    @State private var cacheUsage: RemotePhotoCacheUsage = .empty
-    @State private var isLoadingCacheUsage = false
-    @State private var isManagingCache = false
-    @State private var showsClearCacheConfirmation = false
-    @State private var cacheStatusMessage: String?
-    @State private var cacheError: String?
-
-    private let retainedCacheLimit: Int64 = 256 * 1024 * 1024
+    @ObservedObject var textIndex: PhotoTextIndexViewModel
+    @ObservedObject var semanticIndex: LocalSemanticModelViewModel
 
     var body: some View {
         NavigationStack {
@@ -37,7 +22,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(accountStore.current.displayName)
                                     .font(.headline)
-                                Text("个人信息与 MyNAS 账号")
+                                Text("个人信息与账号")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             }
@@ -47,7 +32,22 @@ struct SettingsView: View {
                     .accessibilityLabel("个人信息，\(accountStore.current.displayName)")
                 }
 
-                Section("主要功能") {
+                Section("MyNAS") {
+                    NavigationLink {
+                        MyNASSettingsView()
+                    } label: {
+                        SettingsDestinationRow(
+                            title: "MyNAS",
+                            detail: myNASStatus,
+                            systemImage: accountStore.current.isLocalOnly
+                                ? "externaldrive"
+                                : "externaldrive.fill",
+                            tint: accountStore.current.isLocalOnly ? .secondary : .accentColor
+                        )
+                    }
+                }
+
+                Section("照片") {
                     NavigationLink {
                         PhotoBackupView(
                             coordinator: backupCoordinator,
@@ -55,248 +55,72 @@ struct SettingsView: View {
                             client: photoClient
                         )
                     } label: {
-                        HStack(spacing: 13) {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.title2)
-                                .foregroundStyle(.tint)
-                                .symbolEffect(.pulse, isActive: backupProgress.isRunning)
-                                .frame(width: 30)
-
-                            VStack(alignment: .leading, spacing: 7) {
-                                HStack {
-                                    Text("照片与视频备份")
-                                        .font(.headline)
-                                    Spacer()
-                                    Text("\(backupProgress.percentage)%")
-                                        .font(.headline)
-                                        .monospacedDigit()
-                                }
-                                ProgressView(value: backupProgress.fractionCompleted)
-                                Text(
-                                    "原件已上传 \(backupProgress.countText) 项 · \(backupCoordinator.headline(for: accountStore.current.accountID, assets: assets))"
-                                )
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            }
-                        }
-                        .padding(.vertical, 6)
+                        BackupSettingsSummary(
+                            progress: backupProgress,
+                            headline: backupCoordinator.headline(
+                                for: accountStore.current.accountID,
+                                assets: assets
+                            )
+                        )
                     }
                     .accessibilityLabel(
                         "照片与视频备份，原件已安全上传 \(backupProgress.completedCount) 项，共 \(backupProgress.totalCount) 项，\(backupProgress.percentage)%"
                     )
 
-                    Text("保留 Live Photo、HDR、RAW / ProRAW 原始资源；点击进入备份队列。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("MyNAS") {
-                    LabeledContent("当前服务器") {
-                        HStack(spacing: 8) {
-                            Text(currentServerName)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            if !accountStore.current.isLocalOnly {
-                                ServerTemperatureBadge(
-                                    temperatureC: serverTemperatureC,
-                                    isLoading: isTemperatureLoading
-                                )
-                            }
-                        }
-                    }
-                    LabeledContent("当前账号", value: accountStore.current.displayName)
-                    LabeledContent("存储盘", value: selectedVolumeName)
-
-                    if !accountStore.current.isLocalOnly {
-                        Button {
-                            Task { await refreshConnection() }
-                        } label: {
-                            Label(
-                                isRefreshingConnection ? "正在刷新连接信息…" : "刷新连接信息",
-                                systemImage: "arrow.clockwise"
-                            )
-                        }
-                        .disabled(isRefreshingConnection)
-
-                        if let connectionRefreshError {
-                            Label(connectionRefreshError, systemImage: "exclamationmark.triangle.fill")
-                                .font(.footnote)
-                                .foregroundStyle(.red)
-                        }
-                    }
-
-                    Button {
-                        isConnectionPresented = true
+                    NavigationLink {
+                        PhotoLibrarySettingsView(
+                            authorization: authorization,
+                            onManageLimited: onManageLimited
+                        )
                     } label: {
-                        Label(
-                            accountStore.current.isLocalOnly ? "连接 MyNAS" : "添加另一台 MyNAS",
-                            systemImage: "externaldrive.badge.plus"
+                        SettingsDestinationRow(
+                            title: "照片库",
+                            detail: permissionText,
+                            systemImage: "photo.on.rectangle"
                         )
                     }
                 }
 
-                if accountStore.accounts.count > 1 {
-                    Section("账号与服务器") {
-                        ForEach(accountStore.accounts) { account in
-                            Button {
-                                accountStore.activate(account)
-                            } label: {
-                                HStack {
-                                    AccountAvatar(name: account.displayName, diameter: 36)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(account.displayName)
-                                            .foregroundStyle(.primary)
-                                        Text(account.serverURL?.host() ?? "仅本地图库")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    if account.accountID == accountStore.current.accountID {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(.tint)
-                                    }
-                                }
-                            }
-                            .accessibilityLabel(
-                                "\(account.displayName)，\(account.accountID == accountStore.current.accountID ? "当前账号" : "切换账号")"
-                            )
-                        }
-                    }
-                }
-
-                Section("本地照片") {
-                    LabeledContent("Photos 权限", value: permissionText)
-                    if authorization == .limited {
-                        Label("当前仅可访问部分图片", systemImage: "rectangle.badge.person.crop")
-                            .foregroundStyle(.secondary)
-                        Text("MyNAS Photos 只会显示系统授权给它的照片和视频，不会声称已访问完整照片库。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Button("管理允许访问的照片", action: onManageLimited)
-                    }
-                    Text("缩略图请求不会隐式从 iCloud 下载完整资源。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("隐私与本地分析") {
+                Section("隐私") {
                     NavigationLink {
-                        LocalAnalysisSettingsView(photoClient: photoClient)
+                        LocalAnalysisSettingsView(
+                            photoClient: photoClient,
+                            semanticIndex: semanticIndex,
+                            textIndex: textIndex
+                        )
                     } label: {
-                        Label("端侧分析与本地索引", systemImage: "hand.raised.square")
-                    }
-                    Text("在此管理端侧像素分析和 OCR 的独立许可与可删除索引；文字与内容检索统一从“照片”主页的搜索入口使用。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                if !accountStore.current.isLocalOnly {
-                    Section("照片显示") {
-                        Toggle(isOn: $showsUnifiedTimeline) {
-                            Label("统一时间线", systemImage: "rectangle.3.group.bubble.left")
-                        }
-                        Text("在“照片”中按拍摄时间同时显示本机照片和仅在 MyNAS 的项目。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        Text("只有 MyNAS 已确认、且仍对应当前本机版本的备份才会合并；不会按文件名、日期或缩略图猜测同一项目。此开关只改变显示，不会上传、下载、合并或删除照片。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                        SettingsDestinationRow(
+                            title: "本地分析与搜索",
+                            detail: "OCR 与语义模型",
+                            systemImage: "hand.raised.square"
+                        )
                     }
                 }
 
-                Section("存储与缓存") {
-                    LabeledContent("当前缓存命名空间", value: accountStore.current.cacheNamespace)
-                    Text(cachePathText)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    LabeledContent("缓存占用", value: cacheUsageText)
-                    LabeledContent("缓存条目", value: "\(cacheUsage.entryCount)")
-
-                    if isLoadingCacheUsage || isManagingCache {
-                        HStack(spacing: 9) {
-                            ProgressView()
-                            Text(isManagingCache ? "正在管理当前账号缓存…" : "正在统计当前账号缓存…")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Button {
-                        Task { await refreshCacheUsage() }
+                Section("存储") {
+                    NavigationLink {
+                        CacheSettingsView()
                     } label: {
-                        Label("刷新缓存统计", systemImage: "arrow.clockwise")
+                        SettingsDestinationRow(
+                            title: "缓存",
+                            detail: "下载、预览与缩略图",
+                            systemImage: "internaldrive"
+                        )
                     }
-                    .disabled(isLoadingCacheUsage || isManagingCache)
-
-                    Button {
-                        Task { await trimCacheToRetainedLimit() }
-                    } label: {
-                        Label("按最近使用清理至 256 MB", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
-                    }
-                    .disabled(isLoadingCacheUsage || isManagingCache || cacheUsage.totalByteCount <= retainedCacheLimit)
-
-                    Button(role: .destructive) {
-                        showsClearCacheConfirmation = true
-                    } label: {
-                        Label("清除当前账号缓存", systemImage: "trash")
-                    }
-                    .disabled(isLoadingCacheUsage || isManagingCache || cacheUsage.totalByteCount == 0)
-
-                    if let cacheStatusMessage {
-                        Text(cacheStatusMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Text("只会清理这个账号的应用缓存：先处理临时下载，再按最近使用顺序处理预览、缩略图和元数据；不会删除系统照片或 MyNAS 原件。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
 
                 Section("关于") {
                     LabeledContent("应用", value: "MyNAS Photos")
-                    LabeledContent("当前开发目标", value: "阶段 I · 本地可删除搜索索引")
+                    LabeledContent("版本", value: appVersionText)
+                    LabeledContent("数据位置", value: "iPhone 与你的 MyNAS")
                 }
             }
+            .listStyle(.insetGrouped)
             .navigationTitle("设置")
-            .sheet(isPresented: $isConnectionPresented) {
-                MyNASConnectionView()
-                    .environmentObject(accountStore)
-            }
-            .confirmationDialog(
-                "清除当前账号缓存？",
-                isPresented: $showsClearCacheConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button("清除缓存", role: .destructive) {
-                    Task { await clearCurrentAccountCache() }
-                }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("这会清除当前账号的临时下载、预览、缩略图和元数据缓存。系统照片和 MyNAS 原件不会受到影响。")
-            }
-            .alert(
-                "无法管理缓存",
-                isPresented: Binding(
-                    get: { cacheError != nil },
-                    set: { if !$0 { cacheError = nil } }
-                )
-            ) {
-                Button("好", role: .cancel) { cacheError = nil }
-            } message: {
-                Text(cacheError ?? "")
-            }
-            .task(id: accountStore.current.accountID) {
-                await monitorServerTemperature()
-            }
-            .task(id: "cache-\(accountStore.current.accountID)") {
-                await refreshCacheUsage()
-            }
         }
     }
 
-    private var currentServerName: String {
+    private var myNASStatus: String {
         accountStore.current.serverURL?.host() ?? "尚未连接"
     }
 
@@ -305,13 +129,6 @@ struct SettingsView: View {
             for: accountStore.current.accountID,
             assets: assets
         )
-    }
-
-    private var selectedVolumeName: String {
-        guard let selectedID = accountStore.current.selectedVolumeID else {
-            return accountStore.current.isLocalOnly ? "将在连接后选择" : "尚未选择"
-        }
-        return accountStore.current.availableVolumes.first { $0.id == selectedID }?.name ?? selectedID
     }
 
     private var permissionText: String {
@@ -323,12 +140,327 @@ struct SettingsView: View {
         }
     }
 
-    private var cachePathText: String {
+    private var appVersionText: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "—"
+        let build = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String
+        guard let build, !build.isEmpty, build != version else { return version }
+        return "\(version) (\(build))"
+    }
+
+}
+
+private struct SettingsDestinationRow: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    let tint: Color
+
+    init(
+        title: String,
+        detail: String,
+        systemImage: String,
+        tint: Color = .accentColor
+    ) {
+        self.title = title
+        self.detail = detail
+        self.systemImage = systemImage
+        self.tint = tint
+    }
+
+    var body: some View {
+        HStack(spacing: MyPhotosMetrics.standardSpacing) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(tint)
+                .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .foregroundStyle(.primary)
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct PhotoLibrarySettingsView: View {
+    @EnvironmentObject private var accountStore: AccountStore
+    let authorization: PhotoAuthorizationState
+    let onManageLimited: () -> Void
+    @AppStorage("photoTimelineShowsUnified") private var showsUnifiedTimeline = true
+
+    var body: some View {
+        List {
+            Section {
+                LabeledContent("Photos 权限", value: permissionText)
+
+                if authorization == .limited {
+                    Label("当前仅可访问部分照片", systemImage: "rectangle.badge.person.crop")
+                        .foregroundStyle(.secondary)
+                    Button("管理允许访问的照片", action: onManageLimited)
+                }
+            } header: {
+                Text("访问")
+            } footer: {
+                Text("MyNAS Photos 只显示系统授权的照片和视频。缩略图不会下载 iCloud 完整原件。")
+            }
+
+            if !accountStore.current.isLocalOnly {
+                Section {
+                    Toggle(isOn: $showsUnifiedTimeline) {
+                        Label("统一时间线", systemImage: "rectangle.3.group.bubble.left")
+                    }
+                } header: {
+                    Text("显示")
+                } footer: {
+                    Text("同时显示本机与 MyNAS 项目。只会合并经 MyNAS 确认且仍匹配当前本机版本的项目；此开关不传输或删除照片。")
+                }
+            }
+        }
+        .navigationTitle("照片库")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var permissionText: String {
+        switch authorization {
+        case .authorized: "完整访问"
+        case .limited: "部分照片"
+        case .notDetermined: "未请求"
+        case .denied: "已关闭"
+        }
+    }
+}
+
+private struct MyNASSettingsView: View {
+    @EnvironmentObject private var accountStore: AccountStore
+    private let connectionService = MyNASConnectionService()
+    @State private var isConnectionPresented = false
+    @State private var serverTemperatureC: Double?
+    @State private var isTemperatureLoading = false
+    @State private var isRefreshingConnection = false
+    @State private var connectionRefreshError: String?
+
+    var body: some View {
+        List {
+            Section {
+                MyNASConnectionSummary(
+                    serverName: currentServerName,
+                    accountName: accountStore.current.displayName,
+                    volumeName: selectedVolumeName,
+                    isConnected: !accountStore.current.isLocalOnly,
+                    temperatureC: serverTemperatureC,
+                    isTemperatureLoading: isTemperatureLoading
+                )
+            }
+
+            Section("连接") {
+                if accountStore.current.isLocalOnly {
+                    Button {
+                        isConnectionPresented = true
+                    } label: {
+                        Label("连接 MyNAS", systemImage: "externaldrive.badge.plus")
+                    }
+                } else {
+                    Button {
+                        Task { await refreshConnection() }
+                    } label: {
+                        Label(
+                            isRefreshingConnection ? "正在刷新连接信息…" : "刷新连接信息",
+                            systemImage: "arrow.clockwise"
+                        )
+                    }
+                    .disabled(isRefreshingConnection)
+
+                    Button {
+                        isConnectionPresented = true
+                    } label: {
+                        Label("添加另一台 MyNAS", systemImage: "externaldrive.badge.plus")
+                    }
+                }
+
+                if let connectionRefreshError {
+                    MyPhotosInlineNotice(
+                        title: "连接信息未更新",
+                        message: connectionRefreshError,
+                        systemImage: "exclamationmark.triangle.fill",
+                        tone: .danger
+                    )
+                }
+            }
+
+            if accountStore.accounts.count > 1 {
+                Section("切换账号") {
+                    ForEach(accountStore.accounts) { account in
+                        AccountSwitcherRow(
+                            account: account,
+                            isCurrent: account.accountID == accountStore.current.accountID,
+                            onActivate: { accountStore.activate(account) }
+                        )
+                    }
+                }
+            }
+        }
+        .navigationTitle("MyNAS")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $isConnectionPresented) {
+            MyNASConnectionView()
+                .environmentObject(accountStore)
+        }
+        .task(id: accountStore.current.accountID) {
+            await monitorServerTemperature()
+        }
+    }
+
+    private var currentServerName: String {
+        accountStore.current.serverURL?.host() ?? "尚未连接"
+    }
+
+    private var selectedVolumeName: String {
+        guard let selectedID = accountStore.current.selectedVolumeID else {
+            return accountStore.current.isLocalOnly ? "将在连接后选择" : "尚未选择"
+        }
+        return accountStore.current.availableVolumes.first { $0.id == selectedID }?.name ?? selectedID
+    }
+
+    private func monitorServerTemperature() async {
+        serverTemperatureC = nil
+        guard let serverURL = accountStore.current.serverURL else {
+            isTemperatureLoading = false
+            return
+        }
+
+        isTemperatureLoading = true
+        while !Task.isCancelled {
+            do {
+                let health = try await connectionService.health(from: serverURL)
+                serverTemperatureC = health.temperatureC
+            } catch {
+                serverTemperatureC = nil
+            }
+            isTemperatureLoading = false
+            do {
+                try await Task.sleep(for: .seconds(5))
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func refreshConnection() async {
+        guard let serverURL = accountStore.current.serverURL else { return }
+
+        isRefreshingConnection = true
+        connectionRefreshError = nil
+        defer { isRefreshingConnection = false }
+
         do {
-            return try cacheDirectories.existingRootDirectory(for: accountStore.current)?.path
-                ?? "将在首次写入缓存时创建"
+            let result = try await connectionService.connect(
+                address: serverURL.absoluteString,
+                expectedServerID: accountStore.current.serverID
+            )
+            accountStore.saveConnectedAccount(result.account)
         } catch {
-            return "缓存目录暂不可用"
+            connectionRefreshError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+        }
+    }
+}
+
+private struct CacheSettingsView: View {
+    @EnvironmentObject private var accountStore: AccountStore
+    private let cacheManager = RemotePhotoCacheManager()
+    private let retainedCacheLimit: Int64 = 256 * 1024 * 1024
+    @State private var cacheUsage: RemotePhotoCacheUsage = .empty
+    @State private var isLoadingCacheUsage = false
+    @State private var isManagingCache = false
+    @State private var showsClearCacheConfirmation = false
+    @State private var cacheStatusMessage: String?
+    @State private var cacheError: String?
+
+    var body: some View {
+        List {
+            Section("当前账号") {
+                LabeledContent("缓存占用", value: cacheUsageText)
+                LabeledContent("缓存条目", value: "\(cacheUsage.entryCount)")
+
+                if isLoadingCacheUsage || isManagingCache {
+                    HStack(spacing: 9) {
+                        ProgressView()
+                        Text(isManagingCache ? "正在管理缓存…" : "正在统计缓存…")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Button {
+                    Task { await refreshCacheUsage() }
+                } label: {
+                    Label("刷新缓存统计", systemImage: "arrow.clockwise")
+                }
+                .disabled(isLoadingCacheUsage || isManagingCache)
+            }
+
+            Section {
+                Button {
+                    Task { await trimCacheToRetainedLimit() }
+                } label: {
+                    Label("清理至 256 MB", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                }
+                .disabled(isLoadingCacheUsage || isManagingCache || cacheUsage.totalByteCount <= retainedCacheLimit)
+
+                Button(role: .destructive) {
+                    showsClearCacheConfirmation = true
+                } label: {
+                    Label("清除当前账号缓存", systemImage: "trash")
+                }
+                .disabled(isLoadingCacheUsage || isManagingCache || cacheUsage.totalByteCount == 0)
+
+                if let cacheStatusMessage {
+                    Text(cacheStatusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("清理")
+            } footer: {
+                Text("只清理可重新下载的预览、缩略图和元数据，不会删除系统照片、MyNAS 原件或本地索引。")
+            }
+        }
+        .navigationTitle("缓存")
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: "cache-\(accountStore.current.accountID)") {
+            await refreshCacheUsage()
+        }
+        .confirmationDialog(
+            "清除当前账号缓存？",
+            isPresented: $showsClearCacheConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("清除缓存", role: .destructive) {
+                Task { await clearCurrentAccountCache() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("会清除临时下载、预览、缩略图和元数据缓存；系统照片、MyNAS 原件与本地索引不会受到影响。")
+        }
+        .alert(
+            "无法管理缓存",
+            isPresented: Binding(
+                get: { cacheError != nil },
+                set: { if !$0 { cacheError = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) { cacheError = nil }
+        } message: {
+            Text(cacheError ?? "")
         }
     }
 
@@ -377,7 +509,7 @@ struct SettingsView: View {
             guard account.accountID == accountStore.current.accountID else { return }
             cacheUsage = result.remainingUsage
             cacheStatusMessage = result.removedEntryCount == 0
-                ? "缓存已在 256 MB 保留范围内。"
+                ? "缓存已在保留范围内。"
                 : "已清理 \(result.removedEntryCount) 项旧缓存，释放 \(ByteCountFormatter.string(fromByteCount: result.removedByteCount, countStyle: .file))。"
         } catch {
             guard account.accountID == accountStore.current.accountID else { return }
@@ -407,48 +539,119 @@ struct SettingsView: View {
             cacheError = error.localizedDescription
         }
     }
+}
 
-    private func monitorServerTemperature() async {
-        serverTemperatureC = nil
-        guard let serverURL = accountStore.current.serverURL else {
-            isTemperatureLoading = false
-            return
-        }
+private struct AccountSwitcherRow: View {
+    let account: AccountContext
+    let isCurrent: Bool
+    let onActivate: () -> Void
 
-        isTemperatureLoading = true
-        while !Task.isCancelled {
-            do {
-                let health = try await connectionService.health(from: serverURL)
-                serverTemperatureC = health.temperatureC
-            } catch {
-                serverTemperatureC = nil
-            }
-            isTemperatureLoading = false
-            do {
-                try await Task.sleep(for: .seconds(5))
-            } catch {
-                return
+    var body: some View {
+        Button(action: onActivate) {
+            HStack {
+                AccountAvatar(name: account.displayName, diameter: 36)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(account.displayName)
+                        .foregroundStyle(.primary)
+                    Text(account.serverURL?.host() ?? "仅本地图库")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isCurrent {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.tint)
+                }
             }
         }
+        .accessibilityLabel("\(account.displayName)，\(isCurrent ? "当前账号" : "切换账号")")
     }
+}
 
-    private func refreshConnection() async {
-        guard let serverURL = accountStore.current.serverURL else { return }
+private struct BackupSettingsSummary: View {
+    let progress: PhotoBackupProgressSnapshot
+    let headline: String
 
-        isRefreshingConnection = true
-        connectionRefreshError = nil
-        defer { isRefreshingConnection = false }
+    var body: some View {
+        HStack(alignment: .top, spacing: MyPhotosMetrics.standardSpacing) {
+            Image(systemName: "arrow.up.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .symbolEffect(.pulse, isActive: progress.isRunning)
+                .frame(width: 30, height: 30)
 
-        do {
-            let result = try await connectionService.connect(
-                address: serverURL.absoluteString,
-                expectedServerID: accountStore.current.serverID
-            )
-            accountStore.saveConnectedAccount(result.account)
-        } catch {
-            connectionRefreshError = (error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription
+            VStack(alignment: .leading, spacing: MyPhotosMetrics.compactSpacing) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("照片与视频备份")
+                        .font(.headline)
+                    Spacer(minLength: MyPhotosMetrics.compactSpacing)
+                    Text("\(progress.percentage)%")
+                        .font(.headline)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                }
+
+                ProgressView(value: progress.fractionCompleted)
+
+                Text("原件已安全上传 \(progress.countText) 项")
+                    .font(.subheadline)
+                Text(headline)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .padding(.vertical, 6)
+    }
+}
+
+private struct MyNASConnectionSummary: View {
+    let serverName: String
+    let accountName: String
+    let volumeName: String
+    let isConnected: Bool
+    let temperatureC: Double?
+    let isTemperatureLoading: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: MyPhotosMetrics.standardSpacing) {
+            Image(systemName: isConnected ? "externaldrive.fill" : "externaldrive")
+                .font(.title2)
+                .foregroundStyle(isConnected ? Color.accentColor : Color.secondary)
+                .frame(width: 30, height: 30)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(serverName)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Spacer(minLength: MyPhotosMetrics.compactSpacing)
+                    MyPhotosStatusBadge(
+                        title: isConnected ? "已连接" : "仅本机",
+                        systemImage: isConnected ? "checkmark.circle.fill" : "iphone",
+                        tone: isConnected ? .success : .neutral
+                    )
+                }
+
+                Text(accountName)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text("存储盘：\(volumeName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if isConnected {
+                    ServerTemperatureBadge(
+                        temperatureC: temperatureC,
+                        isLoading: isTemperatureLoading
+                    )
+                    .padding(.top, 2)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
     }
 }
 
