@@ -141,7 +141,7 @@ final class PhotoAnalysisQueueStoreTests: XCTestCase {
         }
     }
 
-    func testDisableDeletesQueueAndAccountCacheClearRevokesConsent() async throws {
+    func testDisableDeletesQueueAndAccountCacheClearPreservesConsent() async throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let provider = CacheDirectoryProvider(applicationSupportRootOverride: root)
@@ -165,7 +165,8 @@ final class PhotoAnalysisQueueStoreTests: XCTestCase {
         )
         _ = try await RemotePhotoCacheManager(directories: provider).clear(account: account)
         let statusAfterCacheClear = try await store.status(for: account)
-        XCTAssertEqual(statusAfterCacheClear, .disabled)
+        XCTAssertTrue(statusAfterCacheClear.isPixelAnalysisAllowed)
+        XCTAssertEqual(statusAfterCacheClear.pendingAssetCount, 1)
     }
 
     func testCorruptedOrDuplicateQueueFailsClosedAndCanBeRemoved() async throws {

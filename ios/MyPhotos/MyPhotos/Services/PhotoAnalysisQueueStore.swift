@@ -53,8 +53,9 @@ actor PhotoAnalysisQueueStore {
     }
 
     /// Revoking consent removes every account-local artefact below this
-    /// consent namespace, including dependent OCR data added by later Phase I
-    /// work. It never reaches into the system photo library or MyNAS storage.
+    /// consent namespace, including dependent OCR and semantic-vector data.
+    /// It never reaches into the system photo library, MyNAS storage, or the
+    /// separately installed shared model package.
     @discardableResult
     func disableAndDelete(for account: AccountContext) throws -> PhotoAnalysisQueueStatus {
         try removeAnalysisArtifacts(for: account)

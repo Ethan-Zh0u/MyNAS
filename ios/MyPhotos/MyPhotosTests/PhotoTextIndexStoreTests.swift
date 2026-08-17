@@ -27,6 +27,49 @@ final class PhotoTextIndexStoreTests: XCTestCase {
         XCTAssertEqual(enabled.indexedAssetCount, 0)
     }
 
+    func testLegacyOCRConsentRequiresExplicitICloudDownloadRenewal() async throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = CacheDirectoryProvider(applicationSupportRootOverride: root)
+        let account = makeAccount(id: "account-a", userID: "user-a")
+        let pixelConsent = PhotoAnalysisQueueStore(directories: provider)
+        let store = PhotoTextIndexStore(directories: provider, pixelAnalysisConsent: pixelConsent)
+        _ = try await pixelConsent.enablePixelAnalysis(for: account)
+
+        let legacyRecord = PhotoTextIndexRecord(
+            assetID: "legacy-photo",
+            sourceVersion: "legacy-source",
+            processorRevision: PhotoTextIndexStore.processorRevision,
+            recognizedText: "旧版文字",
+            indexedAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        let legacySnapshot = PhotoTextIndexSnapshot(
+            schemaVersion: PhotoTextIndexStore.schemaVersion,
+            processorRevision: PhotoTextIndexStore.processorRevision,
+            consentRevision: "local-ocr-consent-v1",
+            accountID: account.accountID,
+            serverID: account.serverID,
+            userID: account.userID,
+            lastSynchronizedAt: legacyRecord.indexedAt,
+            records: [legacyRecord]
+        )
+        let indexURL = try provider.directory(for: account, kind: .analysisQueue)
+            .appendingPathComponent("vision-ocr-index-v1.json")
+        try JSONEncoder().encode(legacySnapshot).write(to: indexURL)
+
+        let renewal = try await store.status(for: account)
+        XCTAssertFalse(renewal.isEnabled)
+        XCTAssertTrue(renewal.requiresICloudDownloadConsent)
+        XCTAssertEqual(renewal.indexedAssetCount, 0)
+
+        let renewed = try await store.enable(for: account)
+        XCTAssertTrue(renewed.isEnabled)
+        XCTAssertFalse(renewed.requiresICloudDownloadConsent)
+        XCTAssertEqual(renewed.indexedAssetCount, 0)
+        let staleMatches = try await store.search("旧版", for: account)
+        XCTAssertTrue(staleMatches.isEmpty)
+    }
+
     func testOCRPersistsOnlyAccountBoundTextAndValueMetadata() async throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

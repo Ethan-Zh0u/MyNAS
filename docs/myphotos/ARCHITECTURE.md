@@ -51,7 +51,7 @@ SwiftUI（本地时间线 / 设置 / 连接 / 手动备份）
 
 2026-08-04 的另一条真实 G2 传输完成了低电量中断路径：任务传输中开启低电量模式即暂停，关闭后无需点备份或重试便以 MyNAS-confirmed 位置自动续传，最终显示“原件已安全上传”。它验证了策略暂停/恢复与登记册重接的这一条真机路径，但不承诺系统会在 App 挂起时立即断开 socket，也不覆盖服务重启、账号/卷、iCloud-only 或长队列。
 
-`PHAsset` 仅在 `PhotoLibraryClient` 内使用；UI 传递的是 Sendable 的 `LocalPhotoAsset` 值。网格缩略图使用 `PHCachingImageManager` 与 `isNetworkAccessAllowed = false`，显式备份资源导出才允许 iCloud 下载。
+`PHAsset` 仅在 `PhotoLibraryClient` 内使用；UI 传递的是 Sendable 的 `LocalPhotoAsset` 值。网格缩略图使用 `PHCachingImageManager` 与 `isNetworkAccessAllowed = false`；显式备份资源导出和独立确认过的 OCR 允许 iCloud 下载。OCR 仍只请求最多 2,048 px 的渲染图、串行交给设备端 Vision，绝不把图像或文字上传到 MyNAS。
 
 2026-08-04 起，G2 还把系统上传的 in-flight 字节呈现与持久状态分开：background URLSession 的发送回调只生成内存中的、受当前已登记分片上限约束的显示值，供当前前台卡片推进。它既不改写 MyNAS 权威的 received bytes，也不写回持久队列；App 重开、任务不匹配或超出分片范围时一律只显示已由 MyNAS 确认的位置。卡片会明确标明该部分“等待 MyNAS 确认”，而“原件已安全上传”仍只来自完整 outcome。首轮真机一度长期静止并在结束时跳至 100%，但同一实际 G2 传输随后已确认在完成前连续更新，故实时呈现的真机观察通过。普通前台启动还会为当前账号的已登记 `transferring` 任务重建其固定 session，以便系统继续向新进程投递委托回调；此加固不创建请求、不改确认偏移，待本地回归。
 

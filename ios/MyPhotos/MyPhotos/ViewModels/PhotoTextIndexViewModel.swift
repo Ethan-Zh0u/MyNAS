@@ -13,6 +13,13 @@ final class PhotoTextIndexViewModel: ObservableObject {
     private let recognizer: VisionTextRecognitionCoordinator
     private var activeAccountIdentity: String?
     private var activeQuery = ""
+    private var automaticSynchronizationRequest: AutomaticSynchronizationRequest?
+    private var isRunningAutomaticSynchronization = false
+
+    private struct AutomaticSynchronizationRequest {
+        let account: AccountContext
+        let photoClient: PhotoLibraryClient
+    }
 
     init(
         store: PhotoTextIndexStore = PhotoTextIndexStore(),
@@ -76,6 +83,25 @@ final class PhotoTextIndexViewModel: ObservableObject {
             photoClient: photoClient,
             enablesIndex: false
         )
+    }
+
+    /// Coalesces lifecycle and PhotoKit-change triggers into full-library,
+    /// incremental OCR work. A new trigger received while Vision is busy is
+    /// retained and runs immediately afterward, so a large iCloud library is
+    /// never skipped just because another update was already in flight.
+    func requestAutomaticSynchronization(
+        account: AccountContext,
+        photoClient: PhotoLibraryClient
+    ) {
+        automaticSynchronizationRequest = AutomaticSynchronizationRequest(
+            account: account,
+            photoClient: photoClient
+        )
+        guard !isRunningAutomaticSynchronization else { return }
+        isRunningAutomaticSynchronization = true
+        Task { @MainActor [weak self] in
+            await self?.runAutomaticSynchronization()
+        }
     }
 
     func updateQuery(_ query: String, account: AccountContext) async {
@@ -143,7 +169,10 @@ final class PhotoTextIndexViewModel: ObservableObject {
                 _ = try await self.store.enable(for: account)
             }
             let candidates = try await self.store.assetsNeedingRecognition(from: assets, for: account)
-            let outputs = await self.recognizer.recognize(assets: candidates, photoClient: photoClient)
+            let outputs = try await self.recognizer.recognize(
+                assets: candidates,
+                photoClient: photoClient
+            )
             let result = try await self.store.synchronize(
                 assets: assets,
                 outputs: outputs,
@@ -192,10 +221,38 @@ final class PhotoTextIndexViewModel: ObservableObject {
         }
     }
 
+    private func runAutomaticSynchronization() async {
+        defer { isRunningAutomaticSynchronization = false }
+
+        while !Task.isCancelled, let request = automaticSynchronizationRequest {
+            automaticSynchronizationRequest = nil
+            let identity = Self.identity(for: request.account)
+            await load(account: request.account)
+            guard activeAccountIdentity == identity, status.isEnabled else { continue }
+
+            // A foreground/manual update owns the same serial Vision path.
+            // Wait rather than discard this automatic trigger.
+            while isWorking && !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            guard !Task.isCancelled else { return }
+            if automaticSynchronizationRequest != nil { continue }
+
+            let assets = await request.photoClient.allAccessibleAssets()
+            guard activeAccountIdentity == identity else { continue }
+            if automaticSynchronizationRequest != nil { continue }
+            await synchronize(
+                assets: assets,
+                account: request.account,
+                photoClient: request.photoClient
+            )
+        }
+    }
+
     private static func synchronizedMessage(for result: PhotoTextIndexSyncResult) -> String {
-        var message = "已建立 OCR 索引 \(result.status.indexedAssetCount) 项：新增 \(result.insertedCount)、更新 \(result.updatedCount)、移除 \(result.removedCount)。"
+        var message = "已更新 OCR 索引 \(result.status.indexedAssetCount) 项：新增 \(result.insertedCount)、更新 \(result.updatedCount)、移除 \(result.removedCount)。"
         if result.deferredAssetCount > 0 {
-            message += " \(result.deferredAssetCount) 项未取得本机图片，未下载 iCloud 原件。"
+            message += " \(result.deferredAssetCount) 项暂时无法从 Photos 读取，将在下次自动更新或手动更新时重试。"
         }
         return message
     }

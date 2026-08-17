@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -172,6 +173,92 @@ func TestPhotosPairingRejectsUntrustedOrMissingOrigin(t *testing.T) {
 		app.photosPairing(recorder, tailscaleRequest(http.MethodGet, "/api/v1/photos/pairing"))
 		if recorder.Code != http.StatusServiceUnavailable {
 			t.Fatalf("origin %q returned %d, want %d", origin, recorder.Code, http.StatusServiceUnavailable)
+		}
+	}
+}
+
+func TestSemanticModelEndpointsRequireOwnerAndServeOnlyPinnedFiles(t *testing.T) {
+	app := newPhotosPhase2TestApp(t)
+
+	unauthorized := httptest.NewRecorder()
+	app.photosSemanticModelManifest(unauthorized, httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/photos/models/qwen3-vl-embedding-2b/manifest",
+		nil,
+	))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized manifest status=%d", unauthorized.Code)
+	}
+
+	missing := httptest.NewRecorder()
+	app.photosSemanticModelManifest(missing, tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/models/qwen3-vl-embedding-2b/manifest",
+	))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing model status=%d", missing.Code)
+	}
+
+	makePinnedSemanticModelPackage(t, app)
+	manifestRecorder := httptest.NewRecorder()
+	app.photosSemanticModelManifest(manifestRecorder, tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/models/qwen3-vl-embedding-2b/manifest",
+	))
+	if manifestRecorder.Code != http.StatusOK {
+		t.Fatalf("manifest status=%d body=%s", manifestRecorder.Code, manifestRecorder.Body.String())
+	}
+	var manifest photosSemanticModelManifestResponse
+	if err := json.NewDecoder(manifestRecorder.Body).Decode(&manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ServerID != app.serverID || manifest.ModelID != photosSemanticModelID ||
+		len(manifest.Manifest.Files) != len(pinnedQwen3VLEmbedding2BInt8Manifest.Files) {
+		t.Fatalf("unexpected manifest: %#v", manifest)
+	}
+
+	fileRequest := tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/models/qwen3-vl-embedding-2b/files/config.json",
+	)
+	fileRequest.Header.Set("Range", "bytes=0-0")
+	fileRecorder := httptest.NewRecorder()
+	app.photosSemanticModelFile(fileRecorder, fileRequest)
+	if fileRecorder.Code != http.StatusPartialContent || fileRecorder.Body.Len() != 1 {
+		t.Fatalf("file status=%d length=%d", fileRecorder.Code, fileRecorder.Body.Len())
+	}
+	if fileRecorder.Header().Get("Accept-Ranges") != "bytes" {
+		t.Fatal("model files must support resumable HTTP ranges")
+	}
+
+	unknown := httptest.NewRecorder()
+	app.photosSemanticModelFile(unknown, tailscaleRequest(
+		http.MethodGet,
+		"/api/v1/photos/models/qwen3-vl-embedding-2b/files/../../mynas.db",
+	))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown model file status=%d", unknown.Code)
+	}
+}
+
+func makePinnedSemanticModelPackage(t *testing.T, app *App) {
+	t.Helper()
+	directory := app.semanticModelDirectory()
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range pinnedQwen3VLEmbedding2BInt8Manifest.Files {
+		path := filepath.Join(directory, entry.RelativePath)
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = file.Truncate(entry.ByteCount); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err = file.Close(); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
